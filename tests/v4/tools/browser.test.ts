@@ -4,16 +4,33 @@ vi.mock('../../../core/playwrightBridge', () => ({
   pwScreenshot: vi.fn(),
   pwSnapshot: vi.fn(),
   pwGetUrl: vi.fn(),
+  pwNavigate: vi.fn(),
+  pwClick: vi.fn(),
+  pwClickFirstResult: vi.fn(),
+  pwType: vi.fn(),
+  pwScroll: vi.fn(),
+  pwClose: vi.fn(),
 }));
 
 import {
   pwScreenshot,
   pwSnapshot,
   pwGetUrl,
+  pwNavigate,
+  pwClick,
+  pwType,
+  pwScroll,
+  pwClose,
 } from '../../../core/playwrightBridge';
 import { browserScreenshotTool } from '../../../tools/v4/browser/browserScreenshot';
 import { browserExtractTool } from '../../../tools/v4/browser/browserExtract';
 import { browserGetUrlTool } from '../../../tools/v4/browser/browserGetUrl';
+import { browserNavigateTool } from '../../../tools/v4/browser/browserNavigate';
+import { browserClickTool } from '../../../tools/v4/browser/browserClick';
+import { browserTypeTool } from '../../../tools/v4/browser/browserType';
+import { browserFillTool } from '../../../tools/v4/browser/browserFill';
+import { browserScrollTool } from '../../../tools/v4/browser/browserScroll';
+import { browserCloseTool } from '../../../tools/v4/browser/browserClose';
 import { resolveAidenPaths } from '../../../core/v4/paths';
 import type { ToolContext } from '../../../core/v4/toolRegistry';
 
@@ -114,5 +131,84 @@ describe('browser tools', () => {
     };
     expect(result.success).toBe(false);
     expect(result.error).toBe('no page');
+  });
+
+  it('8. browser_navigate calls pwNavigate and reports new url', async () => {
+    (pwNavigate as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      ok: true,
+      url: 'https://example.com/landed',
+    });
+    const r = (await browserNavigateTool.execute(
+      { url: 'https://example.com' },
+      ctx,
+    )) as { success: boolean; url: string };
+    expect(r.success).toBe(true);
+    expect(r.url).toBe('https://example.com/landed');
+    expect(pwNavigate).toHaveBeenCalledWith('https://example.com');
+  });
+
+  it('9. browser_click forwards selector to pwClick', async () => {
+    (pwClick as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: true });
+    const r = (await browserClickTool.execute(
+      { target: 'button.submit' },
+      ctx,
+    )) as { success: boolean };
+    expect(r.success).toBe(true);
+    expect(pwClick).toHaveBeenCalledWith('button.submit');
+  });
+
+  it('10. browser_type fills the selector', async () => {
+    (pwType as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: true });
+    const r = (await browserTypeTool.execute(
+      { selector: 'input[name=q]', text: 'aiden' },
+      ctx,
+    )) as { success: boolean };
+    expect(r.success).toBe(true);
+    expect(pwType).toHaveBeenCalledWith('input[name=q]', 'aiden');
+  });
+
+  it('11. browser_fill iterates over fields', async () => {
+    (pwType as ReturnType<typeof vi.fn>)
+      .mockResolvedValueOnce({ ok: true })
+      .mockResolvedValueOnce({ ok: true });
+    const r = (await browserFillTool.execute(
+      { fields: { '#email': 'a@b.c', '#name': 'Aiden' } },
+      ctx,
+    )) as { success: boolean; count: number };
+    expect(r.success).toBe(true);
+    expect(r.count).toBe(2);
+    expect(pwType).toHaveBeenCalledTimes(2);
+  });
+
+  it('12. browser_scroll forwards direction and amount', async () => {
+    (pwScroll as ReturnType<typeof vi.fn>).mockResolvedValueOnce({ ok: true });
+    const r = (await browserScrollTool.execute(
+      { direction: 'down', amount: 800 },
+      ctx,
+    )) as { success: boolean };
+    expect(r.success).toBe(true);
+    expect(pwScroll).toHaveBeenCalledWith('down', 800, undefined);
+  });
+
+  it('13. browser_close calls pwClose', async () => {
+    (pwClose as ReturnType<typeof vi.fn>).mockResolvedValueOnce(undefined);
+    const r = (await browserCloseTool.execute({}, ctx)) as { success: boolean };
+    expect(r.success).toBe(true);
+    expect(pwClose).toHaveBeenCalled();
+  });
+
+  it('14. all six write tools are mutates=true, browser-category', () => {
+    for (const tool of [
+      browserNavigateTool,
+      browserClickTool,
+      browserTypeTool,
+      browserFillTool,
+      browserScrollTool,
+      browserCloseTool,
+    ]) {
+      expect(tool.category).toBe('browser');
+      expect(tool.mutates).toBe(true);
+      expect(tool.toolset).toBe('browser');
+    }
   });
 });
