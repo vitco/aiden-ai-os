@@ -58,6 +58,10 @@ import { processLogReadTool } from './process/processLogRead';
 import { processKillTool } from './process/processKill';
 import { processWaitTool } from './process/processWait';
 
+import { memoryAddTool } from './memory/memoryAdd';
+import { memoryReplaceTool } from './memory/memoryReplace';
+import { memoryRemoveTool } from './memory/memoryRemove';
+
 /**
  * Register every read-only tool into `registry`. The
  * `lookup_tool_schema` tool needs a registry reference, so it's
@@ -117,6 +121,12 @@ export function registerWriteTools(registry: ToolRegistry): void {
   registry.register(processLogReadTool);
   registry.register(processKillTool);
   registry.register(processWaitTool);
+
+  // Phase 9: memory write tools (gated by MemoryGuard for read-back
+  // verification, then by the approval engine like every other write).
+  registry.register(memoryAddTool);
+  registry.register(memoryReplaceTool);
+  registry.register(memoryRemoveTool);
 }
 
 /** Register every v4 tool. Most callers want this. */
@@ -159,3 +169,6 @@ export { processListTool } from './process/processList';
 export { processLogReadTool } from './process/processLogRead';
 export { processKillTool } from './process/processKill';
 export { processWaitTool } from './process/processWait';
+export { memoryAddTool } from './memory/memoryAdd';
+export { memoryReplaceTool } from './memory/memoryReplace';
+export { memoryRemoveTool } from './memory/memoryRemove';
