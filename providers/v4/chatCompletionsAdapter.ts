@@ -102,6 +102,110 @@ interface OpenAIResponse {
 const DEFAULT_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_RETRIES = 2;
 
+/**
+ * Phase 16b.2: detect Groq's `tool_use_failed` 400 — emitted when a
+ * Llama-3.3 fine-tune emits the legacy `<function=name({args})>` syntax
+ * instead of the OpenAI tool_calls envelope — and recover by parsing the
+ * raw generation into a synthetic `ProviderCallOutput` with one tool call.
+ *
+ * Returns null when the response doesn't match the recovery shape, in
+ * which case the caller falls through to the normal 400 throw.
+ *
+ * Exposed at module scope (not the class) so the unit test can drive it
+ * with hand-built JSON without spinning up an adapter + fetch mock.
+ */
+export function tryRecoverLegacyToolCall(
+  rawBody: string,
+): ProviderCallOutput | null {
+  if (!rawBody) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawBody);
+  } catch {
+    return null;
+  }
+  // Groq error shape:
+  //   { error: { code: 'tool_use_failed', failed_generation: '<function=...>', ... } }
+  const err = (parsed as { error?: { code?: string; failed_generation?: string } })?.error;
+  if (!err || err.code !== 'tool_use_failed') return null;
+  const generation = err.failed_generation;
+  if (typeof generation !== 'string' || !generation.includes('<function=')) {
+    return null;
+  }
+  return parseLegacyFunctionSyntax(generation);
+}
+
+/**
+ * Parse a single `<function=name({args})>` invocation into a synthetic
+ * `ProviderCallOutput` with one `ToolCallRequest`. Multiple legacy calls
+ * concatenated in one generation are best-effort — we recover what we can.
+ *
+ * Exported for unit tests.
+ */
+export function parseLegacyFunctionSyntax(
+  text: string,
+): ProviderCallOutput | null {
+  // Match `<function=NAME(JSON)>` non-greedily. The `JSON` body may itself
+  // contain `>` chars but the JSON object is balanced so we walk braces
+  // explicitly to find the closing one.
+  const reHead = /<function=([A-Za-z0-9_.\-]+)\(/g;
+  const calls: ToolCallRequest[] = [];
+  let match: RegExpExecArray | null;
+  let counter = 0;
+  while ((match = reHead.exec(text)) !== null) {
+    const name = match[1];
+    let i = match.index + match[0].length;
+    let depth = 1;
+    let start = i;
+    let inString = false;
+    let escape = false;
+    while (i < text.length && depth > 0) {
+      const ch = text[i];
+      if (escape) {
+        escape = false;
+      } else if (ch === '\\') {
+        escape = true;
+      } else if (inString) {
+        if (ch === '"') inString = false;
+      } else if (ch === '"') {
+        inString = true;
+      } else if (ch === '(') {
+        depth += 1;
+      } else if (ch === ')') {
+        depth -= 1;
+      }
+      i += 1;
+    }
+    if (depth !== 0) continue;
+    const argsBody = text.slice(start, i - 1);
+    let args: Record<string, unknown> = {};
+    if (argsBody.trim().length > 0) {
+      try {
+        const parsed = JSON.parse(argsBody);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          args = parsed as Record<string, unknown>;
+        }
+      } catch {
+        // Leave args as {} — the tool dispatcher will error gracefully and
+        // the model gets to retry with proper formatting.
+      }
+    }
+    counter += 1;
+    calls.push({
+      id: `legacy-fn-${counter}-${Date.now().toString(36)}`,
+      name,
+      arguments: args,
+    });
+  }
+  if (calls.length === 0) return null;
+  return {
+    content: null,
+    toolCalls: calls,
+    finishReason: 'tool_use',
+    usage: { inputTokens: 0, outputTokens: 0 },
+  };
+}
+
 export class ChatCompletionsAdapter implements ProviderAdapter {
   apiMode: ApiMode = 'chat_completions';
   private readonly baseUrl: string;
@@ -148,6 +252,15 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
 
         // Non-retryable: 4xx that's NOT 429 (request bugs).
         if (status >= 400 && status < 500 && status !== 429) {
+          // Phase 16b.2: Llama-3.3 fine-tunes sometimes emit the legacy
+          // `<function=name({args})>` syntax instead of OpenAI tool_calls.
+          // Groq surfaces this as a 400 with `tool_use_failed` and the raw
+          // generation in `failed_generation`. Parse it back into a
+          // synthetic tool_call so the loop survives the first message.
+          const recovered = tryRecoverLegacyToolCall(rawText);
+          if (recovered) {
+            return recovered;
+          }
           throw new ProviderError(
             `Provider ${this.providerName} returned ${status}: ${rawText.slice(0, 500)}`,
             this.providerName,

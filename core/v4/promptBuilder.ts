@@ -48,6 +48,34 @@ export interface PromptBuilderOptions {
   cwd?: string;
   /** When true, don't read SOUL.md from disk even if present. Used by tests. */
   skipFilesystem?: boolean;
+  /**
+   * Phase 16b.2: target model id (e.g. `llama-3.3-70b-versatile`). When the
+   * id matches `/llama-3.3/i`, an extra slot warns the model away from the
+   * legacy `<function=name({args})>` syntax some Llama-3.3 fine-tunes still
+   * emit by default. See `chatCompletionsAdapter` for the belt-and-braces
+   * recovery on the response side.
+   */
+  modelId?: string;
+}
+
+/**
+ * Phase 16b.2: Llama-3.3 fine-tunes (notably Groq's `llama-3.3-70b-versatile`)
+ * sometimes ignore the OpenAI tool_calls schema and emit
+ *   `<function=tool_name({"arg":"value"})>`
+ * inline. Groq returns HTTP 400 with `tool_use_failed` and the raw text
+ * lives in `failed_generation`. The prompt-side guard tells the model the
+ * right format up front; the adapter-side recovery handles the case where
+ * it ignores us anyway.
+ */
+const LLAMA_33_TOOL_CALL_HINT =
+  'When using tools, ALWAYS use the OpenAI tool_calls JSON format. ' +
+  'NEVER emit `<function=name({args})>` syntax inline in your text — that ' +
+  'is a legacy format that will be rejected.';
+
+/** Exposed for tests. */
+export function shouldInjectLlama33ToolHint(modelId: string | undefined): boolean {
+  if (!modelId) return false;
+  return /llama-?3\.3/i.test(modelId);
 }
 
 const DEFAULT_IDENTITY =
@@ -137,6 +165,15 @@ export class PromptBuilder {
           opts.initialBudget.used,
           opts.initialBudget.max,
         ),
+        optional: true,
+      });
+    }
+
+    // ── Slot 6.5: Llama-3.3 tool-call format hint (Phase 16b.2) ──────
+    if (shouldInjectLlama33ToolHint(opts.modelId)) {
+      slots.push({
+        name: 'llama33-tool-format',
+        content: LLAMA_33_TOOL_CALL_HINT,
         optional: true,
       });
     }

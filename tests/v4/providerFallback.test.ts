@@ -39,6 +39,17 @@ describe('isRateLimitError', () => {
     expect(isRateLimitError(null)).toBe(false);
     expect(isRateLimitError(undefined)).toBe(false);
   });
+  it('does NOT match Groq tool_use_failed 400 errors (Phase 16b.2)', () => {
+    // Llama-3.3 emitting `<function=...>` produces a 400 with code
+    // `tool_use_failed`. The chain MUST NOT advance — it's a model-format
+    // bug, not a quota issue. The chatCompletionsAdapter recovers it
+    // separately via tryRecoverLegacyToolCall.
+    const err = new Error(
+      "Provider groq returned 400: { code: 'tool_use_failed', failed_generation: '<function=foo({})>' }",
+    );
+    (err as unknown as { statusCode: number }).statusCode = 400;
+    expect(isRateLimitError(err)).toBe(false);
+  });
 });
 
 describe('maskKey', () => {
