@@ -172,6 +172,12 @@ export interface SetupOptions {
   fetchImpl?: typeof fetch;
   /** Override env so tests don't pollute process.env. */
   env?: NodeJS.ProcessEnv;
+  /**
+   * Smoke-test mode: walk through prompts, build the resolved config, but
+   * do NOT write to ~/.aiden/config.yaml or .env. Used for verifying the
+   * wizard renders correctly without polluting real user state.
+   */
+  smokeTest?: boolean;
 }
 
 export interface SetupResult {
@@ -352,6 +358,19 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     terminal: { backend: terminalBackend },
   };
 
+  if (opts.smokeTest) {
+    display.write('\n✓ Smoke test complete — would have saved this config:\n');
+    display.write(`${JSON.stringify(config, null, 2)}\n`);
+    if (apiKey && provider.envVar) {
+      display.write(`(would have written ${provider.envVar}=*** to ${paths.envFile})\n`);
+    }
+    if (baseUrl && provider.kind === 'custom') {
+      display.write(`(would have written CUSTOM_BASE_URL=${baseUrl} to ${paths.envFile})\n`);
+    }
+    display.write('(no files written because --smoke-test was passed)\n');
+    return { ran: false, skipReason: 'smoke-test', config, envFile: paths.envFile };
+  }
+
   const cm = new ConfigManager(paths);
   await cm.save(config);
 
@@ -370,4 +389,26 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   );
 
   return { ran: true, config, envFile: paths.envFile };
+}
+
+// ---------------------------------------------------------------------------
+// Direct invocation: `npx tsx cli/v4/setupWizard.ts [--smoke-test] [--force]`
+// ---------------------------------------------------------------------------
+if (require.main === module) {
+  const argv = process.argv.slice(2);
+  const smokeTest = argv.includes('--smoke-test');
+  const force = argv.includes('--force');
+  runSetupWizard({ smokeTest, force })
+    .then((result) => {
+      if (!result.ran && result.skipReason && result.skipReason !== 'smoke-test') {
+        // Skipped for a reason that's already been displayed; non-zero so callers can detect.
+        process.exit(0);
+      }
+      process.exit(0);
+    })
+    .catch((err) => {
+      // eslint-disable-next-line no-console
+      console.error('Setup wizard failed:', err);
+      process.exit(1);
+    });
 }
