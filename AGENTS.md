@@ -56,6 +56,28 @@ Single-loop agent replaces planner+responder split. ONE LLM. Tools called inside
 - New code requires new tests where applicable.
 - No phase advances with known regressions.
 
+### Integration test provider fallback
+
+Integration tests that need a real LLM use `getTestProvider()` from
+`tests/v4/_helpers/testProvider.ts` instead of hardcoding `GROQ_API_KEY`.
+The fallback chain is:
+
+1. `GROQ_API_KEY`     — primary, free tier, fast
+2. `GROQ_API_KEY_2`   — secondary Groq account
+3. `GROQ_API_KEY_3`   — tertiary Groq account
+4. `TOGETHER_API_KEY` — paid fallback (~$10 sprint budget — use sparingly)
+
+Tests skip cleanly only when **all four** are missing. Wrap test bodies
+with `withRateLimitFallback(fn, initialProvider)` to auto-retry on 429s
+across the chain — non-rate-limit errors propagate immediately so real
+bugs aren't hidden.
+
+Provider-specific adapter tests (`chatCompletionsAdapter.groq`,
+`chatCompletionsAdapter.together`, `runtimeResolver.real`) intentionally
+do NOT use the helper — they pin a specific provider on purpose.
+
+Optional model overrides: `GROQ_TEST_MODEL`, `TOGETHER_TEST_MODEL`.
+
 ## Common gotchas
 - `PACKAGE_ROOT` (npm install dir) vs `WORKSPACE_ROOT` (user data dir) — conflating these caused 3 failed releases.
 - npm dual-package atomic publish: `npm run release:npm` (`scripts/release-npm.ps1`).
