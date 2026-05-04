@@ -68,3 +68,96 @@ Single-loop agent replaces planner+responder split. ONE LLM. Tools called inside
 - `backup` = private repo (taracodlabs/Aiden-v4), ALL v4 work pushes here.
 - `v4-rewrite` branch is configured to default-push to `backup` only.
 - Public release happens later by merging backup/v4-rewrite into origin/main as one big release.
+
+## v4 CLI UX — design targets for Phase 14c
+
+The chat REPL in 14c implements three signature UX elements. These were locked in after reviewing Hermes's interface and choosing what's worth adopting:
+
+### 1. Boxed startup card (rendered once when chat session opens)
+
+```
+█████╗  ██╗██████╗ ███████╗███╗   ██╗
+██╔══██╗██║██╔══██╗██╔════╝████╗  ██║
+███████║██║██║  ██║█████╗  ██╔██╗ ██║
+██╔══██║██║██║  ██║██╔══╝  ██║╚██╗██║
+██║  ██║██║██████╔╝███████╗██║ ╚████║
+╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝
+
+╭─────────────────────────────────────────────────────────────────╮
+│  Aiden v4.0.0 · Taracod                                         │
+│                                                                 │
+│  Available Tools                                                │
+│   files: read, write, patch, delete, move, copy                 │
+│   web: search, fetch, deep_research                             │
+│   browser: navigate, click, type, screenshot, ...               │
+│   terminal: shell_exec (local + docker)                         │
+│   memory: add, replace, remove                                  │
+│   sessions: search, list                                        │
+│   process: spawn, kill, log_read, list, wait                    │
+│   skills: list, view, manage                                    │
+│   (and N more toolsets...)                                      │
+│                                                                 │
+│  Available Skills                                               │
+│   <category>: <skill1>, <skill2>, ... (truncated to fit)        │
+│   ... <total> skills across <category-count> categories         │
+│                                                                 │
+│  <provider> · <model>                                           │
+│  Session: <session-id>                                          │
+│                                                                 │
+│  <tool-count> tools · <skill-count> skills · /help for commands │
+╰─────────────────────────────────────────────────────────────────╯
+```
+
+Banner in brand orange `#FF6B35`. Box border in dim gray. Tool/skill names in default. Headers ("Available Tools", "Available Skills") in bold orange.
+
+### 2. Status line (bottom of input area, always visible)
+
+Format:
+```
+$ <provider>:<model>  ctx <used>/<max>  [<progress-bar>]  budget <used>/<max>  <session-age>
+```
+
+Example:
+```
+$ groq:llama-3.3-70b-versatile  ctx 4.2k/200k  [▓░░░░░░░░░] 2%  budget 3/90  3m
+```
+
+Updates after each turn. Renders below user input prompt, above the next available input line. Use box-drawing chars for separator.
+
+### 3. Slash command autocomplete dropdown
+
+When user types `/` in the chat input, show a filterable dropdown:
+
+```
+/provider                                                         _
+─────────────────────────────────────────────────────────────────
+/profile          Show active profile name and home directory
+/provider         Show available providers and current provider
+/personality      Set a predefined personality (usage: /personality [name])
+/plugins          List installed plugins and their status
+/paste            Check clipboard for an image and attach it
+⚡ /trading-alert  NSE swing trading alert workflow
+⚡ /research       Multi-source web research with summary
+```
+
+System slash commands: no icon, default color.
+Skill slash commands: `⚡` prefix in orange, name in default. (Skill commands come from Phase 10's `skillCommands.buildCommandMap()`.)
+
+Filter as user types. Arrow keys navigate. Enter selects. Esc dismisses.
+
+### 4. Inline error display
+
+Errors render with actionable suggestion below:
+```
+Unknown provider 'groq'. Run aiden model to pick a valid provider,
+or aiden doctor to diagnose config issues.
+```
+
+Red text for the error line, dim gray for the suggestion. No stack traces shown to user (logged separately).
+
+### Implementation notes for Phase 14c agent
+
+- Boxed card uses live data from RuntimeResolver (provider/model), SessionManager (session ID), ToolRegistry (tool count), SkillLoader (skill count)
+- Status line updates via callback hooks already wired in Phase 13 (onCompression, onBudgetWarning, totalUsage tracking)
+- Autocomplete dropdown can use `@inquirer/prompts` `search` prompt OR a custom prompt-toolkit-style overlay — agent's call based on what renders cleanly on Windows Terminal
+- Skill slash commands list comes from `core/v4/skillCommands.ts` `buildCommandMap()`

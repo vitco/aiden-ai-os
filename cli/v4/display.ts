@@ -32,11 +32,12 @@ export interface AgentTurnOptions {
 }
 
 const AIDEN_BANNER = String.raw`
-   _    _     _
-  / \  (_) __| | ___ _ __
- / _ \ | |/ _\` |/ _ \ '_ \
-/ ___ \| | (_| |  __/ | | |
-/_/   \_\_|\__,_|\___|_| |_|
+█████╗  ██╗██████╗ ███████╗███╗   ██╗
+██╔══██╗██║██╔══██╗██╔════╝████╗  ██║
+███████║██║██║  ██║█████╗  ██╔██╗ ██║
+██╔══██║██║██║  ██║██╔══╝  ██║╚██╗██║
+██║  ██║██║██████╔╝███████╗██║ ╚████║
+╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝
 `;
 
 export class Display {
@@ -59,7 +60,7 @@ export class Display {
   banner(version = '4.0.0'): string {
     const sk = this.skin;
     const lines = AIDEN_BANNER.split('\n').map((l) => sk.applyColors(l, 'brand'));
-    const tagline = sk.applyColors(`Aiden v${version} — your local-first agent`, 'accent');
+    const tagline = sk.applyColors(`Aiden v${version} — your local-first agent`, 'muted');
     const hint = sk.applyColors('Type /help to see what I can do.', 'muted');
     return `${lines.join('\n')}\n  ${tagline}\n  ${hint}\n`;
   }
