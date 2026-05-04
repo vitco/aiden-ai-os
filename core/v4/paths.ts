@@ -47,6 +47,12 @@ export interface AidenPaths {
   userMd: string;
   /** root/skills/ — bundled + user skills. */
   skillsDir: string;
+  /** root/personalities/ — user personality `.md` overlays (Phase 16). */
+  personalitiesDir: string;
+  /** root/skins/ — user skin `.yaml` themes (Phase 16). */
+  skinsDir: string;
+  /** root/.recent-commands.json — per-user slash command history (Phase 16). */
+  recentCommandsFile: string;
   /**
    * root/sessions/ — legacy file-based session jsonl directory.  Phase 6+
    * persists messages to sessions.db; this dir may remain empty but the
@@ -114,6 +120,9 @@ export function resolveAidenPaths(opts: ResolveAidenPathsOptions = {}): AidenPat
     memoryMd: path.join(root, 'memories', 'MEMORY.md'),
     userMd: path.join(root, 'memories', 'USER.md'),
     skillsDir: path.join(root, 'skills'),
+    personalitiesDir: path.join(root, 'personalities'),
+    skinsDir: path.join(root, 'skins'),
+    recentCommandsFile: path.join(root, '.recent-commands.json'),
     sessionsDir: path.join(root, 'sessions'),
     pluginsDir: path.join(root, 'plugins'),
     logsDir: path.join(root, 'logs'),
