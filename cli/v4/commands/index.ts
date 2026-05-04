@@ -1,10 +1,63 @@
 /**
- * cli/v4/commands/index.ts — Aiden v4.0.0
+ * cli/v4/commands/index.ts — Phase 14b barrel
  *
- * aiden subcommand definitions live here.
- *
- * Status: SCAFFOLDING — implementation lands in Phase 7 (see docs/v4.0.0-architecture.md)
- * Hermes reference: hermes-agent/hermes_cli/main.py
+ * Exports the 16 system slash commands. Phase 14c imports `allCommands`
+ * and registers each on the global CommandRegistry at boot.
  */
 
-export {}; // make this a module
+import type { SlashCommand } from '../commandRegistry';
+import { help } from './help';
+import { tools } from './tools';
+import { model } from './model';
+import { personality } from './personality';
+import { save } from './save';
+import { title } from './title';
+import { compress } from './compress';
+import { usage } from './usage';
+import { yolo } from './yolo';
+import { skin } from './skin';
+import { skills } from './skills';
+import { reloadMcp } from './reloadMcp';
+import { reasoning } from './reasoning';
+import { verbose } from './verbose';
+import { clear } from './clear';
+import { quit } from './quit';
+
+export {
+  help,
+  tools,
+  model,
+  personality,
+  save,
+  title,
+  compress,
+  usage,
+  yolo,
+  skin,
+  skills,
+  reloadMcp,
+  reasoning,
+  verbose,
+  clear,
+  quit,
+};
+
+/** All 16 built-in system commands, in canonical order. */
+export const allCommands: SlashCommand[] = [
+  help,
+  tools,
+  model,
+  personality,
+  save,
+  title,
+  compress,
+  usage,
+  yolo,
+  skin,
+  skills,
+  reloadMcp,
+  reasoning,
+  verbose,
+  clear,
+  quit,
+];

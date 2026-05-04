@@ -1,0 +1,51 @@
+/**
+ * cli/v4/commands/compress.ts — Phase 14b
+ *
+ * `/compress` — force-runs Phase 13's ContextCompressor on the active
+ * session's history and replaces it with the compressed version.
+ */
+import type { SlashCommand } from '../commandRegistry';
+
+export const compress: SlashCommand = {
+  name: 'compress',
+  description: 'Summarise older history to free up context.',
+  category: 'system',
+  icon: '📦',
+  handler: async (ctx) => {
+    if (!ctx.compressor || !ctx.session) {
+      ctx.display.warn('Compressor or session not wired.');
+      return {};
+    }
+    const before = ctx.session.history.length;
+    const providerId = ctx.session.getCurrentProvider();
+    const modelId = ctx.session.getCurrentModel();
+    const spinner = ctx.display.startSpinner('Compressing context…');
+    let result;
+    try {
+      result = await ctx.compressor.forceCompress(
+        ctx.session.history,
+        providerId,
+        modelId,
+      );
+    } catch (err) {
+      spinner.stop();
+      ctx.display.printError(`Compression failed: ${(err as Error).message}`);
+      return {};
+    }
+    spinner.stop();
+    if (result.refused) {
+      ctx.display.dim('Conversation too short — nothing compressed.');
+      return {};
+    }
+    if (result.error) {
+      ctx.display.warn('Compression auxiliary call failed; history unchanged.');
+      return {};
+    }
+    ctx.session.setHistory(result.compressedMessages);
+    const after = result.compressedMessages.length;
+    ctx.display.success(
+      `Compressed ${before} → ${after} messages (~${result.summaryTokens} summary tokens).`,
+    );
+    return {};
+  },
+};

@@ -156,6 +156,18 @@ export class SessionManager {
   }
 
   /**
+   * Update the title of an existing session. Used by the CLI `/save` and
+   * `/title` slash commands (Phase 14b). Returns true on success, false
+   * when the id was not found.
+   */
+  setSessionTitle(sessionId: string, title: string): boolean {
+    const existing = this.store.getSession(sessionId);
+    if (!existing) return false;
+    this.store.updateSession(sessionId, { title });
+    return true;
+  }
+
+  /**
    * List recently-touched sessions, newest first. Pass-through to the
    * underlying store; defaults match the store's defaults. Used by the
    * `session_list` tool (Phase 7+) and by CLI `aiden sessions`.
