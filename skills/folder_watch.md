@@ -1,6 +1,11 @@
-# Folder Watch Skill
-version: 1.0
+---
+name: folder_watch
 description: Watch folders for new files and automate reactions
+version: 1.0.0
+---
+
+# Folder Watch Skill
+
 tags: watch, folder, files, automation, downloads, monitor
 
 ## When to use

@@ -1,3 +1,9 @@
+---
+name: system_control
+description: Interact with the Windows desktop environment — clipboard, windows, and running applications
+version: 1.0.0
+---
+
 # Skill: System Control
 
 Use these tools to interact with the Windows desktop environment — clipboard, open windows, and running applications.

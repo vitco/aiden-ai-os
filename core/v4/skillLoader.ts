@@ -11,12 +11,17 @@
  *                                          folder_watch, social_research,
  *                                          system_control)
  *
- * Malformed SKILL.md files are SKIPPED with a console.warn — one bad
- * skill never breaks `loadAll()`. The optional `log` callback in the
- * constructor receives the same diagnostic so non-CLI hosts can pipe
- * it elsewhere.
+ * Malformed SKILL.md files are SKIPPED and logged via the optional
+ * file-only `AidenFileLogger` (Phase 16b.2). Before 16b.2 the warnings
+ * went to `console.warn` and corrupted the REPL spinner on every turn.
  *
- * Status: PHASE 10.
+ * Caching (Phase 16b.2):
+ *   `loadAll()` caches its result on the instance after the first scan.
+ *   Subsequent calls return the cached array without touching disk. Tests
+ *   that mutate the skills dir between calls must `invalidate()` to force
+ *   a re-scan; the runtime path scans exactly once at boot.
+ *
+ * Status: PHASE 10, cache + file logger added Phase 16b.2.
  */
 
 import { promises as fs } from 'node:fs';
@@ -27,6 +32,10 @@ import {
   parseSkillContent,
   type ParsedSkill,
 } from './skillSpec';
+import {
+  createNullLogger,
+  type AidenFileLogger,
+} from './aidenLogger';
 
 export interface SkillSummary {
   name: string;
@@ -39,51 +48,69 @@ export interface SkillSummary {
 }
 
 export interface SkillLoaderOptions {
+  /** Optional in-memory diagnostic sink (overrides the file logger). */
   log?: (level: 'warn' | 'info', msg: string) => void;
+  /** File-only logger that receives malformed-skill warnings. */
+  logger?: AidenFileLogger;
+}
+
+/** Counts surfaced for the boot summary line. */
+export interface SkillScanCounts {
+  loaded: number;
+  skipped: number;
+  /** Absolute paths of skipped files (for `logs/skills.log` cross-ref). */
+  skippedPaths: string[];
 }
 
 export class SkillLoader {
+  private cache: ParsedSkill[] | null = null;
+  private lastCounts: SkillScanCounts = { loaded: 0, skipped: 0, skippedPaths: [] };
+  private readonly logger: AidenFileLogger;
+
   constructor(
     private readonly paths: AidenPaths,
     private readonly options: SkillLoaderOptions = {},
-  ) {}
+  ) {
+    this.logger = options.logger ?? createNullLogger();
+  }
 
   /** Walk skills/ and load every parseable SKILL.md (or single-file
    *  `<name>.md`). Unparseable files are skipped; one bad skill
-   *  never breaks the others. */
+   *  never breaks the others.
+   *
+   *  Result is cached after the first call. Use `invalidate()` to force
+   *  a re-scan (tests, hot-reload, future `/skills reload`). */
   async loadAll(): Promise<ParsedSkill[]> {
-    const out: ParsedSkill[] = [];
-    let entries: string[];
-    try {
-      entries = await fs.readdir(this.paths.skillsDir);
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code === 'ENOENT') return [];
-      throw e;
-    }
-    for (const entry of entries) {
-      const entryPath = path.join(this.paths.skillsDir, entry);
-      let stat;
-      try {
-        stat = await fs.stat(entryPath);
-      } catch {
-        continue;
-      }
-      if (stat.isDirectory()) {
-        const skillFile = path.join(entryPath, 'SKILL.md');
-        const parsed = await this.tryParse(skillFile);
-        if (parsed) out.push(parsed);
-      } else if (stat.isFile() && entry.toLowerCase().endsWith('.md')) {
-        // Single-file skills. Skip TEMPLATE / CATALOG markers.
-        const lc = entry.toLowerCase();
-        if (lc === 'aiden_catalog.md' || lc === 'skill_template.md') continue;
-        const parsed = await this.tryParse(entryPath);
-        if (parsed) out.push(parsed);
-      }
-    }
-    return out;
+    if (this.cache !== null) return this.cache;
+    const scan = await this.scanDisk();
+    this.cache = scan.skills;
+    this.lastCounts = {
+      loaded: scan.skills.length,
+      skipped: scan.skipped.length,
+      skippedPaths: scan.skipped,
+    };
+    return this.cache;
+  }
+
+  /** Force the next `loadAll()` call to re-scan disk. */
+  invalidate(): void {
+    this.cache = null;
+  }
+
+  /** Counts from the last `loadAll()` (or zeros if never called). */
+  getLastCounts(): SkillScanCounts {
+    return { ...this.lastCounts, skippedPaths: [...this.lastCounts.skippedPaths] };
   }
 
   async load(name: string): Promise<ParsedSkill | null> {
+    // Honour the cache when available so we don't re-walk for a
+    // single-skill lookup. Falls through to disk on a miss so newly
+    // dropped skills still resolve in long-running processes (the cache
+    // never sees them otherwise — that's the whole point of `invalidate`).
+    if (this.cache) {
+      const hit = this.cache.find((s) => s.frontmatter.name === name);
+      if (hit) return hit;
+    }
     const dirSkill = path.join(this.paths.skillsDir, name, 'SKILL.md');
     const fileSkill = path.join(this.paths.skillsDir, `${name}.md`);
     return (await this.tryParse(dirSkill)) ?? (await this.tryParse(fileSkill));
@@ -119,21 +146,71 @@ export class SkillLoader {
 
   // ── Internals ───────────────────────────────────────────────
 
-  private async tryParse(filePath: string): Promise<ParsedSkill | null> {
+  /** Walk the skills dir once. Pure I/O — caching layered above. */
+  private async scanDisk(): Promise<{ skills: ParsedSkill[]; skipped: string[] }> {
+    const skills: ParsedSkill[] = [];
+    const skipped: string[] = [];
+    let entries: string[];
+    try {
+      entries = await fs.readdir(this.paths.skillsDir);
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { skills, skipped };
+      }
+      throw e;
+    }
+    for (const entry of entries) {
+      const entryPath = path.join(this.paths.skillsDir, entry);
+      let stat;
+      try {
+        stat = await fs.stat(entryPath);
+      } catch {
+        continue;
+      }
+      if (stat.isDirectory()) {
+        const skillFile = path.join(entryPath, 'SKILL.md');
+        const result = await this.tryParseTracked(skillFile);
+        if (result.parsed) skills.push(result.parsed);
+        else if (result.attempted) skipped.push(skillFile);
+      } else if (stat.isFile() && entry.toLowerCase().endsWith('.md')) {
+        const lc = entry.toLowerCase();
+        if (lc === 'aiden_catalog.md' || lc === 'skill_template.md') continue;
+        const result = await this.tryParseTracked(entryPath);
+        if (result.parsed) skills.push(result.parsed);
+        else if (result.attempted) skipped.push(entryPath);
+      }
+    }
+    return { skills, skipped };
+  }
+
+  /** Internal variant that distinguishes "file not present" (`attempted=false`)
+   *  from "file present but malformed" (`attempted=true, parsed=null`).
+   *  Only the latter counts as a skip. */
+  private async tryParseTracked(
+    filePath: string,
+  ): Promise<{ parsed: ParsedSkill | null; attempted: boolean }> {
     let raw: string;
     try {
       raw = await fs.readFile(filePath, 'utf-8');
     } catch {
-      return null;
+      return { parsed: null, attempted: false };
     }
     try {
-      return parseSkillContent(raw, filePath);
+      return { parsed: parseSkillContent(raw, filePath), attempted: true };
     } catch (e) {
       const msg = `Skipping malformed skill at ${filePath}: ${(e as Error).message}`;
-      this.options.log
-        ? this.options.log('warn', msg)
-        : console.warn(`[SkillLoader] ${msg}`);
-      return null;
+      // In-memory sink wins when explicitly provided (kept for
+      // backwards-compat with tests that use `options.log`).
+      if (this.options.log) this.options.log('warn', msg);
+      else this.logger.warn(`[SkillLoader] ${msg}`);
+      return { parsed: null, attempted: true };
     }
+  }
+
+  /** Public wrapper retained for `load(name)` so single-skill lookups can
+   *  surface a parse error too. */
+  private async tryParse(filePath: string): Promise<ParsedSkill | null> {
+    const r = await this.tryParseTracked(filePath);
+    return r.parsed;
   }
 }

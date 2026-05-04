@@ -1,6 +1,11 @@
-# Code Interpreter Skill
-version: 1.0
+---
+name: code_interpreter
 description: Run Python or Node.js code in an isolated sandbox for data analysis, calculations, and file processing
+version: 1.0.0
+---
+
+# Code Interpreter Skill
+
 tags: code, python, node, data, analysis, calculation
 
 ## When to use

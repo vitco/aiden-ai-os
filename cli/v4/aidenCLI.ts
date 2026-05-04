@@ -77,6 +77,7 @@ import {
   type ProviderSlot,
 } from '../../core/v4/providerFallback';
 import { restoreBundledSkillsIfNeeded } from '../../core/v4/skillBundledRestore';
+import { createFileLogger } from '../../core/v4/aidenLogger';
 
 import { registerAllTools } from '../../tools/v4';
 import { setupMcpFromConfig } from '../../tools/v4/mcpSetup';
@@ -412,7 +413,21 @@ export async function buildAgentRuntime(
 
   // Memory + skill loader.
   const memoryManager = new MemoryManager(paths);
-  const skillLoader = new SkillLoader(paths);
+  // Phase 16b.2: malformed-skill warnings go to a file logger, not the
+  // REPL spinner. The scan runs ONCE here and the result is cached on
+  // the loader instance — every per-turn caller (chatSession banner,
+  // skillCommands, skill_manage, etc.) reads the cache.
+  const skillsLogger = createFileLogger(paths.logsDir, 'skills');
+  const skillLoader = new SkillLoader(paths, { logger: skillsLogger });
+  await skillLoader.loadAll().catch(() => undefined);
+  const skillCounts = skillLoader.getLastCounts();
+  const skipNote =
+    skillCounts.skipped > 0
+      ? ` (see ${skillsLogger.filePath})`
+      : '';
+  display.dim(
+    `[skills] ${skillCounts.loaded} loaded, ${skillCounts.skipped} skipped${skipNote}`,
+  );
 
   // ── Phase 9 moat (stateless / wraps memory) ──────────────────────────
   const memoryGuard = new MemoryGuard(memoryManager);

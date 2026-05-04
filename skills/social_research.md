@@ -1,6 +1,11 @@
-# Social Research Skill
-version: 1.0
+---
+name: social_research
 description: Research topics across Reddit and HackerNews with recency-weighted results
+version: 1.0.0
+---
+
+# Social Research Skill
+
 tags: research, social, reddit, hackernews, trends, sentiment
 
 ## When to use
