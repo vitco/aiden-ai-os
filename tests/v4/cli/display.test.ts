@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Writable } from 'node:stream';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 
@@ -155,5 +156,56 @@ describe('Display', () => {
     const out = display.markdown('plain text');
     expect(typeof out).toBe('string');
     expect(stripAnsi(out)).toContain('plain text');
+  });
+});
+
+describe('Display Phase 14b helpers', () => {
+  function captureDisplay() {
+    const chunks: string[] = [];
+    const out = new Writable({
+      write(chunk, _enc, cb) {
+        chunks.push(chunk.toString());
+        cb();
+      },
+    }) as unknown as NodeJS.WriteStream;
+    const skin = new SkinEngine({ forceMono: true });
+    const d = new Display({ skin, stdout: out });
+    return { d, chunks };
+  }
+
+  it('info writes a single line with trailing newline', () => {
+    const { d, chunks } = captureDisplay();
+    d.info('hello');
+    const joined = chunks.join('');
+    expect(joined).toMatch(/hello\n$/);
+  });
+
+  it('success writes a checkmark prefix', () => {
+    const { d, chunks } = captureDisplay();
+    d.success('done');
+    expect(chunks.join('')).toContain('done');
+    expect(chunks.join('')).toMatch(/✓/);
+  });
+
+  it('warn writes a bang prefix', () => {
+    const { d, chunks } = captureDisplay();
+    d.warn('careful');
+    expect(chunks.join('')).toContain('careful');
+    expect(chunks.join('')).toMatch(/^!/);
+  });
+
+  it('dim writes the muted line with a newline', () => {
+    const { d, chunks } = captureDisplay();
+    d.dim('quiet');
+    expect(chunks.join('')).toBe('quiet\n');
+  });
+
+  it('line draws a horizontal rule of the requested width', () => {
+    const { d, chunks } = captureDisplay();
+    d.line(10);
+    const joined = chunks.join('');
+    // mono skin uses '─' for default-style and '-' for monochrome glyphs.
+    expect(joined.length).toBe(11); // 10 chars + newline
+    expect(joined).toMatch(/─{10}\n|-{10}\n/);
   });
 });

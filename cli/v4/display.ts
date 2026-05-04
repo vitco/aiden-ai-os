@@ -181,6 +181,43 @@ export class Display {
   writeError(text: string): void {
     this.err.write(text);
   }
+
+  // ── Phase 14b helpers ─────────────────────────────────────────────────
+  // Thin wrappers that print colour-prefixed lines via `write()`. These
+  // exist so the slash-command handlers and CLI callbacks don't have to
+  // hand-roll ANSI strings every time they want to emit a status line.
+  // They always emit a trailing newline.
+
+  /** Informational line, e.g. "Switching model…". */
+  info(text: string): void {
+    this.out.write(`${this.skin.applyColors('›', 'accent')} ${text}\n`);
+  }
+
+  /** Success line, e.g. "Switched to anthropic:claude-opus-4-7". */
+  success(text: string): void {
+    this.out.write(`${this.skin.applyColors('✓', 'success')} ${text}\n`);
+  }
+
+  /** Warning line, e.g. "Verbose mode requires restart." */
+  warn(text: string): void {
+    this.out.write(`${this.skin.applyColors('!', 'warn')} ${text}\n`);
+  }
+
+  /** Muted ("dim") line for low-priority diagnostics. */
+  dim(text: string): void {
+    this.out.write(`${this.skin.applyColors(text, 'muted')}\n`);
+  }
+
+  /** Horizontal rule for grouping CLI output. */
+  line(width = 60): void {
+    const ch = this.skin.getActive().glyphs?.bullet === '*' ? '-' : '─';
+    this.out.write(`${this.skin.applyColors(ch.repeat(width), 'muted')}\n`);
+  }
+
+  /** Convenience: format an error and write it directly to stdout. */
+  printError(message: string, suggestion?: string): void {
+    this.out.write(this.error(message, suggestion));
+  }
 }
 
 let _global: Display | null = null;
