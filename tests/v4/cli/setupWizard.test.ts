@@ -148,6 +148,7 @@ describe('SetupWizard', () => {
       paths,
       display,
       prompts: scriptedPrompts({ choose: [4, 1], input: ['sk-ant-test'] }),
+      skipValidation: true,
     });
     expect(result.ran).toBe(true);
     expect(result.config?.model.provider).toBe('anthropic');
@@ -165,6 +166,7 @@ describe('SetupWizard', () => {
       paths,
       display,
       prompts: scriptedPrompts({ choose: [6, 2], input: ['gsk-test'] }),
+      skipValidation: true,
     });
     expect(result.ran).toBe(true);
     expect(result.config?.model.provider).toBe('groq');
@@ -182,6 +184,7 @@ describe('SetupWizard', () => {
         input: ['', 'https://api.example.com/v1', 'custom-key'],
         // first input is the model id (provider has no defaultModel)
       }),
+      skipValidation: true,
     });
     expect(result.ran).toBe(true);
     expect(result.config?.model.provider).toBe('custom');
@@ -235,6 +238,7 @@ describe('SetupWizard', () => {
       display,
       prompts: scriptedPrompts({ choose: [4, 1], input: ['sk-ant-2'] }),
       force: true,
+      skipValidation: true,
     });
     expect(result.ran).toBe(true);
     expect(result.config?.model.provider).toBe('anthropic');

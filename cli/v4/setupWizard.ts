@@ -20,6 +20,8 @@
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
+import kleur from 'kleur';
+
 import {
   resolveAidenPaths,
   ensureAidenDirsExist,
@@ -27,6 +29,7 @@ import {
 } from '../../core/v4/paths';
 import { ConfigManager, DEFAULT_CONFIG, type AidenConfig } from '../../core/v4/config';
 import { Display } from './display';
+import { validateProviderKey } from './keyValidator';
 
 export interface ProviderOption {
   id: string;
@@ -178,6 +181,10 @@ export interface SetupOptions {
    * wizard renders correctly without polluting real user state.
    */
   smokeTest?: boolean;
+  /** Bypass API-key validation against provider endpoints. */
+  skipValidation?: boolean;
+  /** Injectable validator for tests. Defaults to the real `validateProviderKey`. */
+  validator?: typeof validateProviderKey;
 }
 
 export interface SetupResult {
@@ -337,6 +344,71 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     }
   }
 
+  // Step 3.5: validate the API key against the provider endpoint.
+  // Bypassed when smokeTest or skipValidation is set, or when there's no key
+  // to validate (Ollama, or a subscription provider without an env var).
+  const shouldValidate =
+    !opts.smokeTest &&
+    !opts.skipValidation &&
+    typeof apiKey === 'string' &&
+    apiKey.length > 0;
+
+  if (shouldValidate) {
+    const validate = opts.validator ?? validateProviderKey;
+    const maxAttempts = 3;
+    let attempt = 1;
+
+    // First attempt uses the key already collected. Subsequent attempts
+    // re-prompt for a fresh key (and baseUrl, for custom).
+    while (attempt <= maxAttempts) {
+      const spinner = display.startSpinner(`Validating ${provider.label} API key…`);
+      let result;
+      try {
+        result = await validate(provider.id, apiKey as string, baseUrl, fetchImpl);
+      } finally {
+        spinner.stop();
+      }
+
+      if (result.valid) {
+        if (result.skipped) {
+          display.write(
+            `${kleur.dim(
+              `Skipped validation: ${result.skipReason ?? 'no validation endpoint'}. The key will be tested on first call.`,
+            )}\n`,
+          );
+        } else {
+          display.write(`${kleur.green(`✓ ${provider.label} API key validated`)}\n`);
+        }
+        break;
+      }
+
+      // Invalid — show error, re-prompt if we have attempts left.
+      display.write(
+        display.error(
+          `Validation failed: ${result.reason ?? 'unknown error'}`,
+          'Re-enter the key, or press Ctrl+C to exit.',
+        ),
+      );
+
+      if (attempt >= maxAttempts) {
+        throw new Error(
+          'Could not validate key after 3 attempts. Run `aiden setup --skip-validation` to bypass.',
+        );
+      }
+
+      // Re-prompt for credentials.
+      if (provider.kind === 'custom') {
+        baseUrl = await prompts.input('Base URL (e.g. https://api.example.com/v1)', {
+          default: baseUrl,
+        });
+        apiKey = await prompts.input('API key', { mask: true });
+      } else {
+        apiKey = await prompts.input(`API key for ${provider.label}`, { mask: true });
+      }
+      attempt += 1;
+    }
+  }
+
   // Step 4: terminal backend (basic — keeps wizard in scope for 14a).
   // Default to "auto" — full picker lands in 14b.
   const terminalBackend: 'auto' | 'inline' | 'fullscreen' = 'auto';
@@ -398,7 +470,8 @@ if (require.main === module) {
   const argv = process.argv.slice(2);
   const smokeTest = argv.includes('--smoke-test');
   const force = argv.includes('--force');
-  runSetupWizard({ smokeTest, force })
+  const skipValidation = argv.includes('--skip-validation');
+  runSetupWizard({ smokeTest, force, skipValidation })
     .then((result) => {
       if (!result.ran && result.skipReason && result.skipReason !== 'smoke-test') {
         // Skipped for a reason that's already been displayed; non-zero so callers can detect.

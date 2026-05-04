@@ -62,6 +62,7 @@ Single-loop agent replaces planner+responder split. ONE LLM. Tools called inside
 - `AIDEN_CLI_MODE=1` set by `bin/aiden.js` auto-suppresses bracket-prefixed `console.log` when level >= warn.
 - Together-1 provider disabled (HTTP 400 cascade since v3.19.5).
 - Windows graphify hooks need patched python path (see above).
+- Setup wizard validates API keys against provider endpoints before saving. Smoke-test mode (`--smoke-test`) and `--skip-validation` flag both bypass.
 
 ## Git remotes (CRITICAL — read before pushing)
 - `origin` = public repo, FROZEN at v3.19.9 during this sprint. Never push to origin.
