@@ -1,0 +1,17 @@
+name: light
+description: Light terminal — dark text on light background
+colors:
+  brand: [196, 66, 16]
+  accent: [196, 66, 16]
+  user: [0, 102, 85]
+  agent: [32, 32, 32]
+  tool: [0, 85, 136]
+  error: [176, 16, 16]
+  warn: [128, 96, 0]
+  success: [27, 94, 32]
+  muted: [96, 96, 96]
+  heading: [196, 66, 16]
+glyphs:
+  bullet: "•"
+  arrow: "›"
+  spinner: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]

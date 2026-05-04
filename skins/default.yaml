@@ -1,0 +1,17 @@
+name: default
+description: Aiden brand — orange accent on dark terminal
+colors:
+  brand: [255, 107, 53]
+  accent: [255, 107, 53]
+  user: [78, 201, 176]
+  agent: [224, 224, 224]
+  tool: [156, 220, 254]
+  error: [244, 71, 71]
+  warn: [255, 193, 7]
+  success: [76, 175, 80]
+  muted: [128, 128, 128]
+  heading: [255, 107, 53]
+glyphs:
+  bullet: "•"
+  arrow: "›"
+  spinner: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]

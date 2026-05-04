@@ -1,0 +1,17 @@
+name: monochrome
+description: No colour — pipes, CI, accessibility
+colors:
+  brand: null
+  accent: null
+  user: null
+  agent: null
+  tool: null
+  error: null
+  warn: null
+  success: null
+  muted: null
+  heading: null
+glyphs:
+  bullet: "*"
+  arrow: ">"
+  spinner: ["|", "/", "-", "\\"]

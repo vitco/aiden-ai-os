@@ -122,8 +122,14 @@ const BUNDLED: Record<string, SkinDefinition> = {
 };
 
 export interface SkinEngineOptions {
-  /** Directory to search for `<name>.yaml` skin files. */
+  /** Directory to search for user `<name>.yaml` skin files. */
   skinsDir?: string;
+  /**
+   * Directory holding bundled `<name>.yaml` skins shipped with the package.
+   * Defaults to `<repo-root>/skins/`. User-dir files shadow bundled files
+   * when both exist. (Phase 16.)
+   */
+  bundledDir?: string;
   /** Hook invoked when a custom skin fails to load. */
   onError?: (msg: string) => void;
   /**
@@ -133,22 +139,53 @@ export interface SkinEngineOptions {
   forceMono?: boolean;
 }
 
+export type SkinSource = 'bundled-builtin' | 'bundled-yaml' | 'user';
+
+export interface SkinSummary {
+  name: string;
+  description: string;
+  source: SkinSource;
+  filePath?: string;
+}
+
+function defaultBundledDir(): string {
+  try {
+    const here = __dirname;
+    let cursor = here;
+    for (let i = 0; i < 6; i++) {
+      cursor = path.dirname(cursor);
+      const base = path.basename(cursor);
+      if (base === 'DevOS' || base === 'aiden') {
+        return path.join(cursor, 'skins');
+      }
+    }
+    return path.join(here, '..', '..', 'skins');
+  } catch {
+    return path.resolve(process.cwd(), 'skins');
+  }
+}
+
 export class SkinEngine {
   private current: SkinDefinition = DEFAULT_SKIN;
   private readonly skinsDir: string;
+  private readonly bundledDir: string;
   private readonly onError?: (msg: string) => void;
   private readonly forceMono: boolean;
   private readonly cache = new Map<string, SkinDefinition>();
+  private readonly sourceMap = new Map<string, SkinSource>();
+  private readonly fileMap = new Map<string, string>();
 
   constructor(opts: SkinEngineOptions = {}) {
     this.skinsDir =
       opts.skinsDir ?? path.join(os.homedir(), '.aiden', 'skins');
+    this.bundledDir = opts.bundledDir ?? defaultBundledDir();
     this.onError = opts.onError;
     this.forceMono =
       opts.forceMono ??
       (process.env.NO_COLOR != null && process.env.NO_COLOR !== '');
     for (const name of Object.keys(BUNDLED)) {
       this.cache.set(name, BUNDLED[name]);
+      this.sourceMap.set(name, 'bundled-builtin');
     }
   }
 
@@ -222,6 +259,100 @@ export class SkinEngine {
   /** List all skin names currently cached (bundled + previously loaded). */
   listSkins(): string[] {
     return [...this.cache.keys()];
+  }
+
+  /**
+   * Scan both `bundledDir` and `skinsDir`, layering disk yaml files on top
+   * of the in-memory built-in defaults. User-dir files shadow bundled files
+   * with the same name. Idempotent — safe to call multiple times. Returns
+   * the merged list. (Phase 16.)
+   */
+  async discover(): Promise<SkinSummary[]> {
+    await this.scanDir(this.bundledDir, 'bundled-yaml');
+    await this.scanDir(this.skinsDir, 'user');
+    return this.list();
+  }
+
+  /** Drop and re-load the active skin's yaml from disk. (Phase 16.) */
+  async reload(): Promise<SkinDefinition> {
+    const name = this.current.name;
+    const builtin = BUNDLED[name];
+    this.cache.delete(name);
+    this.sourceMap.delete(name);
+    this.fileMap.delete(name);
+    if (builtin) {
+      this.cache.set(name, builtin);
+      this.sourceMap.set(name, 'bundled-builtin');
+    }
+    return this.loadSkin(name);
+  }
+
+  /**
+   * Rich summary of every cached skin, including source label and file
+   * path when known. Sorted alphabetically. (Phase 16.)
+   */
+  list(): SkinSummary[] {
+    const out: SkinSummary[] = [];
+    for (const [name, def] of this.cache.entries()) {
+      out.push({
+        name,
+        description: def.description,
+        source: this.sourceMap.get(name) ?? 'bundled-builtin',
+        filePath: this.fileMap.get(name),
+      });
+    }
+    return out.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  private async scanDir(dir: string, source: SkinSource): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await fs.readdir(dir);
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (!entry.toLowerCase().endsWith('.yaml') && !entry.toLowerCase().endsWith('.yml')) {
+        continue;
+      }
+      const filePath = path.join(dir, entry);
+      try {
+        const raw = await fs.readFile(filePath, 'utf8');
+        const parsed = yaml.load(raw) as Partial<SkinDefinition> | null;
+        if (!parsed || typeof parsed !== 'object') {
+          this.onError?.(`skin file ${filePath} is not a yaml object — skipped`);
+          continue;
+        }
+        const ext = entry.toLowerCase().endsWith('.yml') ? 4 : 5;
+        const fallbackName = entry.slice(0, -ext);
+        const name = (parsed.name ?? fallbackName).toLowerCase();
+        if (!parsed.colors && this.cache.has(name)) {
+          // file is missing required `colors` — but a builtin already covers
+          // the same name, so just keep the builtin and surface a warning.
+          this.onError?.(`skin file ${filePath} missing 'colors' — kept existing definition`);
+          continue;
+        }
+        if (!parsed.colors) {
+          this.onError?.(`skin file ${filePath} missing 'colors' — skipped`);
+          continue;
+        }
+        const merged: SkinDefinition = {
+          name,
+          description: parsed.description ?? `Custom skin ${name}`,
+          colors: { ...DEFAULT_SKIN.colors, ...parsed.colors },
+          glyphs: { ...DEFAULT_SKIN.glyphs, ...(parsed.glyphs ?? {}) },
+        };
+        this.cache.set(name, merged);
+        this.sourceMap.set(name, source);
+        this.fileMap.set(name, filePath);
+      } catch (err) {
+        this.onError?.(
+          `skin file ${filePath} failed to parse: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
   }
 }
 
