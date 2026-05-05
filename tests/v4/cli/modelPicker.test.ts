@@ -58,12 +58,14 @@ describe('runModelPicker', () => {
     expect(result).toBeNull();
   });
 
-  it('interactive picker shows all 19 providers when no tier filter', async () => {
+  it('interactive picker shows all 21 providers when no tier filter', async () => {
     const select = vi.fn(async (opts: any) => {
       // First call = provider, second call = model
       if (opts.message.startsWith('Select provider')) {
-        // Verify all 19 are presented
-        expect(opts.choices.length).toBe(19);
+        // Verify all are presented. Phase 18 added claude-pro + chatgpt-plus
+        // (real OAuth providers) alongside the legacy claude_subscription /
+        // chatgpt_subscription stubs.
+        expect(opts.choices.length).toBe(21);
         return 'groq';
       }
       return 'llama-3.3-70b-versatile';

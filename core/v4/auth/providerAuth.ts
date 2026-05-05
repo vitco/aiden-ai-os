@@ -154,12 +154,26 @@ export class OAuthProviderRuntime {
 
   /** Persist a flow result as a tokenStore record. */
   private async persist(result: OAuthFlowResult): Promise<OAuthTokens> {
+    // Phase 18 Task 4: lift `extras.account` / `extras.email` into the
+    // top-level `account` field so /providers + /auth status can render
+    // "Authed as <name>" without reaching into provider-specific extras.
+    const account =
+      result.extras &&
+      typeof (result.extras as Record<string, unknown>).account === 'string'
+        ? ((result.extras as Record<string, unknown>).account as string)
+        : result.extras &&
+            typeof (result.extras as Record<string, unknown>).email ===
+              'string'
+          ? ((result.extras as Record<string, unknown>).email as string)
+          : undefined;
+
     const tokens: OAuthTokens = {
       provider: this.provider.id,
       accessToken: result.accessToken,
       refreshToken: result.refreshToken,
       expiresAtMs: Date.now() + result.expiresInSeconds * 1000,
       models: this.provider.defaultModels,
+      account,
       extras: result.extras,
     };
     await saveTokens(this.paths, tokens);

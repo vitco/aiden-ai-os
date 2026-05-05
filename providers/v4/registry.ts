@@ -50,6 +50,18 @@ export interface ProviderRegistryEntry {
   supportsToolCalling: boolean;
   /** Model IDs offered by this provider. Full metadata in MODEL_CATALOG. */
   modelIds: string[];
+  /**
+   * Phase 18: OAuth-backed provider. When present, the runtime resolver
+   * reads the bearer token from `<aiden-home>/auth/<oauth.providerId>.json`
+   * (the tokenStore managed by the Phase 18 OAuth plugins) and passes it
+   * as the `apiKey` to the underlying adapter. The adapter never knows
+   * the difference between an API key and an OAuth bearer.
+   *
+   * Set on `claude-pro` and `chatgpt-plus`. Legacy `claude_subscription`
+   * and `chatgpt_subscription` entries (Phase 5 stubs, no OAuth wiring)
+   * stay as-is and remain unusable until removed in a future cleanup.
+   */
+  oauth?: { providerId: string };
 }
 
 /**
@@ -83,6 +95,47 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     docsUrl: 'https://platform.openai.com/docs/',
     supportsToolCalling: true,
     modelIds: ['gpt-5-codex'],
+  },
+  // ─── Phase 18 OAuth providers (wired through tokenStore) ─────────────────
+  // The two entries below are the real, working OAuth providers introduced
+  // in Phase 18. The setup wizard, /auth slash command, and the bundled
+  // plugins all use these IDs (`claude-pro`, `chatgpt-plus`) — kebab-case,
+  // matching the plugin manifest names.
+  //
+  // The legacy `claude_subscription` / `chatgpt_subscription` entries above
+  // are Phase 5 stubs (no OAuth wiring, snake_case IDs). They remain in the
+  // registry to avoid breaking existing tests + docs but are not selectable
+  // through the wizard. Plan to remove in a v4.x cleanup once the rename is
+  // safe across tests.
+  'claude-pro': {
+    id: 'claude-pro',
+    displayName: 'Claude Pro / Max (OAuth)',
+    apiMode: 'anthropic_messages',
+    baseUrl: 'https://api.anthropic.com',
+    apiKeyEnvVar: null,
+    oauth: { providerId: 'claude-pro' },
+    description: 'Sign in with your Claude Pro/Max subscription. No API key needed.',
+    tier: 'subscription',
+    hasFreeTier: false,
+    docsUrl: 'https://docs.anthropic.com/',
+    supportsToolCalling: true,
+    modelIds: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
+  },
+  'chatgpt-plus': {
+    id: 'chatgpt-plus',
+    displayName: 'ChatGPT Plus (OAuth)',
+    apiMode: 'codex_responses',
+    // Inference base URL per audit § ChatGPT Plus — chatgpt.com Codex
+    // endpoint, NOT api.openai.com. Plugin describeRuntime() agrees.
+    baseUrl: 'https://chatgpt.com/backend-api/codex',
+    apiKeyEnvVar: null,
+    oauth: { providerId: 'chatgpt-plus' },
+    description: 'Sign in with your ChatGPT Plus subscription. No API key needed.',
+    tier: 'subscription',
+    hasFreeTier: false,
+    docsUrl: 'https://platform.openai.com/docs/',
+    supportsToolCalling: true,
+    modelIds: ['gpt-5', 'gpt-5-mini'],
   },
   nous_portal: {
     id: 'nous_portal',

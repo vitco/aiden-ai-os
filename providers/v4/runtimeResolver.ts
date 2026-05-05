@@ -42,6 +42,12 @@ import { ChatCompletionsAdapter } from './chatCompletionsAdapter';
 import { AnthropicAdapter } from './anthropicAdapter';
 import { CodexResponsesAdapter } from './codexResponsesAdapter';
 import { OllamaPromptToolsAdapter } from './ollamaPromptToolsAdapter';
+import {
+  loadTokens,
+  isExpired,
+  PREFLIGHT_REFRESH_WINDOW_MS,
+} from '../../core/v4/auth/tokenStore';
+import type { AidenPaths } from '../../core/v4/paths';
 
 /**
  * Minimal interface RuntimeResolver consumes from the config layer. The
@@ -63,6 +69,16 @@ export interface ResolveOptions {
   credentialSourceHint?: 'cli' | 'config' | 'env' | 'auth.json' | 'default';
   /** Optional config provider — typically a Phase 6 `ConfigManager`. */
   config?: ConfigProvider;
+  /**
+   * Phase 18: Aiden user-data paths. When present and the resolved provider
+   * has `oauth: { providerId }` in the registry, the credential chain
+   * reads the bearer token from the tokenStore (`<paths.root>/auth/<id>.json`)
+   * and passes it as the apiKey. Auto-refresh during inference is NOT done
+   * here — when tokens are within the pre-flight refresh window, the
+   * resolver throws a clear "run /auth refresh" error. (Auto-refresh during
+   * inference is a v4.1 follow-up; v4.0 ships explicit /auth refresh.)
+   */
+  paths?: AidenPaths;
 }
 
 interface ResolvedCredentials {
@@ -202,6 +218,35 @@ export class RuntimeResolver {
     // 1. CLI override.
     if (options.apiKeyOverride && options.apiKeyOverride.length > 0) {
       return { apiKey: options.apiKeyOverride, source: 'cli' };
+    }
+
+    // 1b. Phase 18: OAuth bearer from tokenStore. Wins over config/env so
+    // a stale env var can't shadow a fresh OAuth login. Only applies when
+    // the registry entry declares `oauth.providerId` AND the caller passed
+    // a paths handle (boot path does; tests opt in).
+    if (entry.oauth && options.paths) {
+      const tokens = await loadTokens(options.paths, entry.oauth.providerId);
+      if (tokens && tokens.accessToken) {
+        if (isExpired(tokens, PREFLIGHT_REFRESH_WINDOW_MS)) {
+          throw new ProviderError(
+            `OAuth token for ${entry.id} is expired or about to expire. ` +
+              `Run \`/auth refresh ${entry.id}\` (or \`/auth login ${entry.id}\` if refresh fails).`,
+            entry.id,
+          );
+        }
+        return {
+          apiKey: tokens.accessToken,
+          source: 'auth.json',
+          oauthRefreshable: !!tokens.refreshToken,
+        };
+      }
+      // No tokens for an OAuth-only provider — surface the clearest error.
+      if (entry.apiKeyEnvVar === null) {
+        throw new ProviderError(
+          `${entry.id} requires OAuth login. Run \`/auth login ${entry.id}\`.`,
+          entry.id,
+        );
+      }
     }
 
     // 2. Config provider (Phase 6 ConfigManager or test stub).

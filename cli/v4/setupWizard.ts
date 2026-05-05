@@ -30,6 +30,18 @@ import {
 import { ConfigManager, DEFAULT_CONFIG, type AidenConfig } from '../../core/v4/config';
 import { Display } from './display';
 import { validateProviderKey } from './keyValidator';
+import {
+  OAuthProviderRuntime,
+  type OAuthUserAgent,
+  type OAuthProvider,
+} from '../../core/v4/auth/providerAuth';
+import { resolveBundledPluginsDir } from '../../core/v4/plugins/pluginBundledRestore';
+import {
+  runCopyPasteFlow,
+  runDeviceCodeFlow,
+  refreshTokens,
+  generatePkce,
+} from '../../core/v4/auth/oauthFlow';
 
 export interface ProviderOption {
   id: string;
@@ -230,6 +242,95 @@ async function defaultPrompts(): Promise<PromptIO> {
   };
 }
 
+// ─── Phase 18: OAuth helper plumbing for the wizard ─────────────────────
+// Used when the user picks claude-pro / chatgpt-plus (kind: 'pro'). Lazy-
+// requires the plugin's exported `buildProvider` so the wizard module
+// stays free of plugin imports at load time. This is the SAME flow runner
+// /auth login (Task 5) consumes — single entry point.
+const PRO_PLUGIN_DIRS: Record<string, string> = {
+  'claude-pro': 'aiden-plugin-claude-pro',
+  'chatgpt-plus': 'aiden-plugin-chatgpt-plus',
+};
+
+const PRO_EXPLAINERS: Record<string, string> = {
+  'claude-pro':
+    'This connects your Claude Pro / Max subscription. No API charges, no API key needed.',
+  'chatgpt-plus':
+    'This connects your ChatGPT Plus subscription. No API charges, no API key needed.',
+};
+
+/** Helpers bundle plugins call through to (matches PluginContext.auth). */
+const PLUGIN_AUTH_HELPERS = {
+  runCopyPasteFlow,
+  runDeviceCodeFlow,
+  refreshTokens,
+  generatePkce,
+};
+
+/** Build an OAuthUserAgent from the wizard's PromptIO + Display. */
+function wizardUserAgent(prompts: PromptIO, display: Display): OAuthUserAgent {
+  return {
+    log: (line: string) => display.write(line + '\n'),
+    async openBrowser(url: string) {
+      // Intentionally minimal — same approach as Hermes's
+      // anthropic_adapter.py:1067 (best-effort webbrowser.open). On Windows
+      // we use child_process.spawn('cmd.exe', ['/c', 'start', '', url]) to
+      // avoid the same shell-quoting issue Phase 16f fixed for open_url.
+      const platform = process.platform;
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { spawn } = require('node:child_process');
+        if (platform === 'win32') {
+          spawn('cmd.exe', ['/c', 'start', '""', url], {
+            detached: true,
+            stdio: 'ignore',
+          }).unref();
+        } else if (platform === 'darwin') {
+          spawn('open', [url], { detached: true, stdio: 'ignore' }).unref();
+        } else {
+          spawn('xdg-open', [url], { detached: true, stdio: 'ignore' }).unref();
+        }
+      } catch {
+        // No browser → user copies the URL manually. The flow logs it
+        // already so this isn't fatal.
+      }
+    },
+    async prompt(question: string) {
+      return prompts.input(question);
+    },
+    async sleep(ms: number) {
+      return new Promise<void>((r) => setTimeout(r, ms));
+    },
+  };
+}
+
+/**
+ * Lazy-require the plugin's exported buildProvider for an OAuth provider id.
+ * Throws when the plugin isn't shipped (developer error — bundled plugins
+ * should always be present).
+ */
+async function loadOAuthProvider(providerId: string): Promise<OAuthProvider> {
+  const dirName = PRO_PLUGIN_DIRS[providerId];
+  if (!dirName) {
+    throw new Error(`Unknown OAuth provider: ${providerId}`);
+  }
+  const bundledDir = await resolveBundledPluginsDir();
+  if (!bundledDir) {
+    throw new Error(
+      `Bundled plugins dir not found — Aiden installation may be corrupted.`,
+    );
+  }
+  const entry = path.join(bundledDir, dirName, 'index.js');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const mod = require(entry);
+  if (typeof mod.buildProvider !== 'function') {
+    throw new Error(
+      `Plugin ${dirName} does not export buildProvider() — Phase 18 contract violated`,
+    );
+  }
+  return mod.buildProvider(PLUGIN_AUTH_HELPERS);
+}
+
 /** Determine whether the wizard should auto-fire (config.yaml absent). */
 export async function isFreshInstall(paths: AidenPaths): Promise<boolean> {
   try {
@@ -305,15 +406,107 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   const provider = PROVIDERS[providerIndex - 1];
   if (!provider) throw new Error(`invalid provider selection: ${providerIndex}`);
 
-  // Pro stubs: surface "v4.1" message and short-circuit.
+  // Phase 18: real OAuth flow for kind: 'pro' providers (claude-pro,
+  // chatgpt-plus). The flow is the same one /auth login uses (Task 5);
+  // single entry point.
   if (provider.kind === 'pro') {
-    display.write(
-      display.error(
-        `${provider.label}: Pro feature — coming in v4.1 with the OAuth wizard.`,
-        'For now, please use API keys (rerun `aiden setup` and pick option [4] Anthropic or [5] OpenAI).',
-      ),
+    // 1-line explainer up-front so the user knows what they're agreeing to.
+    const explainer =
+      PRO_EXPLAINERS[provider.id] ??
+      'This connects your subscription via OAuth. No API key needed.';
+    display.write(`\n${explainer}\n\n`);
+
+    const proceed = await prompts.confirm(
+      `Continue with ${provider.label}?`,
+      true,
     );
-    return { ran: false, skipReason: 'pro-stub' };
+    if (!proceed) {
+      display.write('\nSkipped. Run `aiden setup` again to retry, or pick a different provider.\n');
+      return { ran: false, skipReason: 'oauth-skipped' };
+    }
+
+    let oauthProvider: OAuthProvider;
+    try {
+      oauthProvider = await loadOAuthProvider(provider.id);
+    } catch (err) {
+      display.write(
+        display.error(
+          `Could not load OAuth plugin for ${provider.label}: ${(err as Error).message}`,
+        ),
+      );
+      return { ran: false, skipReason: 'oauth-plugin-missing' };
+    }
+
+    const ua = wizardUserAgent(prompts, display);
+    const runtime = new OAuthProviderRuntime(oauthProvider, paths);
+    let tokens;
+    try {
+      tokens = await runtime.login(ua);
+    } catch (err) {
+      display.write(
+        display.error(
+          `${provider.label} sign-in failed: ${(err as Error).message}`,
+        ),
+      );
+      return { ran: false, skipReason: 'oauth-failed' };
+    }
+
+    // Pick a default model from the registry's known list; user can /model later.
+    const modelId = oauthProvider.defaultModels?.[0] ?? '';
+
+    const config: AidenConfig = {
+      ...DEFAULT_CONFIG,
+      model: { provider: provider.id, modelId },
+      agent: { ...DEFAULT_CONFIG.agent, max_turns: DEFAULT_CONFIG.agent.max_turns },
+      display: { ...DEFAULT_CONFIG.display, skin: 'default' },
+      memory: { ...DEFAULT_CONFIG.memory },
+      providers: {
+        ...(DEFAULT_CONFIG.providers ?? {}),
+        // Marker for /providers + future tooling. The actual bearer
+        // lives in tokenStore — config.yaml does NOT carry the secret.
+        [provider.id]: { auth: 'oauth' },
+      },
+      terminal: { backend: 'auto' },
+    };
+
+    if (opts.smokeTest) {
+      display.write('\n✓ Smoke test complete — would have saved this config:\n');
+      display.write(`${JSON.stringify(config, null, 2)}\n`);
+      display.write(
+        `(would have saved tokens to ${paths.root}/auth/${provider.id}.json)\n`,
+      );
+      return {
+        ran: false,
+        skipReason: 'smoke-test',
+        config,
+        envFile: paths.envFile,
+      };
+    }
+
+    const cm = new ConfigManager(paths);
+    await cm.save(config);
+
+    // Confirmation surface — what's wired now.
+    const expIso = new Date(tokens.expiresAtMs).toISOString();
+    display.write(`\n✓ ${provider.label} authed.\n`);
+    if (tokens.account) display.write(`  Account: ${tokens.account}\n`);
+    if (oauthProvider.defaultModels?.length) {
+      display.write(
+        `  Models: ${oauthProvider.defaultModels.join(', ')}\n`,
+      );
+    }
+    display.write(`  Tokens stored at: ${paths.root}/auth/${provider.id}.json\n`);
+    display.write(`  Expires: ${expIso}\n`);
+    display.write(
+      `\nTokens encrypted with a machine-derived key. Protects against casual ` +
+        `file inspection but NOT against code execution on this machine. ` +
+        `Real OS keychain integration in v4.1.\n`,
+    );
+    display.write(
+      `\nRun \`aiden\` to start chatting, or \`aiden doctor\` to verify everything looks good.\n`,
+    );
+
+    return { ran: true, config, envFile: paths.envFile };
   }
 
   // Step 2: model selection

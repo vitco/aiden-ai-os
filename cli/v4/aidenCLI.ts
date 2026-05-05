@@ -411,7 +411,7 @@ export async function buildAgentRuntime(
   const resolver = new RuntimeResolver(credentialResolver);
   let adapter;
   try {
-    adapter = await resolver.resolve({ providerId, modelId, config });
+    adapter = await resolver.resolve({ providerId, modelId, config, paths });
   } catch (err) {
     display.printError(
       `Could not resolve provider '${providerId}' / model '${modelId}': ${(err as Error).message}`,
