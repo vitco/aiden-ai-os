@@ -239,6 +239,17 @@ async function defaultPrompts(): Promise<PromptIO> {
   };
 }
 
+// Version surfaced by the post-wizard tutorial. Read from package.json
+// so the bumped version flows through without a manual edit per release.
+const AIDEN_VERSION: string = (() => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    return (require('../../package.json') as { version?: string }).version ?? '4.0.0';
+  } catch {
+    return '4.0.0';
+  }
+})();
+
 // ─── Phase 18: OAuth helper plumbing for the wizard ─────────────────────
 // loadOAuthProvider + openOAuthBrowserUrl live in cli/v4/auth/loadProvider.ts
 // so /auth login (Task 5) and the wizard share one implementation.
@@ -263,14 +274,76 @@ function wizardUserAgent(prompts: PromptIO, display: Display): OAuthUserAgent {
   };
 }
 
-/** Determine whether the wizard should auto-fire (config.yaml absent). */
+/**
+ * Determine whether the wizard should auto-fire. Phase 18 Task 7: lenient
+ * — any of the following counts as "first run":
+ *   - paths.root doesn't exist (truly fresh install)
+ *   - config.yaml missing (legacy criterion)
+ *   - config exists but providers section is empty (manual config that
+ *     can't actually run, or wizard interrupted between save and provider
+ *     entry write)
+ *
+ * Plugins-not-granted is intentionally NOT a fresh-install signal: bundled
+ * plugins (CDP browser) ship in pending-grant state and the boot card
+ * already surfaces them honestly. Forcing a user through grants before
+ * their first chat would be hostile.
+ */
 export async function isFreshInstall(paths: AidenPaths): Promise<boolean> {
   try {
-    await fs.access(paths.configYaml);
-    return false;
+    await fs.access(paths.root);
   } catch {
     return true;
   }
+  try {
+    await fs.access(paths.configYaml);
+  } catch {
+    return true;
+  }
+  // Config exists. Inspect for an empty providers section.
+  try {
+    const text = await fs.readFile(paths.configYaml, 'utf8');
+    // Cheap parse: split on lines, look for `providers:` followed by a
+    // top-level key. Avoids pulling YAML into this hot-path module just
+    // for a presence check. ConfigManager.load handles full validation
+    // when the wizard isn't fired.
+    const lines = text.split(/\r?\n/);
+    let inProviders = false;
+    let providerCount = 0;
+    for (const line of lines) {
+      if (/^providers\s*:/i.test(line)) {
+        inProviders = true;
+        continue;
+      }
+      if (inProviders) {
+        if (/^\S/.test(line)) break; // top-level key reached → leave block
+        if (/^  \S/.test(line) && !/^\s*#/.test(line)) providerCount++;
+      }
+    }
+    if (providerCount === 0) return true;
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Print the post-wizard tutorial. Under 10 lines. Lives here so both
+ * the API-key path and the OAuth path render the same closing screen
+ * without copy-pasting copy.
+ *
+ * Phase 18 Task 7: deliberately minimal. No feature lists, no
+ * architecture explanations, no marketing copy — users discover via
+ * use. Banked for v4.1: post-launch onboarding analytics on which
+ * examples users try first.
+ */
+export function printPostWizardTutorial(display: Display, version: string): void {
+  display.write(`\n✓ Setup complete. Aiden v${version} is ready.\n\n`);
+  display.write('Try one of these to get started:\n');
+  display.write('  • ask me anything\n');
+  display.write('  • remember that I prefer concise answers\n');
+  display.write('  • search the web for the latest on <topic>\n');
+  display.write('  • play me a popular song\n');
+  display.write('\nType /help for all commands, /quit to exit.\n');
 }
 
 export async function probeOllama(opts: { fetchImpl: typeof fetch; timeoutMs?: number }): Promise<boolean> {
@@ -434,9 +507,7 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
         `file inspection but NOT against code execution on this machine. ` +
         `Real OS keychain integration in v4.1.\n`,
     );
-    display.write(
-      `\nRun \`aiden\` to start chatting, or \`aiden doctor\` to verify everything looks good.\n`,
-    );
+    printPostWizardTutorial(display, AIDEN_VERSION);
 
     return { ran: true, config, envFile: paths.envFile };
   }
@@ -588,12 +659,11 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     await upsertEnvVar(paths.envFile, 'CUSTOM_BASE_URL', baseUrl);
   }
 
-  // Step 6: welcome
+  // Step 6: tutorial
   display.write(
-    `\n${display.agentTurn(
-      `You're set. Provider **${provider.label}** with model **${modelId}**.\n\nRun \`aiden\` to start chatting, or \`aiden doctor\` to verify everything looks good.`,
-    )}`,
+    `\n${kleur.green(`✓ ${provider.label}`)} configured with model ${kleur.cyan(modelId)}.\n`,
   );
+  printPostWizardTutorial(display, AIDEN_VERSION);
 
   return { ran: true, config, envFile: paths.envFile };
 }

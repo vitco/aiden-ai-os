@@ -88,6 +88,7 @@ import {
   resolveBundledPluginsDir,
   formatPluginBootCard,
 } from '../../core/v4/plugins';
+import { OAuthProviderRegistry } from '../../core/v4/auth/providerAuth';
 
 import { registerAllTools } from '../../tools/v4';
 import { setupMcpFromConfig } from '../../tools/v4/mcpSetup';
@@ -478,11 +479,19 @@ export async function buildAgentRuntime(
   // restoreBundledPluginsIfNeeded remains available for future
   // dep-free bundled plugins but is intentionally not invoked at boot.
   const bundledDir = await resolveBundledPluginsDir().catch(() => null);
+  // Phase 18: OAuth provider registry. The bundled claude-pro and
+  // chatgpt-plus plugins call ctx.registerOAuthProvider() during their
+  // register() — without a registry wired in, that throws. /auth login,
+  // /auth refresh, and the inference resolver all read tokens via
+  // tokenStore directly so this registry is mostly a side-effect home;
+  // useful when /auth needs the OAuthProvider object (refresh path).
+  const oauthRegistry = new OAuthProviderRegistry();
   const pluginLoader = new PluginLoader({
     paths,
     toolRegistry,
     bundledDir: bundledDir ?? undefined,
     evaluatePermissions: evaluatePermissionState,
+    oauthRegistry,
     log: (level, msg) => {
       // Soft logging — boot card surfaces user-visible state separately.
       // File-only; avoid REPL spinner noise.

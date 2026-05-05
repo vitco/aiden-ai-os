@@ -68,10 +68,11 @@ async function makeIsolatedHome(): Promise<string> {
   await fs.mkdir(path.join(root, 'plugins'), { recursive: true });
   await fs.mkdir(path.join(root, 'logs'), { recursive: true });
   await fs.mkdir(path.join(root, 'sessions'), { recursive: true });
-  // Make config.yaml non-empty so isFreshInstall returns false.
+  // Make config.yaml non-empty so isFreshInstall returns false. Phase 18
+  // Task 7 also requires a non-empty providers: section.
   await fs.writeFile(
     path.join(root, 'config.yaml'),
-    'model:\n  provider: fake\n  modelId: fake-model\n',
+    'model:\n  provider: fake\n  modelId: fake-model\nproviders:\n  fake:\n    apiKey: test\n',
     'utf8',
   );
   await fs.writeFile(path.join(root, '.env'), 'FAKE=1\n', 'utf8');
@@ -79,7 +80,13 @@ async function makeIsolatedHome(): Promise<string> {
 }
 
 async function writeConfig(root: string, body: Record<string, unknown>): Promise<void> {
-  await fs.writeFile(path.join(root, 'config.yaml'), yaml.dump(body), 'utf8');
+  // Phase 18 Task 7: isFreshInstall now checks for an empty providers
+  // section in addition to missing config.yaml. Inject a stub providers
+  // entry so these moat-boot tests don't trip the wizard.
+  const merged = body.providers
+    ? body
+    : { ...body, providers: { fake: { apiKey: 'test' } } };
+  await fs.writeFile(path.join(root, 'config.yaml'), yaml.dump(merged), 'utf8');
 }
 
 beforeEach(async () => {
