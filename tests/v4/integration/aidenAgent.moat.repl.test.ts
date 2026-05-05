@@ -260,6 +260,12 @@ describe('REPL boot — full moat active (real LLM)', () => {
       const observedTraces: Array<unknown> = [];
 
       const result = await withRateLimitFallback(async (p) => {
+        // Reset the observed-traces buffer at the start of every retry —
+        // otherwise a 429 mid-call advances to the next slot, the agent
+        // runs again, and the spy fires twice, breaking the strict
+        // `=== 1` assertion below. The fallback chain is correct; the
+        // captured-state pattern is what needed to be retry-aware.
+        observedTraces.length = 0;
         const registry = buildRegistry();
 
         // Stub skill_manage so SkillTeacher's create call is a no-op.

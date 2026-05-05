@@ -81,6 +81,34 @@ describe('parseLegacyFunctionSyntax', () => {
     expect(out).not.toBeNull();
     expect(out!.toolCalls[0].arguments).toEqual({});
   });
+
+  it('parses XML-tag variant <function=name JSON</function> (Phase 16c.1)', () => {
+    // The format Llama-3.3 emits when it confuses itself harder — no
+    // parens, JSON object directly, then a closing `</function>` tag.
+    // Was the dominant cause of the moat.repl integration flake.
+    const text =
+      '<function=memory_add {"content": "I prefer concise answers.", "file": "MEMORY.md"} </function>\n';
+    const out = parseLegacyFunctionSyntax(text);
+    expect(out).not.toBeNull();
+    expect(out!.toolCalls).toHaveLength(1);
+    expect(out!.toolCalls[0].name).toBe('memory_add');
+    expect(out!.toolCalls[0].arguments).toEqual({
+      content: 'I prefer concise answers.',
+      file: 'MEMORY.md',
+    });
+    expect(out!.finishReason).toBe('tool_use');
+  });
+
+  it('XML-tag variant: nested-brace JSON survives the brace walker', () => {
+    const text =
+      '<function=run {"cmd": "ls", "options": {"recursive": true, "depth": 2}}</function>';
+    const out = parseLegacyFunctionSyntax(text);
+    expect(out!.toolCalls[0].name).toBe('run');
+    expect(out!.toolCalls[0].arguments).toEqual({
+      cmd: 'ls',
+      options: { recursive: true, depth: 2 },
+    });
+  });
 });
 
 describe('tryRecoverLegacyToolCall', () => {

@@ -168,20 +168,36 @@ export function tryRecoverLegacyToolCall(
 export function parseLegacyFunctionSyntax(
   text: string,
 ): ProviderCallOutput | null {
-  // Match `<function=NAME(JSON)>` non-greedily. The `JSON` body may itself
-  // contain `>` chars but the JSON object is balanced so we walk braces
-  // explicitly to find the closing one.
-  const reHead = /<function=([A-Za-z0-9_.\-]+)\(/g;
+  // Llama-3.3 emits two distinct legacy formats when it confuses itself:
+  //   (A) `<function=NAME(JSON)>`            — paren-delimited args
+  //   (B) `<function=NAME JSON</function>`   — XML-tag-delimited args
+  // We handle both. (A) walks balanced parens; (B) walks balanced braces.
+  // Phase 16c.1: variant (B) was the dominant cause of the moat.repl
+  // integration flake — Groq returns 400 `tool_use_failed` and the
+  // adapter has to recover client-side.
+  const reHead = /<function=([A-Za-z0-9_.\-]+)\s*([({])/g;
   const calls: ToolCallRequest[] = [];
   let match: RegExpExecArray | null;
   let counter = 0;
   while ((match = reHead.exec(text)) !== null) {
     const name = match[1];
-    let i = match.index + match[0].length;
+    const opener = match[2];
+    const closer = opener === '(' ? ')' : '}';
+    // For (B) the regex's `{` is the opening brace of the JSON object —
+    // we want to keep it inside argsBody so JSON.parse sees the full
+    // object. For (A) the `(` is delimiter only and is consumed.
+    let i = opener === '('
+      ? match.index + match[0].length
+      : match.index + match[0].length - 1;
     let depth = 1;
-    let start = i;
+    const start = i;
     let inString = false;
     let escape = false;
+    if (opener === '{') {
+      // We're starting at the `{`; consume it and bump depth back to 1
+      // for the brace-walker below.
+      i += 1;
+    }
     while (i < text.length && depth > 0) {
       const ch = text[i];
       if (escape) {
@@ -192,15 +208,19 @@ export function parseLegacyFunctionSyntax(
         if (ch === '"') inString = false;
       } else if (ch === '"') {
         inString = true;
-      } else if (ch === '(') {
+      } else if (ch === opener) {
         depth += 1;
-      } else if (ch === ')') {
+      } else if (ch === closer) {
         depth -= 1;
       }
       i += 1;
     }
     if (depth !== 0) continue;
-    const argsBody = text.slice(start, i - 1);
+    // For (A) drop the trailing `)`; for (B) keep the trailing `}` since
+    // it's part of the JSON object.
+    const argsBody = opener === '('
+      ? text.slice(start, i - 1)
+      : text.slice(start, i);
     let args: Record<string, unknown> = {};
     if (argsBody.trim().length > 0) {
       try {
