@@ -110,6 +110,24 @@ describe('checkForUpdate', () => {
     expect(ln).toContain('npm install');
   });
 
+  it('6a. firstRun=true on first call, false thereafter', async () => {
+    const paths = resolveAidenPaths({ rootOverride: tmpRoot });
+    await ensureAidenDirsExist(paths);
+    const fetchImpl = async () => ({ version: '4.0.0-beta.2' });
+    const a = await checkForUpdate({
+      paths,
+      installedVersion: '4.0.0-beta.1',
+      fetchImpl,
+    });
+    expect(a.firstRun).toBe(true);
+    const b = await checkForUpdate({
+      paths,
+      installedVersion: '4.0.0-beta.1',
+      fetchImpl,
+    });
+    expect(b.firstRun).toBe(false);
+  });
+
   it('6. cache invalidates when installed version changes', async () => {
     const paths = resolveAidenPaths({ rootOverride: tmpRoot });
     await ensureAidenDirsExist(paths);

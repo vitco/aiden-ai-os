@@ -56,6 +56,14 @@ export interface UpdateStatus {
   updateAvailable: boolean;
   /** Whether this status came from the disk cache (no network this boot). */
   fromCache: boolean;
+  /**
+   * Phase 20 Task 6: true when no prior cache file existed before this
+   * call — i.e. first-ever boot of this aiden install. Lets the boot
+   * path surface a louder warn() instead of the dim() update line, since
+   * a brand-new install shipping with a stale version is unusual enough
+   * to flag explicitly.
+   */
+  firstRun: boolean;
 }
 
 export interface CheckUpdateOptions {
@@ -177,7 +185,13 @@ export async function checkForUpdate(opts: CheckUpdateOptions): Promise<UpdateSt
   const installed = opts.installedVersion;
 
   if (env.AIDEN_NO_UPDATE_CHECK === '1') {
-    return { installed, latest: null, updateAvailable: false, fromCache: false };
+    return {
+      installed,
+      latest: null,
+      updateAvailable: false,
+      fromCache: false,
+      firstRun: false,
+    };
   }
 
   const cacheFile = opts.cacheFile ?? defaultCacheFile(opts.paths);
@@ -185,10 +199,17 @@ export async function checkForUpdate(opts: CheckUpdateOptions): Promise<UpdateSt
   const now = (opts.now ?? Date.now)();
 
   const cached = await readCache(cacheFile);
+  const firstRun = cached === null;
   if (cached && now - cached.ts < ttl && cached.installed === installed) {
     const updateAvailable =
       cached.latest !== null && safeCompare(cached.latest, installed) > 0;
-    return { installed, latest: cached.latest, updateAvailable, fromCache: true };
+    return {
+      installed,
+      latest: cached.latest,
+      updateAvailable,
+      fromCache: true,
+      firstRun: false,
+    };
   }
 
   let latest: string | null = null;
@@ -203,7 +224,7 @@ export async function checkForUpdate(opts: CheckUpdateOptions): Promise<UpdateSt
   await writeCache(cacheFile, { ts: now, latest, installed });
 
   const updateAvailable = latest !== null && safeCompare(latest, installed) > 0;
-  return { installed, latest, updateAvailable, fromCache: false };
+  return { installed, latest, updateAvailable, fromCache: false, firstRun };
 }
 
 /** Wrap `compareVersions` so unparseable strings don't blow up the boot path. */

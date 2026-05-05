@@ -537,7 +537,13 @@ export async function buildAgentRuntime(
         installedVersion: pkg.version,
       });
       const line = formatUpdateLine(status);
-      if (line) display.dim(line);
+      if (line) {
+        // Phase 20 Task 6: louder surfacing on first-ever boot when the
+        // installed package is already behind. Subsequent boots stay
+        // low-key (dim) — users have seen the line before.
+        if (status.firstRun && status.updateAvailable) display.warn(line);
+        else display.dim(line);
+      }
     } catch {
       /* silent — update check is best-effort */
     }
