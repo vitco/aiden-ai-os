@@ -347,9 +347,18 @@ export async function buildAgentRuntime(
   // (from the user's shell or Windows User env) win — this is fill-only.
   loadAidenEnvFile(paths.envFile);
 
-  // Phase 16b.3: first-run SOUL.md seed. Hermes-style idempotent write — if
-  // the user already has a SOUL.md (even one byte), we never touch it.
-  await ensureSoulMdSeeded(paths).catch(() => undefined);
+  // Phase 16b.3: first-run SOUL.md seed. Hermes-style idempotent write.
+  // Phase 16g: the seeder may emit a one-time `notice` when SOUL.md is
+  // user-edited and the bundled default has been upgraded — we surface
+  // it via a dim line on boot so the user can opt in to the new
+  // autonomy directives at their leisure.
+  let soulNotice: string | undefined;
+  try {
+    const r = await ensureSoulMdSeeded(paths);
+    soulNotice = r.notice;
+  } catch {
+    /* permission etc. — non-fatal */
+  }
 
   // Phase 16b.1: first-run / self-heal copy of bundled skills. No-op
   // when the user's skills dir is already populated.
@@ -448,6 +457,12 @@ export async function buildAgentRuntime(
   display.dim(
     `[skills] ${skillCounts.loaded} loaded, ${skillCounts.skipped} skipped${skipNote}`,
   );
+  // Phase 16g: surface the SOUL.md upgrade notice once on boot (only
+  // when set — for users with edited SOUL.md that would have been
+  // silently overwritten by the upgrade).
+  if (soulNotice) {
+    display.dim(`[soul] ${soulNotice}`);
+  }
 
   // ── Phase 9 moat (stateless / wraps memory) ──────────────────────────
   const memoryGuard = new MemoryGuard(memoryManager);

@@ -63,6 +63,54 @@ describe('ensureSoulMdSeeded', () => {
     const content = await fs.readFile(paths.soulMd, 'utf8');
     expect(content).toBe(DEFAULT_SOUL_MD);
   });
+
+  it('Phase 16g: silent-upgrades a prior bundled default verbatim', async () => {
+    // User boot 16b.3 → SOUL.md gets the 16b.3 default. Boot 16g should
+    // silently replace because user clearly never edited it (matches
+    // the prior bundled hash). The autonomy-directive upgrade ships
+    // without prompting in this case.
+    const { PREVIOUS_BUNDLED_SOULS } = await import(
+      '../../cli/v4/defaultSoul'
+    );
+    const root = await makeTempRoot();
+    const paths = resolveAidenPaths({ rootOverride: root });
+    await ensureAidenDirsExist(paths);
+    await fs.writeFile(paths.soulMd, PREVIOUS_BUNDLED_SOULS[0], 'utf8');
+    const result = await ensureSoulMdSeeded(paths);
+    expect(result.outcome).toBe('upgraded');
+    expect(result.seeded).toBe(true);
+    const content = await fs.readFile(paths.soulMd, 'utf8');
+    expect(content).toBe(DEFAULT_SOUL_MD);
+    // Sanity: new content includes the autonomy directives.
+    expect(content).toMatch(/<act_dont_ask>/);
+    expect(content).toMatch(/<keep_going>/);
+  });
+
+  it('Phase 16g: preserves user-edited content + emits notice', async () => {
+    const root = await makeTempRoot();
+    const paths = resolveAidenPaths({ rootOverride: root });
+    await ensureAidenDirsExist(paths);
+    const userEdit =
+      'You are Aiden.\nMy custom persona — keep it.\nNo autonomy directives wanted.';
+    await fs.writeFile(paths.soulMd, userEdit, 'utf8');
+    const result = await ensureSoulMdSeeded(paths);
+    expect(result.outcome).toBe('preserved');
+    expect(result.seeded).toBe(false);
+    expect(result.notice).toMatch(/autonomy directives/);
+    const content = await fs.readFile(paths.soulMd, 'utf8');
+    expect(content).toBe(userEdit);
+  });
+
+  it('Phase 16g: returns unchanged outcome when SOUL.md already matches current default', async () => {
+    const root = await makeTempRoot();
+    const paths = resolveAidenPaths({ rootOverride: root });
+    await ensureAidenDirsExist(paths);
+    await fs.writeFile(paths.soulMd, DEFAULT_SOUL_MD, 'utf8');
+    const result = await ensureSoulMdSeeded(paths);
+    expect(result.outcome).toBe('unchanged');
+    expect(result.seeded).toBe(false);
+    expect(result.notice).toBeUndefined();
+  });
 });
 
 describe('PromptBuilder slot 1 SOUL.md loading', () => {
