@@ -160,12 +160,14 @@ describe('SetupWizard', () => {
   });
 
   it('model is filtered by provider', async () => {
-    // Groq is option [6] with 3 models. Pick model index 2 → llama-3.1-8b-instant.
+    // Phase 16f: providers reordered (Together moved above Groq as the
+    // recommended primary). Groq is now option [7] with 3 models.
+    // Pick model index 2 → llama-3.1-8b-instant.
     const { display } = sinkDisplay();
     const result = await runSetupWizard({
       paths,
       display,
-      prompts: scriptedPrompts({ choose: [6, 2], input: ['gsk-test'] }),
+      prompts: scriptedPrompts({ choose: [7, 2], input: ['gsk-test'] }),
       skipValidation: true,
     });
     expect(result.ran).toBe(true);

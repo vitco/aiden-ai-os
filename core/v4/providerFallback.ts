@@ -297,13 +297,22 @@ export class ChainExhaustedError extends Error {
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
 const TOGETHER_BASE_URL = 'https://api.together.xyz/v1';
 const DEFAULT_GROQ_MODEL = 'llama-3.3-70b-versatile';
-const DEFAULT_TOGETHER_MODEL = 'meta-llama/Llama-3.3-70B-Instruct-Turbo';
+// Phase 16f: Qwen3-235B replaces Llama-3.3-Turbo as the Together primary.
+// Strong tool calling, MoE 22B active, throughput tier ~$0.20/M.
+const DEFAULT_TOGETHER_MODEL = 'Qwen/Qwen3-235B-A22B-Instruct-2507-tput';
+const TOGETHER_FALLBACK_MODEL = 'meta-llama/Llama-3.3-70B-Instruct-Turbo';
 
 export interface DefaultSlotsOptions {
   /** Optional override for Groq model id. */
   groqModel?: string;
-  /** Optional override for Together model id. */
+  /** Optional override for Together primary model id (default: Qwen3-235B). */
   togetherModel?: string;
+  /**
+   * Phase 16f: optional override for the secondary Together slot's model.
+   * Defaults to Llama-3.3-70B-Instruct-Turbo so the Together $10 credit
+   * has a flagship fallback when Qwen3 is rate-limited.
+   */
+  togetherFallbackModel?: string;
   /**
    * Adapter factory. Tests inject a stub; the runtime passes a closure that
    * builds a ChatCompletionsAdapter. Keeping this injectable means this
@@ -355,10 +364,10 @@ export function buildDefaultSlots(opts: DefaultSlotsOptions): ProviderSlot[] {
   };
 
   const togetherKey = env.TOGETHER_API_KEY;
-  const togetherSlot: ProviderSlot = {
-    id: 'together',
+  const buildTogetherSlot = (id: string, model: string): ProviderSlot => ({
+    id,
     providerId: 'together',
-    modelId: togetherModel,
+    modelId: model,
     keyPresent: !!togetherKey,
     keyTail: togetherKey ? togetherKey.slice(-4) : null,
     envVar: 'TOGETHER_API_KEY',
@@ -367,18 +376,27 @@ export function buildDefaultSlots(opts: DefaultSlotsOptions): ProviderSlot[] {
         ? opts.adapterFactory({
             baseUrl: TOGETHER_BASE_URL,
             apiKey: togetherKey,
-            model: togetherModel,
+            model,
             providerName: 'together',
           })
         : null,
-  };
+  });
 
+  // Phase 16f: Together + Qwen3 is the new default primary; Groq slots stay
+  // in the chain as legacy fallbacks (activate only when the env vars are
+  // set). User cleared the Groq slots in 16f after they kept hammering all
+  // 4 within 2 turns of normal use; least-used spreading helped but Groq's
+  // free-tier TPM cap is too tight for browser-tool-heavy turns. Together
+  // ($10 paid credit, throughput tier) is the practical primary.
+  const togetherFallbackModel =
+    opts.togetherFallbackModel ?? TOGETHER_FALLBACK_MODEL;
   return [
+    buildTogetherSlot('together', togetherModel),
+    buildTogetherSlot('together-fallback', togetherFallbackModel),
     buildGroqSlot('groq', 'GROQ_API_KEY'),
     buildGroqSlot('groq2', 'GROQ_API_KEY_2'),
     buildGroqSlot('groq3', 'GROQ_API_KEY_3'),
     buildGroqSlot('groq4', 'GROQ_API_KEY_4'),
-    togetherSlot,
   ];
 }
 

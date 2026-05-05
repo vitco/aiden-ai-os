@@ -451,6 +451,22 @@ export const MODEL_CATALOG: ModelEntry[] = [
   },
 
   // ─── together ────────────────────────────────────────────────────────────
+  // Phase 16f: Qwen3-235B is the new Together default — strong tool-calling,
+  // MoE 22B active params, throughput tier ~$0.20/M. Replaces Groq Llama-3.3
+  // as the primary in the runtime fallback chain.
+  {
+    id: 'Qwen/Qwen3-235B-A22B-Instruct-2507-tput',
+    displayName: 'Qwen3 235B Instruct (Together)',
+    providerId: 'together',
+    contextLength: 131_072,
+    supportsToolCalling: true,
+    supportsVision: false,
+    supportsReasoning: false,
+    pricing: { inputPerM: 0.2, outputPerM: 0.2 },
+    isDefault: true,
+    tier: 'flagship',
+    notes: 'MoE 22B active. Strong tool calling. Throughput tier.',
+  },
   {
     id: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
     displayName: 'Llama 3.3 70B Turbo',
@@ -460,7 +476,7 @@ export const MODEL_CATALOG: ModelEntry[] = [
     supportsVision: false,
     supportsReasoning: false,
     pricing: { inputPerM: 0.88, outputPerM: 0.88 },
-    isDefault: true,
+    isDefault: false,
     tier: 'flagship',
   },
   {

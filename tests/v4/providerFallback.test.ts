@@ -158,7 +158,7 @@ describe('runFallbackChain', () => {
 });
 
 describe('buildDefaultSlots', () => {
-  it('builds 5 slots in groq → groq2 → groq3 → groq4 → together order', () => {
+  it('builds 6 slots: together → together-fallback → groq×4 (Phase 16f)', () => {
     const slots = buildDefaultSlots({
       adapterFactory: () => okStub(),
       env: {
@@ -168,17 +168,33 @@ describe('buildDefaultSlots', () => {
       },
     });
     expect(slots.map((s) => s.id)).toEqual([
+      'together',
+      'together-fallback',
       'groq',
       'groq2',
       'groq3',
       'groq4',
-      'together',
     ]);
+    // Together slots both share TOGETHER_API_KEY so both keyPresent.
     expect(slots[0].keyPresent).toBe(true);
     expect(slots[1].keyPresent).toBe(true);
-    expect(slots[2].keyPresent).toBe(false);
-    expect(slots[3].keyPresent).toBe(false);
-    expect(slots[4].keyPresent).toBe(true);
+    expect(slots[2].keyPresent).toBe(true); // groq → GROQ_API_KEY
+    expect(slots[3].keyPresent).toBe(true); // groq2 → GROQ_API_KEY_2
+    expect(slots[4].keyPresent).toBe(false); // groq3 unset
+    expect(slots[5].keyPresent).toBe(false); // groq4 unset
+  });
+
+  it('Together primary uses Qwen3-235B by default; fallback uses Llama-3.3-Turbo (Phase 16f)', () => {
+    const slots = buildDefaultSlots({
+      adapterFactory: () => okStub(),
+      env: { TOGETHER_API_KEY: 'tk' },
+    });
+    const primary = slots.find((s) => s.id === 'together')!;
+    const fallback = slots.find((s) => s.id === 'together-fallback')!;
+    expect(primary.modelId).toBe('Qwen/Qwen3-235B-A22B-Instruct-2507-tput');
+    expect(fallback.modelId).toBe('meta-llama/Llama-3.3-70B-Instruct-Turbo');
+    expect(primary.providerId).toBe('together');
+    expect(fallback.providerId).toBe('together');
   });
 
   it('groq4 slot picks up GROQ_API_KEY_4', () => {
@@ -198,11 +214,14 @@ describe('buildDefaultSlots', () => {
       env: { GROQ_API_KEY: 'k' },
       groqModel: 'llama-custom',
       togetherModel: 'together-custom',
+      togetherFallbackModel: 'together-fallback-custom',
     });
-    expect(slots[0].modelId).toBe('llama-custom');
-    // groq4 inherits the groqModel; together is the last slot.
-    expect(slots[3].modelId).toBe('llama-custom');
-    expect(slots[4].modelId).toBe('together-custom');
+    // New order: together (custom) → together-fallback (custom) → groq×4
+    expect(slots[0].modelId).toBe('together-custom');
+    expect(slots[1].modelId).toBe('together-fallback-custom');
+    // groq slots inherit groqModel.
+    expect(slots[2].modelId).toBe('llama-custom');
+    expect(slots[5].modelId).toBe('llama-custom');
   });
 });
 

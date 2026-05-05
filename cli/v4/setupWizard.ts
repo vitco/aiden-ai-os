@@ -70,8 +70,25 @@ export const PROVIDERS: ProviderOption[] = [
     models: ['gpt-5', 'gpt-4o', 'gpt-4o-mini'],
   },
   {
+    id: 'together',
+    // Phase 16f: Together + Qwen3 is the recommended primary — strong tool
+    // calling, $0.20/M throughput tier, 131k context. Free $5-10 credit on
+    // signup covers a few hundred turns. Replaces Groq free tier as the
+    // first recommendation after the user's Groq slots kept hammering
+    // simultaneous 429s within 2 turns of normal use.
+    label: 'Together AI (recommended — Qwen3-235B, paid throughput tier)',
+    kind: 'key',
+    envVar: 'TOGETHER_API_KEY',
+    defaultModel: 'Qwen/Qwen3-235B-A22B-Instruct-2507-tput',
+    models: [
+      'Qwen/Qwen3-235B-A22B-Instruct-2507-tput',
+      'meta-llama/Llama-3.3-70B-Instruct-Turbo',
+      'deepseek-ai/DeepSeek-V3',
+    ],
+  },
+  {
     id: 'groq',
-    label: 'Groq (free tier — recommended for starting out)',
+    label: 'Groq (free tier — fast but tight TPM cap)',
     kind: 'key',
     envVar: 'GROQ_API_KEY',
     defaultModel: 'llama-3.3-70b-versatile',
@@ -83,13 +100,6 @@ export const PROVIDERS: ProviderOption[] = [
     kind: 'key',
     envVar: 'OPENROUTER_API_KEY',
     defaultModel: 'anthropic/claude-opus-4',
-  },
-  {
-    id: 'together',
-    label: 'Together AI',
-    kind: 'key',
-    envVar: 'TOGETHER_API_KEY',
-    defaultModel: 'meta-llama/Llama-3.3-70B-Instruct-Turbo',
   },
   {
     id: 'gemini',

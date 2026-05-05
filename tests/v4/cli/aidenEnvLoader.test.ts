@@ -39,12 +39,15 @@ describe('Phase 16c.2 — buildDefaultSlots envVar mapping', () => {
       },
     });
     const map = Object.fromEntries(slots.map((s) => [s.id, s.envVar]));
+    // Phase 16f: Together is now the primary slot. Both Together slots
+    // share TOGETHER_API_KEY (different model ids).
     expect(map).toEqual({
+      together: 'TOGETHER_API_KEY',
+      'together-fallback': 'TOGETHER_API_KEY',
       groq: 'GROQ_API_KEY',
       groq2: 'GROQ_API_KEY_2',
       groq3: 'GROQ_API_KEY_3',
       groq4: 'GROQ_API_KEY_4',
-      together: 'TOGETHER_API_KEY',
     });
   });
 

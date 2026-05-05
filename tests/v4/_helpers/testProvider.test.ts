@@ -66,7 +66,8 @@ describe('testProvider helper', () => {
     expect(p).not.toBeNull();
     expect(p!.source).toBe('together');
     expect(p!.providerId).toBe('together');
-    expect(p!.modelId).toBe('meta-llama/Llama-3.3-70B-Instruct-Turbo');
+    // Phase 16f: Together default model is now Qwen3-235B (was Llama-3.3-Turbo).
+    expect(p!.modelId).toBe('Qwen/Qwen3-235B-A22B-Instruct-2507-tput');
   });
 
   it('returns null when no keys are set', async () => {
