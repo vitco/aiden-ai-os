@@ -32,6 +32,7 @@ import type { SkillLoader } from '../../core/v4/skillLoader';
 import type { RuntimeResolver } from '../../providers/v4/runtimeResolver';
 import type { ConfigManager } from '../../core/v4/config';
 import type { PersonalityManager } from '../../core/v4/personality';
+import type { PluginLoader } from '../../core/v4/plugins/pluginLoader';
 import { ModelMetadata } from '../../core/v4/modelMetadata';
 import type { Message } from '../../providers/v4/types';
 import type { HonestyTraceEntry } from '../../moat/honestyEnforcement';
@@ -84,6 +85,9 @@ export interface ChatSessionOptions {
 
   /** Phase 16b.4: personality overlay manager (forwarded to /personality + /debug-prompt). */
   personalityManager?: PersonalityManager;
+
+  /** Phase 17 Task 5: forwarded to /plugins commands. */
+  pluginLoader?: PluginLoader;
 
   /** Optional: resume an existing session id. */
   resumeSessionId?: string;
@@ -235,6 +239,12 @@ export class ChatSession implements ChatSessionLike {
             paths: this.opts.paths,
             personalityManager: this.opts.personalityManager,
             agent: this.opts.agent,
+            pluginLoader: this.opts.pluginLoader,
+            confirm: async (msg: string) => {
+              const r = await this.opts.promptApi?.readLine(msg);
+              if (typeof r !== 'string') return false;
+              return /^(y|yes)$/i.test(r.trim());
+            },
           });
           if (result.exit) break;
           if (result.clearHistory) this.history = [];

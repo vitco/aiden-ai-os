@@ -81,6 +81,12 @@ import {
 } from '../../core/v4/providerFallback';
 import { restoreBundledSkillsIfNeeded } from '../../core/v4/skillBundledRestore';
 import { createFileLogger } from '../../core/v4/aidenLogger';
+import {
+  PluginLoader,
+  evaluatePermissionState,
+  resolveBundledPluginsDir,
+  formatPluginBootCard,
+} from '../../core/v4/plugins';
 
 import { registerAllTools } from '../../tools/v4';
 import { setupMcpFromConfig } from '../../tools/v4/mcpSetup';
@@ -457,6 +463,47 @@ export async function buildAgentRuntime(
   display.dim(
     `[skills] ${skillCounts.loaded} loaded, ${skillCounts.skipped} skipped${skipNote}`,
   );
+  // Phase 17 Task 5: plugin loader boot.
+  //
+  // Bundled plugins (e.g. aiden-plugin-cdp-browser) are discovered
+  // IN-PLACE from the package's plugins/ directory rather than copied
+  // to the user dir. Reason: bundled plugins may depend on packages
+  // declared in the runtime's package.json (chrome-remote-interface
+  // for CDP). require() from a user-dir copy would fail because the
+  // user dir has no node_modules. Users still install third-party
+  // plugins into paths.pluginsDir via /plugins install — those plugins
+  // ship with their own deps or stay dep-free.
+  //
+  // restoreBundledPluginsIfNeeded remains available for future
+  // dep-free bundled plugins but is intentionally not invoked at boot.
+  const bundledDir = await resolveBundledPluginsDir().catch(() => null);
+  const pluginLoader = new PluginLoader({
+    paths,
+    toolRegistry,
+    bundledDir: bundledDir ?? undefined,
+    evaluatePermissions: evaluatePermissionState,
+    log: (level, msg) => {
+      // Soft logging — boot card surfaces user-visible state separately.
+      // File-only; avoid REPL spinner noise.
+      if (level === 'warn') skillsLogger.warn(`[plugins] ${msg}`);
+      else if (level === 'error') skillsLogger.error(`[plugins] ${msg}`);
+    },
+  });
+  await pluginLoader.discoverAndLoad();
+  // Activate granted plugins (e.g. CDP browser onActivate that ensures
+  // CDP is reachable). pending-grant + suspended plugins never had
+  // register() complete or never registered hooks, so this only fires
+  // hooks of fully-loaded plugins.
+  await pluginLoader.fireHook('onActivate');
+  // Render the boot card per Phase 17 Task 5 spec.
+  const bootCard = formatPluginBootCard(pluginLoader.getRegistry().list());
+  for (const ln of bootCard.lines) {
+    if (ln.severity === 'green') display.success(ln.text);
+    else if (ln.severity === 'yellow') display.warn(ln.text);
+    else if (ln.severity === 'red') display.printError(ln.text);
+    else display.dim(ln.text);
+  }
+
   // Phase 16g: surface the SOUL.md upgrade notice once on boot (only
   // when set — for users with edited SOUL.md that would have been
   // silently overwritten by the upgrade).
@@ -782,6 +829,7 @@ export async function buildAgentRuntime(
     resumeSessionId,
     fallbackAdapter,
     personalityManager,
+    pluginLoader,
   };
 }
 
@@ -827,6 +875,8 @@ export interface AgentRuntime {
   fallbackAdapter: FallbackAdapter | null;
   /** Phase 16b.4: personality overlay manager wired into chatSession + commands. */
   personalityManager: PersonalityManager;
+  /** Phase 17 Task 5: live plugin loader for /plugins commands + onTeardown on shutdown. */
+  pluginLoader: PluginLoader;
 }
 
 async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void> {
@@ -853,6 +903,7 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     fallbackAdapter: runtime.fallbackAdapter,
     paths: runtime.paths,
     personalityManager: runtime.personalityManager,
+    pluginLoader: runtime.pluginLoader,
   };
 
   if (cliOpts.tui) {
@@ -868,6 +919,9 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
   if (runtime.mcpClient) {
     await runtime.mcpClient.closeAll().catch(() => undefined);
   }
+  // Phase 17 Task 5: fire onTeardown so plugins (e.g. CDP browser) can
+  // close their resources before the process exits.
+  await runtime.pluginLoader.teardown().catch(() => undefined);
   runtime.store.close?.();
 }
 

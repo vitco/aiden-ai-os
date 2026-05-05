@@ -44,3 +44,16 @@ export type {
   PermissionState,
   PermissionEvaluation,
 } from './pluginPermissions';
+
+export {
+  resolveBundledPluginsDir,
+  restoreBundledPluginsIfNeeded,
+} from './pluginBundledRestore';
+export type { BundledPluginRestoreResult } from './pluginBundledRestore';
+
+export { formatPluginBootCard } from './pluginBootCard';
+export type {
+  BootCardLine,
+  BootCardResult,
+  BootCardSeverity,
+} from './pluginBootCard';

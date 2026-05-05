@@ -33,6 +33,7 @@
     "dist-bundle/cli.js",
     "dist-bundle/index.js",
     "config/",
+    "plugins/aiden-plugin-cdp-browser/",
     "workspace-templates/",
     "scripts/postinstall.js",
     "scripts/uninstall.ps1",
