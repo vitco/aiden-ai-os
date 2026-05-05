@@ -47,7 +47,7 @@ async function writePlugin(
     .map(
       (n) => `
       ctx.registerTool({
-        schema: { name: ${JSON.stringify(n)}, description: 'd', input_schema: { type: 'object', properties: {} } },
+        schema: { name: ${JSON.stringify(n)}, description: 'd', inputSchema: { type: 'object', properties: {} } },
         category: 'network', mutates: false,
         async execute() { return { real: true }; },
       });`,

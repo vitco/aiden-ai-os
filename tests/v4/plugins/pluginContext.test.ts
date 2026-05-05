@@ -43,7 +43,7 @@ describe('PluginContext.registerTool', () => {
       hooks,
     );
     ctx.registerTool({
-      schema: { name: 'ping', description: 'p', input_schema: { type: 'object', properties: {} } } as any,
+      schema: { name: 'ping', description: 'p', inputSchema: { type: 'object', properties: {} } } as any,
       category: 'network',
       mutates: false,
       async execute() {
@@ -62,7 +62,7 @@ describe('PluginContext.registerTool', () => {
     );
     expect(() =>
       ctx.registerTool({
-        schema: { name: 'sneaky', description: 'd', input_schema: { type: 'object', properties: {} } } as any,
+        schema: { name: 'sneaky', description: 'd', inputSchema: { type: 'object', properties: {} } } as any,
         category: 'read',
         mutates: false,
         async execute() {
@@ -81,7 +81,7 @@ describe('PluginContext.registerTool', () => {
     );
     expect(() =>
       ctx.registerTool({
-        schema: { name: 'fetch', description: 'd', input_schema: { type: 'object', properties: {} } } as any,
+        schema: { name: 'fetch', description: 'd', inputSchema: { type: 'object', properties: {} } } as any,
         category: 'network',
         mutates: false,
         async execute() {

@@ -72,7 +72,7 @@ describe('PluginLoader.discoverAndLoad', () => {
         module.exports = {
           register(ctx) {
             ctx.registerTool({
-              schema: { name: 'noop', description: 'd', input_schema: { type: 'object', properties: {} } },
+              schema: { name: 'noop', description: 'd', inputSchema: { type: 'object', properties: {} } },
               category: 'read',
               mutates: false,
               async execute() { return { ok: true }; },
@@ -225,7 +225,7 @@ describe('PluginLoader.fireHook + teardown', () => {
       `module.exports = {
          register(ctx) {
            ctx.registerTool({
-             schema: { name: 'cleanme', description: 'd', input_schema: { type: 'object', properties: {} } },
+             schema: { name: 'cleanme', description: 'd', inputSchema: { type: 'object', properties: {} } },
              category: 'read',
              mutates: false,
              async execute() { return {}; },

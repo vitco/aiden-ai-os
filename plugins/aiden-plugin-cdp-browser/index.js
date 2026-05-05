@@ -77,7 +77,7 @@ function buildToolHandlers(cdpClient) {
       schema: {
         name: 'browser_real_click',
         description: TOOL_DESCRIPTIONS.click,
-        input_schema: {
+        inputSchema: {
           type: 'object',
           properties: {
             selector: {
@@ -108,7 +108,7 @@ function buildToolHandlers(cdpClient) {
       schema: {
         name: 'browser_real_extract',
         description: TOOL_DESCRIPTIONS.extract,
-        input_schema: {
+        inputSchema: {
           type: 'object',
           properties: {
             selector: {
@@ -136,7 +136,7 @@ function buildToolHandlers(cdpClient) {
       schema: {
         name: 'browser_real_eval',
         description: TOOL_DESCRIPTIONS.eval,
-        input_schema: {
+        inputSchema: {
           type: 'object',
           properties: {
             script: {

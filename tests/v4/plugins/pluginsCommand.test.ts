@@ -148,7 +148,7 @@ describe('/plugins install (path-only)', () => {
     }, `module.exports = {
         register(ctx) {
           ctx.registerTool({
-            schema: { name: 'noop', description: 'd', input_schema: { type: 'object', properties: {} } },
+            schema: { name: 'noop', description: 'd', inputSchema: { type: 'object', properties: {} } },
             category: 'read', mutates: false,
             async execute() { return {}; },
           });
