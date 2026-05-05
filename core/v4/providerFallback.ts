@@ -49,6 +49,13 @@ export interface ProviderSlot {
   providerId: string;
   /** Model id valid for `providerId`. */
   modelId: string;
+  /**
+   * Phase 16c.2: env var name this slot reads from (e.g. `GROQ_API_KEY_2`).
+   * Populated by `buildDefaultSlots`; left undefined for synthetic slots
+   * (the runtime's `primary`). `/providers` uses this to render which env
+   * file the key came from when the user has multiple sources of truth.
+   */
+  envVar?: string;
 }
 
 /**
@@ -292,6 +299,7 @@ export function buildDefaultSlots(opts: DefaultSlotsOptions): ProviderSlot[] {
       modelId: groqModel,
       keyPresent: !!key,
       keyTail: key ? key.slice(-4) : null,
+      envVar,
       build: () =>
         key
           ? opts.adapterFactory({
@@ -311,6 +319,7 @@ export function buildDefaultSlots(opts: DefaultSlotsOptions): ProviderSlot[] {
     modelId: togetherModel,
     keyPresent: !!togetherKey,
     keyTail: togetherKey ? togetherKey.slice(-4) : null,
+    envVar: 'TOGETHER_API_KEY',
     build: () =>
       togetherKey
         ? opts.adapterFactory({
@@ -622,6 +631,8 @@ export class FallbackAdapter implements ProviderAdapter {
       modelId: string;
       keyPresent: boolean;
       keyTail: string | null;
+      /** Phase 16c.2: env var this slot reads from (for `/providers`). */
+      envVar?: string;
       state: SlotState;
       /** Remaining cooldown in seconds (0 when not cooling). Phase 16b.3. */
       cooldownRemainingSec: number;
@@ -647,6 +658,7 @@ export class FallbackAdapter implements ProviderAdapter {
           modelId: s.modelId,
           keyPresent: s.keyPresent,
           keyTail: s.keyTail,
+          envVar: s.envVar,
           state: { ...st, cooldownUntil: until > now ? until : null },
           cooldownRemainingSec: remainingSec,
           active: s.id === this.lastSuccessfulSlot,

@@ -124,6 +124,11 @@ function coerceMode<T extends string>(
 
 const VERSION = '4.0.0';
 
+// Phase 16c.2: env-source tracking lives in `cli/v4/envSources.ts` so
+// `commands/providers.ts` can import getEnvSource without circular deps.
+import { loadAidenEnvFile, getEnvSource } from './envSources';
+export { loadAidenEnvFile, getEnvSource };
+
 /**
  * Build slots for the runtime FallbackAdapter, putting the user's
  * configured (providerId, modelId) at the head so it stays primary
@@ -333,6 +338,14 @@ export async function buildAgentRuntime(
 ): Promise<AgentRuntime> {
   const paths = opts.pathsOverride ?? resolveAidenPaths();
   await ensureAidenDirsExist(paths);
+
+  // Phase 16c.2: load `paths.envFile` (the aiden-managed `.env` that
+  // `setupWizard.ts::upsertEnvVar` writes to) into `process.env` BEFORE
+  // any provider resolution. The bug: setup wrote keys to this file but
+  // the runtime never read them back, so users who configured via the
+  // wizard saw "GROQ_API_KEY unset" at boot. Existing process.env entries
+  // (from the user's shell or Windows User env) win — this is fill-only.
+  loadAidenEnvFile(paths.envFile);
 
   // Phase 16b.3: first-run SOUL.md seed. Hermes-style idempotent write — if
   // the user already has a SOUL.md (even one byte), we never touch it.

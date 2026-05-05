@@ -10,6 +10,7 @@
  * notes that fallback is not active.
  */
 import type { SlashCommand, SlashCommandContext } from '../commandRegistry';
+import { getEnvSource } from '../envSources';
 
 export const providers: SlashCommand = {
   name: 'providers',
@@ -55,8 +56,18 @@ export const providers: SlashCommand = {
       const stats = slot.keyPresent
         ? ` (${slot.state.successCount} ok, ${slot.state.rateLimitCount} 429)`
         : '';
+      // Phase 16c.2: show which env var the slot reads + which file/source
+      // the value came from. Resolves the "labels look swapped" confusion
+      // when Windows User env vars layer over the aiden-managed `.env`.
+      let sourceTag = '';
+      if (slot.envVar) {
+        const src = getEnvSource(slot.envVar);
+        if (src === 'aiden-env') sourceTag = ` ← ${slot.envVar} (aiden .env)`;
+        else if (src === 'preset') sourceTag = ` ← ${slot.envVar} (shell/system env)`;
+        else sourceTag = ` ← ${slot.envVar} (unset)`;
+      }
       ctx.display.write(
-        `  ${marker} ${slot.id.padEnd(8)} ${slot.providerId}/${slot.modelId}  ${keyDisplay}${stateBadge}${stats}\n`,
+        `  ${marker} ${slot.id.padEnd(8)} ${slot.providerId}/${slot.modelId}  ${keyDisplay}${stateBadge}${stats}${sourceTag}\n`,
       );
     }
     if (diag.activeSlotId) {
