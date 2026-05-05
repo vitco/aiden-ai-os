@@ -170,13 +170,27 @@ export class PromptBuilder {
     }
 
     // ── Slot 5: Active skills list ───────────────────────────────────
+    // Phase 16g: framing copied from Hermes (prompt_builder.py:907-934).
+    // "## Available skills" was passive; the model would skip it on fuzzy
+    // intents. Mandatory framing matches Hermes's "you MUST load it via
+    // skill_view if even partially relevant" — model is forced to scan
+    // before giving up.
     if (opts.skillsList && opts.skillsList.length > 0) {
       const lines = opts.skillsList.map(
         (s) => `- ${s.name}: ${s.description}`,
       );
       slots.push({
         name: 'skills',
-        content: `## Available skills\n\n${lines.join('\n')}`,
+        content:
+          `## Skills (mandatory)\n\n` +
+          `Scan the skills below before deciding tools. If any skill is even ` +
+          `partially relevant to the user's request, you MUST load it first ` +
+          `via skill_view(name) — the skill contains specialized commands, ` +
+          `pitfalls, and proven workflows that beat reasoning from first ` +
+          `principles.\n\n` +
+          `<available_skills>\n${lines.join('\n')}\n</available_skills>\n\n` +
+          `Only proceed without loading a skill if genuinely none are ` +
+          `relevant.`,
         optional: true,
       });
     }

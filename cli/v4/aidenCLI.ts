@@ -662,8 +662,16 @@ export async function buildAgentRuntime(
   }
   let skillsList: Array<{ name: string; description: string }> = [];
   try {
+    // Phase 16g: drop the slice(0,32) cap. Hermes surfaces every
+    // installed skill (prompt_builder.py:929-931) — the model needs
+    // the full inventory to find a partially-relevant match for fuzzy
+    // intents. 71 skills × ~120 chars ≈ 8.5KB; well within prompt
+    // budget for 131k-context models. If the user has hundreds of
+    // skills and prompt size becomes a real concern, the next polish
+    // is lazy-loading via skill_view (Hermes pattern) — but that's
+    // future work, not 16g.
     const loaded = await skillLoader.list();
-    skillsList = loaded.slice(0, 32).map((s) => ({
+    skillsList = loaded.map((s) => ({
       name: (s as { name: string }).name,
       description: ((s as { description?: string }).description ?? '').slice(0, 120),
     }));

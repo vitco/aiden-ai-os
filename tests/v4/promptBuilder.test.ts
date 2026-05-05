@@ -101,6 +101,40 @@ describe('PromptBuilder', () => {
     expect(out).toContain('═════');
   });
 
+  it('4c. skills slot uses mandatory framing (Phase 16g)', async () => {
+    // Locks Hermes-style "## Skills (mandatory) — you MUST load it"
+    // framing. Pre-16g header was "## Available skills" which the
+    // model treated as passive and skipped on fuzzy intents.
+    const pb = new PromptBuilder();
+    const out = await pb.build({
+      paths: makePaths(tmp),
+      skillsList: [
+        { name: 'youtube-player', description: 'play music on youtube' },
+      ],
+      platform: 'linux',
+      skipFilesystem: true,
+    });
+    expect(out).toContain('## Skills (mandatory)');
+    expect(out).toMatch(/MUST load it first/);
+    expect(out).toContain('skill_view');
+    expect(out).toContain('<available_skills>');
+    expect(out).toContain('youtube-player: play music on youtube');
+  });
+
+  it('4d. skills slot omitted entirely when no skills supplied (Phase 16g)', async () => {
+    // Empty skillsList stays out of the prompt — the mandatory framing
+    // would be confusing if there's nothing to scan.
+    const pb = new PromptBuilder();
+    const out = await pb.build({
+      paths: makePaths(tmp),
+      skillsList: [],
+      platform: 'linux',
+      skipFilesystem: true,
+    });
+    expect(out).not.toContain('## Skills (mandatory)');
+    expect(out).not.toContain('<available_skills>');
+  });
+
   it('4b. memory section includes anti-confusion system note (Phase 16e)', async () => {
     // Locks the [System note: …] line that Hermes puts on external
     // provider blocks (`memory_manager.py:184-188`). We apply it to the
