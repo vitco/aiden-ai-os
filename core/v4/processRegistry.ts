@@ -14,9 +14,8 @@
  * tool — only background work (`process_spawn`) lands in the
  * registry.
  *
- * Aiden's surface is much smaller. Hermes wraps multiple sandbox
- * environments (local, Docker, SSH, Modal); v4 ships local-only
- * here and routes Docker through `shell_exec` instead.
+ * v4 ships local-only here and routes Docker through `shell_exec`
+ * instead — multi-environment sandboxing is not in scope for v4.0.
  *
  * Status: PHASE 8.
  */

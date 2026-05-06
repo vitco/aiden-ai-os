@@ -8,9 +8,9 @@
  * tools/v4/web/openUrl.ts — `open_url` (Phase 16f Task 1E)
  *
  * Platform-aware shell launch of a URL in the user's default browser.
- * Diverges from Hermes's CDP-managed-Chrome path (audit B) — for an
- * interactive single-user CLI, the shell-launch pattern from Aiden v3
- * gives the same anti-detection / real-profile win without requiring
+ * For an interactive single-user CLI, the shell-launch pattern carried
+ * over from Aiden v3 gives the same anti-detection / real-profile win
+ * as a CDP-managed Chrome path without requiring
  * `chrome --remote-debugging-port=9222` setup.
  *
  * Use cases:

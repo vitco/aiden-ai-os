@@ -10,7 +10,7 @@
  * String-replacement patch. Reads the file, replaces the literal
  * `find` string with `replace`, writes back. Fails cleanly when
  * `find` does not appear in the file. v3 has no equivalent — this
- * is a v4-native tool modeled after Hermes's `str_replace_editor`.
+ * is a v4-native string-replace editor.
  *
  * Status: PHASE 8.
  */

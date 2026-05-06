@@ -13,10 +13,6 @@
  * Wire format: JSON-RPC 2.0, newline-delimited (stdio) or JSON body (HTTP).
  * Protocol version: 2024-11-05 (matching Aiden v3 + most server SDKs).
  *
- * Hermes references:
- *   tools/mcp_tool.py::_run_stdio       — stdio subprocess wiring
- *   tools/mcp_tool.py::_run_http        — streamablehttp transport
- *
  * v3 reference:
  *   core/mcpClient.ts::_connectStdio    — stdio newline framing
  *   core/mcpClient.ts::_rpcStdio        — RPC pending-id map

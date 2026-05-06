@@ -12,7 +12,7 @@
  * holds every session's metadata, every message, and an FTS5 index for
  * `session_search`.
  *
- * Design choices (mirroring Hermes hermes_state.py, simplified):
+ * Design choices:
  * - WAL journal mode for one-writer / many-reader concurrency.
  * - foreign_keys=ON so deleting a session cascades to its messages.
  * - FTS5 contentless triggers keep `messages_fts` in sync with `messages`.
@@ -176,9 +176,8 @@ interface SearchRow {
 
 /**
  * Sanitise user-supplied search input so unbalanced FTS5 syntax can't
- * raise a `SQLITE_ERROR`. Mirrors hermes_state._sanitize_fts5_query but
- * drops the trigram + boolean-operator handling — Phase 6 only needs
- * keyword search.
+ * raise a `SQLITE_ERROR`. Phase 6 only needs keyword search — no
+ * trigram or boolean-operator handling.
  */
 function sanitizeFtsQuery(input: string): string {
   let s = input;

@@ -360,9 +360,8 @@ export class CodexResponsesAdapter implements ProviderAdapter {
       body.tools = this.translateTools(input.tools);
     }
     // Phase 21 #6 reopen: Codex backend (chatgpt.com/backend-api/codex)
-    // does NOT accept max_output_tokens — see Hermes
-    // agent/transports/codex.py:142-143: "if max_tokens is not None and
-    // not is_codex_backend". Sending it triggers 400.
+    // does NOT accept max_output_tokens — sending it triggers 400.
+    // Guard: only emit when the backend is regular OpenAI Responses.
     if (input.maxTokens != null && !this.isCodexBackend()) {
       body.max_output_tokens = input.maxTokens;
     }
@@ -617,8 +616,8 @@ export class CodexResponsesAdapter implements ProviderAdapter {
    *
    * Set AIDEN_DEBUG_CODEX=1 to log every event type seen — useful when
    * a future Codex backend adds new event types we haven't accounted
-   * for. Per Hermes "treat provider adapters as hostile boundaries" —
-   * we log unknowns rather than silently drop.
+   * for. We log unknowns rather than silently drop, on the principle
+   * that provider adapters should be treated as hostile boundaries.
    */
   private async collectStreamedResponse(
     response: Response,

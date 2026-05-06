@@ -74,8 +74,7 @@ export type ToolExecutor = (call: ToolCallRequest) => Promise<ToolCallResult>;
 /**
  * One-shot fallback strategy. Called once per conversation when the primary
  * provider throws. Returning a new adapter swaps it in for the rest of the
- * turn; returning null propagates the error. Models the Hermes
- * `_fallback_chain` behaviour but simplified: v4 Phase 2 supports one
+ * turn; returning null propagates the error. v4 Phase 2 supports one
  * activation per `runConversation`. Multi-step chains land in a later phase.
  */
 export interface FallbackStrategy {
@@ -145,9 +144,8 @@ export interface AidenAgentOptions {
    * the agent keeps the original frozen snapshot semantics — the dirty
    * bit is ignored.
    *
-   * Strategy (b) per `docs/sprint/hermes-memory-refresh-audit.md`: only
-   * the turn after a memory write pays the rebuild cost; every other turn
-   * still hits the prefix cache cleanly.
+   * Strategy: only the turn after a memory write pays the rebuild cost;
+   * every other turn still hits the prefix cache cleanly.
    */
   refreshMemorySnapshot?: () => Promise<MemorySnapshot>;
   /**

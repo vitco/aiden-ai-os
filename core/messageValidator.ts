@@ -5,7 +5,7 @@
 
 // core/messageValidator.ts — Message sequence validation for LLM providers.
 //
-// Enforces strict user/assistant alternation required by providers like Hermes.
+// Enforces strict user/assistant alternation required by some OpenAI-compat providers.
 // Called before every LLM API call to prevent 400 "invalid message sequence" errors.
 //
 // Design:
@@ -26,8 +26,8 @@ export interface LLMMessage {
 /**
  * Merge consecutive messages of the same non-system role.
  *
- * Providers like Hermes and many OpenAI-compat endpoints reject sequences
- * such as [user, user] or [assistant, assistant].  When two adjacent messages
+ * Some OpenAI-compat endpoints reject sequences such as [user, user]
+ * or [assistant, assistant]. When two adjacent messages
  * share the same role, their content is joined with a blank line separator.
  *
  * System messages always pass through unchanged and do NOT affect the

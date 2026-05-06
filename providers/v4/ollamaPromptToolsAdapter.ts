@@ -19,8 +19,6 @@
  *
  * Status: PHASE 4 — non-streaming only.
  *
- *   (Aiden v4 adopts the same `<tool_call>` regex format verbatim.)
- *
  * Wire-format quirks handled here:
  *   1. POST /api/chat with {model, messages, stream:false}; NO `tools` field.
  *   2. System prompt augmented with tool catalog + format instructions

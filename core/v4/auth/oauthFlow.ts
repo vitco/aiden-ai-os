@@ -247,7 +247,7 @@ export interface DeviceCodeFlowConfig {
   redirectUri?: string;
   /** URL the user opens to enter the code. Defaults to `${issuer}/codex/device`. */
   userVerificationUrl?: string;
-  /** Maximum seconds to poll. Default 900 (15 min) per Hermes audit. */
+  /** Maximum seconds to poll. Default 900 (15 min). */
   maxWaitSeconds?: number;
   /** Floor on the poll interval. Default 3s. */
   minPollSeconds?: number;
@@ -283,10 +283,9 @@ export async function runDeviceCodeFlow(
   const minPollSec = cfg.minPollSeconds ?? 3;
   const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
 
-  // Phase 18.1: Accept: application/json on every device-code request,
-  // matching Hermes (hermes_cli/auth.py:2264 `httpx.Client(headers={"Accept":
-  // "application/json"})`). Most servers default to JSON anyway, but the
-  // explicit header is the parity gap we close.
+  // Phase 18.1: Accept: application/json on every device-code request.
+  // Most servers default to JSON anyway, but the explicit header
+  // closes the parity gap with reference clients.
   const dcHeaders = {
     Accept: 'application/json',
     ...(cfg.extraHeaders ?? {}),

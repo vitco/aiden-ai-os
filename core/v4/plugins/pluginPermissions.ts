@@ -17,8 +17,6 @@
  * malicious plugin can bypass.
  *
  * File format: { "version": 1, "granted": ["network", ...] }
- *
- * Hermes has no equivalent — this is net-new for Aiden.
  */
 
 import { promises as fs } from 'node:fs';

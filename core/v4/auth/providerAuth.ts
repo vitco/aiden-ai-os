@@ -16,10 +16,9 @@
  * this surface — they do not know whether a given provider uses copy-paste,
  * device-code, or some future flow.
  *
- * Hermes has no analogous abstraction (each provider's auth lives in its
- * own module). Aiden centralises here because plugins should not have to
- * re-derive the boilerplate of "save tokens / read tokens / refresh on
- * 401" — that's repeated, mechanical, and should be one piece of code.
+ * Centralised here so plugins do not have to re-derive the boilerplate
+ * of "save tokens / read tokens / refresh on 401" — that work is
+ * repeated, mechanical, and should be one piece of code.
  */
 
 import type { AidenPaths } from '../paths';

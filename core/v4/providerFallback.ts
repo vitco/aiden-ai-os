@@ -115,15 +115,11 @@ export interface ChainRunResult<T> {
 /**
  * Phase 16b.3: default per-slot cooldown after a 429.
  *
- * Hermes uses 60 minutes (`agent/credential_pool.py::EXHAUSTED_TTL_429_SECONDS`)
- * because its fleet runs cron + multi-day tasks against the provider's full
- * reset window. Aiden's REPL is interactive and Groq's free-tier TPM cap
- * recovers in well under a minute, so a 60-minute freeze would lock a slot
- * out for the rest of an interactive session pointlessly.
- *
- * 60 seconds matches Groq's rolling-window token cap and lets the chain
- * recover the primary slot mid-session. See
- * `docs/sprint/hermes-soul-cooldown-audit.md` for the divergence rationale.
+ * Aiden's REPL is interactive and Groq's free-tier TPM cap recovers in
+ * well under a minute, so a multi-minute freeze would lock a slot out
+ * for the rest of an interactive session pointlessly. 60 seconds matches
+ * Groq's rolling-window token cap and lets the chain recover the primary
+ * slot mid-session.
  */
 export const DEFAULT_SLOT_COOLDOWN_MS = 60_000;
 
@@ -194,9 +190,8 @@ export async function runFallbackChain<T>(
   const now = cooldown?.now ?? Date.now;
 
   // Two passes: first only slots whose cooldown has expired, then any
-  // remaining cooling slots as a last resort. Same pattern as Hermes'
-  // _select_unlocked → _available_entries(clear_expired=True) plus the
-  // implicit "fall back to whatever you have" on degraded fleets.
+  // remaining cooling slots as a last resort — clear-expired-then-
+  // fall-back-to-anything keeps the chain alive on degraded fleets.
   const fresh: ProviderSlot[] = [];
   const cooling: ProviderSlot[] = [];
   for (const slot of slots) {

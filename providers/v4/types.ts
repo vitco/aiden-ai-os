@@ -11,14 +11,7 @@
  * codex_responses, ollama_prompt_tools) implements `ProviderAdapter`.
  *
  * Status: SCAFFOLDING — types only. Concrete adapters land in Phase 3.
- *   See docs/v4.0.0-architecture.md, sections "v4.0.0 system architecture"
- *   and "File-by-file mapping: Hermes → Aiden / Providers".
- *
- * Hermes references:
- *   - API mode dispatch:   hermes-agent/run_agent.py (the four-branch switch)
- *   - Anthropic adapter:   hermes-agent/agent/anthropic_adapter.py
- *   - Runtime resolver:    hermes-agent/hermes_cli/runtime_provider.py
- *   - Credential resolver: hermes-agent/hermes_cli/auth.py
+ *   See docs/v4.0.0-architecture.md, "v4.0.0 system architecture".
  */
 
 /**

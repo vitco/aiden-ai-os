@@ -15,13 +15,12 @@
  *      on Windows, ~/.aiden/plugins/ elsewhere). Loaded by default; users
  *      can disable individual plugins via Task 3's `/plugins` command.
  *
- * On collision (same `manifest.name`), user plugins win —
- * "later wins" rule (plugins.py:680). Per-plugin try/catch isolates
- * failures: one broken plugin sets its own LoadedPlugin.error and the
- * others keep loading. Same isolation pattern Hermes uses (plugins.py:947).
+ * On collision (same `manifest.name`), user plugins win — "later wins"
+ * rule. Per-plugin try/catch isolates failures: one broken plugin sets
+ * its own LoadedPlugin.error and the others keep loading.
  *
- * Project-local plugins (`./.aiden/plugins/`) are deliberately omitted
- * vs. Hermes — opens an injection vector when running Aiden in a cloned
+ * Project-local plugins (`./.aiden/plugins/`) are deliberately omitted —
+ * they would open an injection vector when running Aiden in a cloned
  * repo, low value for v4.0.
  *
  * Status: PHASE 17 Task 1.
@@ -169,8 +168,7 @@ export class PluginLoader {
 
   /**
    * Fire a lifecycle hook. Each callback is wrapped in its own try/catch
-   * so a misbehaving plugin can't take the agent down. Mirrors Hermes
-   * `invoke_hook` (plugins.py:1055).
+   * so a misbehaving plugin can't take the agent down.
    */
   async fireHook(name: LifecycleHook): Promise<void> {
     const callbacks = this.hooks.get(name) ?? [];

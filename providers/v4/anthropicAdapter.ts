@@ -33,8 +33,8 @@
  *      prefix caching (captured into v4's cacheReadTokens / cacheWriteTokens).
  *   8. OAuth: Authorization: Bearer + anthropic-beta: claude-code-20250219,oauth-2025-04-20
  *      + minimal Claude Code identity prefix injected into system prompt.
- *      (Tool-name mcp_ prefixing and Hermes-specific name sanitization are
- *      deferred to Phase 13 OAuth wizard.)
+ *      (Tool-name mcp_ prefixing and provider-specific name sanitization
+ *      are deferred to Phase 13 OAuth wizard.)
  */
 
 import {

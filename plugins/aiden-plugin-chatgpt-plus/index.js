@@ -1,14 +1,13 @@
 /**
  * plugins/aiden-plugin-chatgpt-plus/index.js — Aiden v4.0.0 (Phase 18 Task 3)
  *
- * Bundled OAuth provider for ChatGPT Plus subscriptions. Direct port of
- * Hermes's flow (audit § ChatGPT Plus / Codex — hermes_cli/auth.py:
- * 3994-4136). Device-code flow against auth.openai.com; tokens land in
+ * Bundled OAuth provider for ChatGPT Plus subscriptions. Device-code
+ * flow against auth.openai.com; tokens land in
  * <aiden-home>/auth/chatgpt-plus.json via the runtime's tokenStore.
  *
  * Inference base URL is `https://chatgpt.com/backend-api/codex` (the
- * Codex Responses API), NOT api.openai.com — the audit and Hermes both
- * note this. Token type maps to v4's existing `codex_responses` apiMode.
+ * Codex Responses API), NOT api.openai.com. Token type maps to v4's
+ * existing `codex_responses` apiMode.
  *
  * UX (per Phase 18 Task 3 review):
  *   - URL + user_code printed prominently with whitespace-padded boxing
@@ -20,15 +19,15 @@
  *   - "Authed as <account>" on success when token response carries an
  *     account hint, plain "Login successful" otherwise
  *
- * Constants matching Hermes (audit § ChatGPT Plus):
+ * Constants:
  *   client_id           = app_EMoamEEZ73f0CkXaXp7hrann
  *   issuer              = https://auth.openai.com
  *   inference base URL  = https://chatgpt.com/backend-api/codex
  *
- * Hermes-only behaviour deliberately NOT ported:
+ * Deliberately NOT supported in v4.0:
  *   - Reading tokens from ~/.codex/auth.json (the official Codex CLI's
- *     shared file). Hermes audit notes this is opt-in and adds extra
- *     surface area; v4.0 ships the device-code flow only. v4.1 may add.
+ *     shared file). Adds extra surface area; v4.0 ships the device-code
+ *     flow only. v4.1 may add.
  */
 
 'use strict';
@@ -49,8 +48,8 @@ const CHATGPT_PLUS = {
 
   // The "still waiting" reminder fires after this much elapsed time.
   REMINDER_AT_MS: 5 * 60 * 1000,
-  // Per Hermes audit: Anthropic + OpenAI both expect a CLI-style UA.
-  // OpenAI is more permissive than Anthropic but we still spoof for parity.
+  // Anthropic + OpenAI both expect a CLI-style UA on these endpoints.
+  // OpenAI is more permissive than Anthropic but we set one for parity.
 };
 
 function aidenVersion() {
@@ -104,9 +103,8 @@ function buildPollingUa(outer, deadlineAt, now = Date.now) {
     prompt: outer.prompt.bind(outer),
     async sleep(ms) {
       // Print the "still waiting" reminder once when we cross the
-      // 5-minute mark mid-poll. Hermes prints nothing during the poll;
-      // we add this for v4.0 because Product Hunt users won't tolerate
-      // a silent terminal for 15 minutes.
+      // 5-minute mark mid-poll. Without it, a silent terminal for 15
+      // minutes would frustrate first-run users.
       const elapsed = now() - started;
       if (
         !reminderShown &&

@@ -13,9 +13,8 @@
  * session for external agents to attach to.
  *
  * Design note (frozen, do not implement here): the server eventually
- * exposes 10 tools matching Hermes's bridge surface so any MCP-aware
- * client (Cursor, Claude Code, Zed, JetBrains) can drive an Aiden
- * session over MCP:
+ * exposes 10 tools so any MCP-aware client (Cursor, Claude Code, Zed,
+ * JetBrains) can drive an Aiden session over MCP:
  *
  *   read-only:
  *     conversations_list      — list recent conversations

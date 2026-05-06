@@ -1,10 +1,9 @@
 /**
  * plugins/aiden-plugin-claude-pro/index.js — Aiden v4.0.0 (Phase 18 Task 2)
  *
- * Bundled OAuth provider for Claude Pro / Max subscriptions. Direct port
- * of Hermes's flow (audit § Claude Pro OAuth — agent/anthropic_adapter.py:
- * 1011-1142). PKCE auth-code with out-of-band copy-paste; tokens land
- * in <aiden-home>/auth/claude-pro.json via the runtime's tokenStore.
+ * Bundled OAuth provider for Claude Pro / Max subscriptions. PKCE
+ * auth-code with out-of-band copy-paste; tokens land in
+ * <aiden-home>/auth/claude-pro.json via the runtime's tokenStore.
  *
  * UX (per Phase 18 Task 2 review):
  *   - URL printed on its own line (clickable in modern terminals)
@@ -14,7 +13,7 @@
  *   - "Authed as <account>" on success when the token response carries
  *     an account hint; otherwise plain "Login successful"
  *
- * Constants matching Hermes (audit doc has the rationale):
+ * Constants:
  *   client_id    = 9d1c250a-e61b-44d9-88ed-5944d1962f5e
  *   auth URL     = https://claude.ai/oauth/authorize
  *   token URL    = https://platform.claude.com/v1/oauth/token (preferred)
@@ -22,8 +21,8 @@
  *   redirect URI = https://console.anthropic.com/oauth/code/callback
  *   scopes       = org:create_api_key user:profile user:inference
  *
- * User-Agent header: `aiden-cli/<ver> (external, cli)` per Hermes
- * convention. Anthropic's OAuth endpoints reject some default UAs.
+ * User-Agent header: `aiden-cli/<ver> (external, cli)` — Anthropic's
+ * OAuth endpoints reject some default UAs.
  */
 
 'use strict';
@@ -37,12 +36,10 @@ const CLAUDE_PRO = {
 
   clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
   authUrl: 'https://claude.ai/oauth/authorize',
-  // Phase 18.1: distinct LOGIN vs REFRESH ordering, matching Hermes.
-  //   login   — anthropic_adapter.py:1016 hits console.anthropic.com only
-  //             (no fallback in Hermes; Aiden adds platform.claude.com as
-  //             defensive fallback).
-  //   refresh — anthropic_adapter.py:785-788 tries platform.claude.com
-  //             first, falls back to console.anthropic.com.
+  // Phase 18.1: distinct LOGIN vs REFRESH endpoint ordering.
+  //   login   — console.anthropic.com primary, platform.claude.com as
+  //             defensive fallback.
+  //   refresh — platform.claude.com primary, console.anthropic.com fallback.
   loginTokenUrl: 'https://console.anthropic.com/v1/oauth/token',
   loginFallbackTokenUrls: ['https://platform.claude.com/v1/oauth/token'],
   refreshTokenUrl: 'https://platform.claude.com/v1/oauth/token',

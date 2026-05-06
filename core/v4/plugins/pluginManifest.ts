@@ -7,12 +7,11 @@
 /**
  * core/v4/plugins/pluginManifest.ts — Aiden v4.0.0 (Phase 17)
  *
- * Parses and validates `plugin.json` manifests for Aiden plugins. Mirrors
- * the field set from Hermes `plugin.yaml` (see docs/sprint/hermes-plugins-audit.md
- * for decisions per surface) with two divergences:
+ * Parses and validates `plugin.json` manifests for Aiden plugins.
  *
+ * Notable choices:
  *   1. JSON not YAML — TS ecosystem default; no extra dep needed.
- *   2. `permissions` field — net-new vs. Hermes. Advisory-only for v4.0
+ *   2. `permissions` field — declared at install, advisory-only for v4.0
  *      (Pro-tier trust UX, not a security boundary). Manifest validator
  *      catches typos in declared permissions; runtime dispatch (Task 4)
  *      checks actual usage against the granted set.
@@ -61,7 +60,7 @@ export const PERMISSION_TYPES = [
 
 export type PluginPermission = (typeof PERMISSION_TYPES)[number];
 
-/** Plugin kind. v4.0 has two; Hermes has four (we collapse). */
+/** Plugin kind. v4.0 has two: bundled (ships in core) and standalone. */
 export const PLUGIN_KINDS = ['standalone', 'bundled'] as const;
 export type PluginKind = (typeof PLUGIN_KINDS)[number];
 
@@ -70,8 +69,7 @@ export const LIFECYCLE_HOOKS = ['onLoad', 'onActivate', 'onTeardown'] as const;
 export type LifecycleHook = (typeof LIFECYCLE_HOOKS)[number];
 
 /**
- * Parsed representation of a plugin.json manifest. Field names mirror
- * Hermes `PluginManifest` (plugins.py:179) where possible.
+ * Parsed representation of a plugin.json manifest.
  */
 export interface PluginManifest {
   /** Schema version. Currently must equal MANIFEST_VERSION. */

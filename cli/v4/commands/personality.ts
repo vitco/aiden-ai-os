@@ -14,7 +14,6 @@
  * `/personality default`   revert to default (no overlay layered on SOUL.md)
  * `/personality show`      dump the current overlay body
  *
- * Hermes diverges — Hermes has no /personality, users edit SOUL.md directly.
  * Aiden keeps a separate manager because v4 UX docs treat overlays as a
  * runtime-switchable layer above (not replacing) the SOUL.md identity.
  */

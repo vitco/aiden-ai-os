@@ -20,9 +20,9 @@
  * the raw secret. Patterns cover OpenAI / Groq / xAI / Cerebras / Google /
  * generic Bearer tokens / 3-segment JWTs.
  *
- * Hermes diverges — Hermes has no equivalent command. Aiden adds it because
- * 16b.4 surfaced a real "SOUL.md never reaches the LLM" bug that an
- * in-REPL diagnostic would have caught immediately.
+ * Aiden adds this command because 16b.4 surfaced a real "SOUL.md
+ * never reaches the LLM" bug that an in-REPL diagnostic would have
+ * caught immediately.
  */
 import type { SlashCommand } from '../commandRegistry';
 

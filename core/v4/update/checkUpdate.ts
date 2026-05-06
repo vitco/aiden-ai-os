@@ -8,16 +8,15 @@
  * core/v4/update/checkUpdate.ts — Aiden v4.0.0 (Phase 20)
  *
  * Background "is there a newer aiden on npm?" check that prints a single
- * boot-card line when an update is available. Mirrors Hermes's
- * `hermes_cli/banner.check_for_updates()` shape (6 h cache, opt-out env
- * var, single-line announcement) but talks to the npm registry instead
- * of running `git fetch`.
+ * boot-card line when an update is available. 6 h cache, opt-out env
+ * var, single-line announcement; talks to the npm registry rather than
+ * running `git fetch`.
  *
  * Strategy:
  *   1. Read the cache at <aiden-home>/.update_check.json.
  *      If `ts` is < 6 h old AND `installed` matches the running version,
- *      use the cached `latest` and skip the network. (Match-on-installed
- *      is Hermes's `HERMES_REVISION` invalidation mechanism, ported.)
+ *      use the cached `latest` and skip the network. Match-on-installed
+ *      invalidates the cache when the user upgrades.
  *   2. Otherwise, GET https://registry.npmjs.org/aiden-runtime/latest.
  *      Pull `version` from the response. 4 s timeout — if the network is
  *      slow we cache `null` and try again next boot. Never block REPL boot.
@@ -27,8 +26,7 @@
  *   4. Write the cache regardless of comparison outcome.
  *
  * Opt-out: `AIDEN_NO_UPDATE_CHECK=1` skips both the cache read and the
- * network probe — the function is a no-op. Same shape Hermes uses for
- * its `HERMES_NO_UPDATE` discipline.
+ * network probe — the function is a no-op.
  *
  * The check is awaited via `setImmediate` from the boot path so it never
  * delays the first prompt. Cache hit: ≪1 ms. Cache miss with timeout:
@@ -41,7 +39,7 @@ import path from 'node:path';
 import type { AidenPaths } from '../paths';
 
 const REGISTRY_URL = 'https://registry.npmjs.org/aiden-runtime/latest';
-const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 h, same as Hermes
+const CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 h
 const REGISTRY_TIMEOUT_MS = 4_000;
 
 export interface UpdateCacheShape {
@@ -244,8 +242,7 @@ function safeCompare(a: string, b: string): number {
 
 /**
  * Format the boot-card line. Returns null when there's nothing to show.
- * Mirrors Hermes's "[update] N commits behind. Run `git pull` to update."
- * shape — single-line, low-key, dismissable by ignoring it.
+ * Single-line, low-key, dismissable by ignoring it.
  */
 export function formatUpdateLine(status: UpdateStatus): string | null {
   if (!status.updateAvailable || !status.latest) return null;

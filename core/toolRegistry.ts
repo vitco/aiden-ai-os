@@ -3818,7 +3818,7 @@ export const TOOL_REGISTRY: Record<string, ToolRegistryMeta> = {
 }
 
 // ── v3.19 Phase 1, Commit 2: deriver functions ───────────────────────────────
-// Inspired by Hermes run_agent.py:113,159.  Each deriver caches its result and
+// Each deriver caches its result and
 // recomputes only when _generation changes (i.e. when a new external tool is
 // registered via registerExternalTool).  Callers should use these instead of
 // reading TOOL_REGISTRY directly — Commits 4-6 will swap every hand-maintained

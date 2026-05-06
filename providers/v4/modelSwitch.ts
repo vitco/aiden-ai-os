@@ -14,13 +14,10 @@
  *
  * Status: PHASE 5.
  *
- *
- * Divergence from Hermes: Aiden v4 supports a `provider:model` colon
- * syntax that Hermes deliberately rejected (Hermes uses `--provider`
- * and reserves the colon for OpenRouter variant tags). We can do this
- * because OpenRouter variant tags (`:free`, `:fast`) live entirely
- * inside the modelId — `openrouter:meta-llama/llama-3.3-70b-instruct:free`
- * still parses unambiguously since we split on the FIRST colon.
+ * Aiden v4 supports a `provider:model` colon syntax. OpenRouter variant
+ * tags (`:free`, `:fast`) live entirely inside the modelId, so
+ * `openrouter:meta-llama/llama-3.3-70b-instruct:free` still parses
+ * unambiguously when we split on the FIRST colon.
  */
 
 import { ProviderAdapter } from './types';

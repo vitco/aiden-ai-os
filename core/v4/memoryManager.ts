@@ -23,8 +23,8 @@
  *   await mgr.remove('memory', text);
  *
  * Why frozen: changing the system prompt mid-session invalidates the
- * Anthropic / OpenAI prefix cache for every subsequent turn. Hermes's
- * pattern keeps the prompt stable while persisting writes immediately.
+ * Anthropic / OpenAI prefix cache for every subsequent turn. The pattern
+ * keeps the prompt stable while persisting writes immediately.
  *
  * Mutation semantics: substring matching ().
  *   - `add` rejects if the new content already appears in the file
@@ -71,7 +71,7 @@ export interface MutationResult {
 export const MEMORY_CHAR_LIMIT = 2200;
 export const USER_CHAR_LIMIT = 1375;
 
-/** Hermes uses `\n§\n` between entries; we keep the convention. */
+/** Entry separator: `\n§\n`. Distinct enough to never collide with content. */
 export const ENTRY_SEPARATOR = '\n§\n';
 
 /**

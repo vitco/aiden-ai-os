@@ -76,10 +76,9 @@ export interface PlannerGuardDecision {
     | 'fallback'
     /**
      * Phase 16g: no keyword rule matched — open the inventory rather
-     * than narrow to CORE_TOOL_NAMES. Per
-     * `docs/sprint/hermes-autonomy-audit.md`,
-     * per-turn. Restoring full agency for fuzzy multi-step intents
-     * ("play me a song on youtube") that don't match any rule.
+     * than narrow to CORE_TOOL_NAMES. Restores full agency for fuzzy
+     * multi-step intents ("play me a song on youtube") that don't
+     * match any rule.
      */
     | 'no_rule_match_open';
   /** 0–1, only set in llm_classified mode. */

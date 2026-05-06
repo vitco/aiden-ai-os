@@ -6,10 +6,8 @@
  * dedicated --user-data-dir so the user's regular browser session is
  * never disrupted.
  *
- * Direct port of Hermes hermes_cli/browser_connect.py (audit doc has the
- * lineage). Same flag set, same separate-profile pattern, same
- * /json/version probe. Detached subprocess on Windows so closing the
- * REPL does not kill the debug Chrome.
+ * Separate-profile pattern + /json/version probe. Detached subprocess
+ * on Windows so closing the REPL does not kill the debug Chrome.
  */
 
 'use strict';
@@ -77,7 +75,7 @@ function getChromeCandidatePaths(sys = process.platform) {
   // Phase 19: Snap + Flatpak common paths so modern Ubuntu 22.04+
   // installs (where Chromium ships only as a Snap) and atomic-distro
   // users (Fedora Silverblue, etc.) get a working Chrome without
-  // manual override. Hermes only checks PATH — Aiden does strict-better.
+  // manual override.
   list.push(
     '/snap/bin/chromium',
     '/snap/bin/google-chrome',
@@ -90,7 +88,6 @@ function getChromeCandidatePaths(sys = process.platform) {
 
 /**
  * Returns existence-filtered Chrome candidates on the current platform.
- * Mirrors Hermes get_chrome_debug_candidates() (browser_connect.py:43).
  * Phase 19: delegates to the pure getChromeCandidatePaths for the list,
  * then filters by fs.statSync.
  */

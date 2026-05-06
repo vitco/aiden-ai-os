@@ -13,8 +13,8 @@
  * Status: PHASE 5.
  *
  *   OPENROUTER_MODELS, _xai_curated_models() (curated lists keyed by
- *   provider id). Hermes pulls metadata live from models.dev; Aiden v4
- *   keeps a static, hand-curated baseline so the picker works offline and
+ *   provider id). Aiden v4 keeps a static, hand-curated baseline so the
+ *   picker works offline and
  *   adds models.dev hydration in a later phase.
  *
  * Pricing notes:
@@ -107,15 +107,13 @@ export const MODEL_CATALOG: ModelEntry[] = [
   },
 
   // ─── chatgpt-plus (Phase 18 OAuth) ───────────────────────────────────────
-  // Phase 21 #6: model IDs verbatim from Hermes
-  // `agent/model_metadata.py:_CODEX_OAUTH_CONTEXT_FALLBACK` (live probe of
-  // chatgpt.com/backend-api/codex/models, Apr 2026). The Codex OAuth
+  // Phase 21 #6: model IDs sourced from a live probe of
+  // chatgpt.com/backend-api/codex/models (Apr 2026). The Codex OAuth
   // endpoint requires its own slug list — the plain OpenAI API names
   // (`gpt-5`, `gpt-5-mini`, `gpt-5-codex`) get rejected with HTTP 400
   // "model is not supported when using Codex with a ChatGPT account"
   // for many accounts. The slugs below are the authoritative list. v4.1
-  // will replace this hardcode with a live `/codex/models` probe per
-  // Hermes (`_fetch_codex_oauth_context_lengths`).
+  // will replace this hardcode with a live `/codex/models` probe.
   {
     id: 'gpt-5.1-codex-max',
     displayName: 'GPT-5.1 Codex Max',
@@ -127,7 +125,7 @@ export const MODEL_CATALOG: ModelEntry[] = [
     supportsReasoning: true,
     isDefault: true,
     tier: 'flagship',
-    notes: 'Routed through ChatGPT Plus OAuth (chatgpt.com/backend-api/codex). Hermes-verified slug.',
+    notes: 'Routed through ChatGPT Plus OAuth (chatgpt.com/backend-api/codex).',
   },
   {
     id: 'gpt-5.1-codex-mini',

@@ -21,8 +21,8 @@
  * for tests, Docker overlays, multi-profile workflows). When set we never
  * touch the platform-specific defaults.
  *
- * `~/.hermes` on every platform (no Windows native support); Aiden treats
- * native Windows paths as a first-class moat.
+ * Native Windows paths are first-class — Aiden does not require WSL
+ * or a Unix-flavoured home dir.
  */
 
 import { promises as fs } from 'node:fs';
@@ -109,10 +109,9 @@ export function resolveAidenRoot(opts: ResolveAidenPathsOptions = {}): string {
     case 'linux':
     default: {
       // Phase 19: honor XDG_CONFIG_HOME on Linux + other POSIX-likes,
-      // default to freedesktop-spec `~/.config/aiden`. Hermes uses
-      // `~/.hermes` flat — Aiden diverges here for XDG compliance
-      // (audit § Path resolution). Migration: if a legacy `~/.aiden`
-      // dir exists and the XDG path doesn't, prefer the legacy dir
+      // default to freedesktop-spec `~/.config/aiden` for XDG
+      // compliance. Migration: if a legacy `~/.aiden` dir exists and
+      // the XDG path doesn't, prefer the legacy dir
       // so a power user mid-migration is not surprised. AIDEN_HOME
       // env override above wins regardless.
       const xdg = process.env.XDG_CONFIG_HOME;

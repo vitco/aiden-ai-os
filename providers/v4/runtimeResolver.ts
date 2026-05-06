@@ -23,10 +23,10 @@
  *
  * Status: PHASE 5.
  *
- *   Hermes branches on provider id with explicit per-provider handlers;
- *   Aiden v4 collapses these into one switch on `apiMode` because the
- *   per-provider quirks (URL stripping, OpenCode model-family inference,
- *   Azure auth bypass, AWS SDK chain) are deferred to Phase 8 / 13.
+ *   Aiden v4 collapses provider dispatch into one switch on `apiMode`
+ *   because the per-provider quirks (URL stripping, OpenCode
+ *   model-family inference, Azure auth bypass, AWS SDK chain) are
+ *   deferred to Phase 8 / 13.
  */
 
 import { ApiMode, ProviderAdapter, RuntimeResolution } from './types';

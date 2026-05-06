@@ -12,12 +12,12 @@
  * the `shell_exec` wrapper (Phase 9 wiring) to attach `riskTier` /
  * `reason` to every approval request.
  *
- * Curated subset (~25) of Hermes's 47 dangerous patterns
- * (`tools/approval.py::DANGEROUS_PATTERNS`) plus v3 C7 PowerShell-
- * specific patterns from `core/toolRegistry.ts::DENIED_COMMANDS`.
- * Hermes patterns deferred to v4.1: gateway-lifecycle, kill-via-pgrep
- * substitution, sed in-place /etc edits, git destructive ops, heredoc
- * script execution, chmod-then-exec two-step, find-exec/find-delete.
+ * Curated catalogue (~25) of POSIX + PowerShell destructive patterns,
+ * including v3 C7 PowerShell-specific entries lifted from
+ * `core/toolRegistry.ts::DENIED_COMMANDS`. Patterns deferred to v4.1:
+ * gateway-lifecycle, kill-via-pgrep substitution, sed in-place /etc
+ * edits, git destructive ops, heredoc script execution, chmod-then-exec
+ * two-step, find-exec/find-delete.
  *
  * Status: PHASE 9.
  */

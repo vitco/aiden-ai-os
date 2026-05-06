@@ -37,9 +37,9 @@
  * surface and the audit doc both say so explicitly. Users deserve to
  * know what they're getting.
  *
- * encryption at all. v4.0's machine-bound encryption is a strict
- * upgrade vs Hermes; v4.1's keychain integration brings it to parity
- * with Claude Code / Codex CLI.
+ * encryption at all. v4.0's machine-bound encryption is a deliberate
+ * step up from prior-art CLIs; v4.1's keychain integration brings it
+ * to parity with Claude Code / Codex CLI.
  */
 
 import { promises as fs } from 'node:fs';
@@ -56,9 +56,7 @@ import {
 import type { AidenPaths } from '../paths';
 
 /**
- * Persisted token shape. `expiresAtMs` is epoch milliseconds — same unit
- * Hermes uses (`anthropic_adapter.py:1125`) so logs/snapshots line up
- * cleanly when the user has both Hermes and Aiden installed.
+ * Persisted token shape. `expiresAtMs` is epoch milliseconds.
  *
  * `provider` is redundant with the file name but kept for sanity-checking
  * mismatches (a user copying files between profiles).
@@ -162,8 +160,8 @@ function decrypt(record: OnDiskShape): string {
 /**
  * Persist tokens for a provider. Overwrites any existing file. POSIX
  * mode is set to 0600 after write so other local users can't read it
- * even before the encryption layer (Hermes does the same, audit § token
- * storage). On Windows we rely on user-profile ACLs (and the encryption).
+ * even before the encryption layer. On Windows we rely on user-profile
+ * ACLs (and the encryption).
  */
 export async function saveTokens(
   paths: AidenPaths,

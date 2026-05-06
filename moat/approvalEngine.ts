@@ -72,9 +72,9 @@ export interface ApprovalCallbacks {
 /**
  * Phase 16f: built-in low-risk tool list — never prompts, never gated by
  * smart-mode classifier. These are read-only or read-mostly tools whose
- * worst case is "exposes information already visible to the user." Same
- * spirit as Hermes's category=read short-circuit but explicit about which
- * tools fall under it.
+ * worst case is "exposes information already visible to the user." A
+ * read-category short-circuit, but explicit about which tools fall
+ * under it.
  *
  * Adding to this list is a deliberate trust call. Don't add anything
  * that mutates filesystem, runs shell, or hits arbitrary URLs.

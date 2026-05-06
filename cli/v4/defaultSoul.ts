@@ -21,8 +21,7 @@
  *
  * Editing this constant requires bumping `BUNDLED_SOUL_VERSION` if you also
  * want to (carefully) re-seed users in the future. For 16b.3 we leave that
- * mechanism unplumbed — Hermes itself doesn't bump versions; the file is
- * sacred once written.
+ * mechanism unplumbed — once written, the file is sacred.
  */
 
 // Phase 16h: bumped from 16g for the media-search guidance line in

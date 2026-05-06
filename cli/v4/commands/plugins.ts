@@ -36,7 +36,7 @@ import {
   type PluginManifest,
 } from '../../../core/v4/plugins';
 
-/** Spot a URL-shaped install identifier the way Hermes plugins_cmd.py does. */
+/** Spot a URL-shaped install identifier (http(s) or git@). */
 function looksLikeRemote(spec: string): boolean {
   return (
     /^https?:\/\//i.test(spec) ||

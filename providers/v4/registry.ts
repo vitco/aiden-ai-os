@@ -14,12 +14,10 @@
  *
  * Status: PHASE 5.
  *
- *   api_key_env_vars, inference_base_url) + hermes_cli/runtime_provider.py
- *   for the (provider → api_mode) mapping per branch.
- *
- * Aiden v4 collapses Hermes's `ProviderConfig` + per-branch dispatch into
- * one flat row — TypeScript object literal beats Python dataclass + giant
- * switch when the dispatch fan-out is small and stable.
+ * Each row carries the (provider → api_mode) mapping plus connection
+ * metadata (api_key_env_vars, inference_base_url). One flat row per
+ * provider — TypeScript object literal beats a giant switch when the
+ * dispatch fan-out is small and stable.
  *
  * Adding a provider: append a row + add its models to MODEL_CATALOG. The
  * runtime resolver picks both up automatically — no other edits needed.
@@ -75,10 +73,10 @@ export interface ProviderRegistryEntry {
  *
  * Phase 21 #5 unification: ONE registry entry per OAuth service. The
  * legacy `claude_subscription` / `chatgpt_subscription` snake_case stubs
- * (Phase 5, no OAuth wiring) have been removed.: one
- * canonical provider name per service. Sources (claude_code, hermes_pkce,
- * device_code, etc.) seed credentials INTO that single entry — they
- * never appear as parallel registry rows.
+ * (Phase 5, no OAuth wiring) have been removed: one canonical provider
+ * name per service. Source tags (claude_code, oauth_pkce, device_code,
+ * etc.) seed credentials INTO that single entry — they never appear as
+ * parallel registry rows.
  *
  * Canonical IDs match the plugin manifests, the setup wizard, the /auth
  * slash command, and the tokenStore filename. Inference-time credential
@@ -115,8 +113,8 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     hasFreeTier: false,
     docsUrl: 'https://platform.openai.com/docs/',
     supportsToolCalling: true,
-    // Phase 21 #6: Hermes-verified Codex slugs (Apr 2026 probe of
-    // chatgpt.com/backend-api/codex/models). Direct OpenAI API names
+    // Phase 21 #6: Codex slugs from a live probe of
+    // chatgpt.com/backend-api/codex/models (Apr 2026). Direct OpenAI API names
     // (gpt-5-mini, gpt-5-codex) are NOT valid here — Codex OAuth has
     // its own slug taxonomy.
     modelIds: [

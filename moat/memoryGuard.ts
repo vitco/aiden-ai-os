@@ -14,7 +14,7 @@
  * `verified: boolean`, surfaced through the tool wrapper to the
  * agent loop and (in Phase 12) to the HonestyEnforcement layer.
  *
- * Why: v3 / Hermes occasionally claimed "saved to MEMORY.md" in the
+ * Why: prior agents occasionally claimed "saved to MEMORY.md" in the
  * assistant turn when no write actually happened (capacity exceeded,
  * concurrent-write collision, etc.). MemoryGuard makes that lie
  * physically impossible: the post-write read happens under the same

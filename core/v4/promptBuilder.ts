@@ -11,10 +11,8 @@
  * core/v4/promptBuilder.ts — Aiden v4.0.0 (Phase 13)
  *
  * Slot-ordered system-prompt assembler, frozen at session start.
- *
- * its identity / memory / skills / platform sections. Aiden simplifies
- *multiple branches into a single ordered slot list because v4
- * doesn't haveKanban / acp_adapter / hermes-md layering.
+ * Identity / memory / skills / platform sections render in a single
+ * fixed order — no per-environment branching.
  *
  * Slot order (top → bottom):
  *   1. SOUL.md          (identity)

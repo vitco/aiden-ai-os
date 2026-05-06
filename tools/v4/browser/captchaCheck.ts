@@ -28,7 +28,7 @@
  * Common bot-challenge / CAPTCHA markers across major providers
  * (Cloudflare, Akamai, PerimeterX, hCaptcha, reCAPTCHA, AWS WAF).
  * Pulled from real challenge pages encountered in the 16d/16e/16f
- * smoke runs and the Hermes honesty audit's reference list.
+ * smoke runs.
  */
 export const CAPTCHA_MARKERS: ReadonlyArray<string> = [
   // Generic

@@ -16,8 +16,6 @@
  * The agent loop, providers, tools, moat — all unchanged from Phase 14c.
  * This is a pure rendering layer that drives the same `ChatSession`
  * engine via a swapped Display surface and a TUI-flavoured promptApi.
- *
- * Hermes `HermesCLI.run()` modal flow. Translated into blessed widgets.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
