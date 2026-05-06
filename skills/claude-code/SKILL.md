@@ -1,6 +1,6 @@
 ---
 name: claude-code
-description: Delegate complex coding and file-editing tasks to Anthropic Claude Code CLI for deep agentic coding sessions
+description: Delegate coding and file edits to Anthropic Claude Code CLI
 category: agent-bridge
 version: 1.0.0
 origin: aiden

@@ -1,6 +1,6 @@
 ---
 name: crt.sh
-description: Search certificate transparency logs to enumerate subdomains and TLS certificates for any domain — no API key required
+description: Enumerate subdomains and TLS certs via CT logs (no API key needed)
 category: security
 version: 1.0.0
 license: Apache-2.0

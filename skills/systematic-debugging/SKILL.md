@@ -1,6 +1,6 @@
 ---
 name: systematic-debugging
-description: Four-phase root cause investigation process for diagnosing bugs, errors, and unexpected behavior
+description: Four-phase root cause investigation for bugs and unexpected behavior
 category: developer
 version: 1.0.0
 origin: aiden

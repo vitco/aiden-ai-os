@@ -1,6 +1,6 @@
 ---
 name: arxiv
-description: Search, fetch, and download academic papers from arXiv using the public REST API — no API key required
+description: Search and download arXiv papers (no API key needed)
 category: research
 version: 1.0.0
 origin: aiden

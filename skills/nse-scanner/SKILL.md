@@ -1,6 +1,6 @@
 ---
 name: nse-scanner
-description: Scan NSE (National Stock Exchange India) for top gainers, losers, volume surges, and 52-week highs/lows using NSE public APIs
+description: NSE scans: top gainers/losers, volume surges, 52w highs/lows
 category: india
 version: 1.0.0
 tags: nse, stock, india, scanner, gainers, losers, equity, market, screener

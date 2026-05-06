@@ -1,6 +1,6 @@
 ---
 name: greynoise
-description: Classify IP addresses as internet scanners (benign/malicious) or targeted attackers — filters noise from security alerts
+description: Classify IPs as scanners or targeted attackers — filter alert noise
 category: security
 version: 1.0.0
 license: Apache-2.0

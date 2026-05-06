@@ -1,6 +1,6 @@
 ---
 name: india-economic-calendar
-description: Track upcoming Indian economic events — RBI policy dates, CPI/WPI releases, GDP data, Union Budget, and expiry calendar for NSE derivatives
+description: Indian economic events: RBI, CPI/WPI, GDP, Budget, NSE expiry
 category: india
 version: 1.0.0
 tags: india, rbi, economic, calendar, cpi, gdp, budget, expiry, monetary, policy

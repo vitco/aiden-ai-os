@@ -1,6 +1,6 @@
 ---
 name: jupyter-live-kernel
-description: Execute code in a stateful Jupyter kernel session, maintaining variables across cells using hamelnb or jupyter CLI
+description: Stateful Jupyter kernel — variables persist across cells (hamelnb)
 category: developer
 version: 1.0.0
 origin: aiden

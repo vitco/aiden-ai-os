@@ -160,7 +160,13 @@ describe('syncBundledSkillsIfStale (Phase 22 Group C smoke-fix #2)', () => {
     }
   });
 
-  it('4. user-modified skill is preserved across a bundle bump', async () => {
+  it('4. EXPLICITLY user-modified skill is preserved across a bundle bump', async () => {
+    // Phase 22 Group C smoke-fix #4: hash-comparison "user-modified"
+    // detection is unreliable when prior syncs left stale recorded
+    // hashes. Sync now trusts only the EXPLICIT userModified flag on
+    // the manifest entry. v4.0 has no skill-editing UI; v4.1 will set
+    // this flag from the editor when it lands.
+    const { BundledManifest } = await import('../../../core/v4/skillBundledManifest');
     const oldBundle = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-old-bundle-'));
     try {
       await makeBundle(oldBundle, {
@@ -172,11 +178,13 @@ describe('syncBundledSkillsIfStale (Phase 22 Group C smoke-fix #2)', () => {
       await restoreBundledSkillsIfNeeded(paths, { sourceOverride: oldBundle });
       await fs.writeFile(paths.skillsBundleVersion, '4.0.0-beta.0\n');
 
-      // User edits SKILL.md so its hash diverges from the manifest.
+      // User edits SKILL.md AND explicitly marks the skill as modified
+      // (the v4.1 editor would do both atomically).
       await fs.writeFile(
         path.join(paths.skillsDir, 'custom', 'SKILL.md'),
         '# Custom (USER EDITED)\n',
       );
+      await new BundledManifest(paths).markUserModified('custom');
 
       // New bundle.
       await makeBundle(bundleRoot, {
@@ -195,6 +203,52 @@ describe('syncBundledSkillsIfStale (Phase 22 Group C smoke-fix #2)', () => {
       // User edit survives.
       const md = await fs.readFile(path.join(paths.skillsDir, 'custom', 'SKILL.md'), 'utf-8');
       expect(md).toContain('USER EDITED');
+    } finally {
+      await fs.rm(oldBundle, { recursive: true, force: true });
+    }
+  });
+
+  it('5b. version match + bundle SKILL.md drift triggers refresh (smoke-fix #4)', async () => {
+    // Bug 2 round 2: smoke-fix updates that change SKILL.md content
+    // without bumping the package version must still propagate to
+    // user-data. detectBundledContentDrift hashes bundled SKILL.md
+    // against the recorded manifest hash; mismatch → refresh.
+    const oldBundle = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-old-bundle-'));
+    try {
+      await makeBundle(oldBundle, {
+        arxiv: {
+          skillMd:
+            '---\nname: arxiv\ndescription: Search, fetch, and download academic papers from arXiv using the public REST API\n---\n# arXiv\n',
+          manifest: { name: 'arxiv', description: 'old json' },
+        },
+      });
+      await restoreBundledSkillsIfNeeded(paths, { sourceOverride: oldBundle });
+      // restore stamps version to match the package's current version
+      // (which sync would also see) — same version both sides, classic
+      // drift scenario.
+      const samePackageVersion = '4.0.0-beta.1';
+      await fs.writeFile(paths.skillsBundleVersion, samePackageVersion + '\n');
+
+      // New bundle ships UPDATED SKILL.md, same version.
+      await makeBundle(bundleRoot, {
+        arxiv: {
+          skillMd:
+            '---\nname: arxiv\ndescription: Search and download arXiv papers (no API key needed)\n---\n# arXiv\n',
+          manifest: { name: 'arxiv', description: 'new json' },
+        },
+      });
+
+      const result = await syncBundledSkillsIfStale(paths, {
+        sourceOverride: bundleRoot,
+        bundleVersion: samePackageVersion,
+      });
+      // Refresh ran despite version match — drift detected.
+      expect(result.refreshed).toBe(1);
+      const md = await fs.readFile(
+        path.join(paths.skillsDir, 'arxiv', 'SKILL.md'),
+        'utf-8',
+      );
+      expect(md).toContain('Search and download arXiv papers (no API key needed)');
     } finally {
       await fs.rm(oldBundle, { recursive: true, force: true });
     }

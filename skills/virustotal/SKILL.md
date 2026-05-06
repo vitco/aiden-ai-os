@@ -1,6 +1,6 @@
 ---
 name: virustotal
-description: Check file hashes, URLs, domains, and IP addresses against 70+ antivirus engines and threat intelligence feeds via VirusTotal
+description: VirusTotal: check file/URL/domain/IP against 70+ AV engines
 category: security
 version: 1.0.0
 license: Apache-2.0

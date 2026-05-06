@@ -1,6 +1,6 @@
 ---
 name: docker-management
-description: Manage Docker containers, images, volumes, and networks via the Docker CLI and Dockerode API
+description: Docker containers, images, volumes, networks (CLI + Dockerode)
 category: developer
 version: 1.0.0
 origin: aiden

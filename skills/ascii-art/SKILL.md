@@ -1,6 +1,6 @@
 ---
 name: ascii-art
-description: Generate ASCII art text banners, box art, and decorative text using pyfiglet, cowsay, and boxes CLI tools
+description: ASCII text banners and box art (pyfiglet, cowsay, boxes)
 category: creative
 version: 1.0.0
 origin: aiden

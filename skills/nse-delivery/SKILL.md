@@ -1,6 +1,6 @@
 ---
 name: nse-delivery
-description: Fetch NSE delivery percentage data to identify stocks with high delivery volume — a signal of genuine buying interest vs intraday noise
+description: NSE delivery % data — surface stocks with high genuine buying
 category: india
 version: 1.0.0
 tags: nse, delivery, volume, equity, india, stock, delhivery, bulk, block

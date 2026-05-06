@@ -1,6 +1,6 @@
 ---
 name: outlook-native
-description: Read and manage Outlook calendar and inbox via PowerShell COM interop or Microsoft Graph API
+description: Outlook calendar + inbox via PowerShell COM or Microsoft Graph
 category: windows
 version: 1.0.0
 platform: windows

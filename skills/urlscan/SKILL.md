@@ -1,6 +1,6 @@
 ---
 name: urlscan
-description: Submit URLs for automated malware and phishing analysis, then retrieve safety verdicts and screenshots via urlscan.io
+description: Submit URLs to urlscan.io — safety verdict + screenshot retrieval
 category: security
 version: 1.0.0
 license: Apache-2.0

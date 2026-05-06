@@ -1,6 +1,6 @@
 ---
 name: nse-fii-dii
-description: Fetch FII and DII daily buying/selling activity from NSE to gauge institutional flow into Indian equity markets
+description: NSE FII/DII daily flows — gauge institutional Indian equity activity
 category: india
 version: 1.0.0
 tags: fii, dii, institutional, flow, nse, india, equity, market, foreign

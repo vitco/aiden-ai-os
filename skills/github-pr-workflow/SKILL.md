@@ -1,6 +1,6 @@
 ---
 name: github-pr-workflow
-description: Full pull request lifecycle — create, review, merge, and manage PRs using the gh CLI
+description: Pull request lifecycle: create, review, merge, manage (gh CLI)
 category: developer
 version: 1.0.0
 origin: aiden

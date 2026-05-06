@@ -1,6 +1,6 @@
 ---
 name: windows-registry
-description: Read, write, and query Windows Registry keys and values via PowerShell Registry provider
+description: Read, write, query Windows Registry via PowerShell provider
 category: windows
 version: 1.0.0
 platform: windows

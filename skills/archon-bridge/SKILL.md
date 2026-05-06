@@ -1,6 +1,6 @@
 ---
 name: archon-bridge
-description: Bridge between Aiden and Indian broker platforms (Zerodha, Upstox, Angel One) for unified portfolio aggregation and order routing
+description: Unified portfolio + order routing across Zerodha, Upstox, Angel One
 category: india
 version: 1.0.0
 tags: archon, broker, portfolio, aggregation, zerodha, upstox, angel, india, trading, unified

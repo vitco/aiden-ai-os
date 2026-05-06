@@ -1,6 +1,6 @@
 ---
 name: openhue
-description: Control Philips Hue smart lights using the OpenHue CLI and local Hue Bridge REST API
+description: Control Philips Hue lights via OpenHue CLI + Hue Bridge API
 category: smart-home
 version: 1.0.0
 origin: aiden

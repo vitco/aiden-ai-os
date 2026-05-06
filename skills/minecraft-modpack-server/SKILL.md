@@ -1,6 +1,6 @@
 ---
 name: minecraft-modpack-server
-description: Set up and manage a modded Minecraft server using NeoForge or Forge with a modpack
+description: Set up a modded Minecraft server (NeoForge or Forge)
 category: gaming
 version: 1.0.0
 origin: aiden

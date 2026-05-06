@@ -1,6 +1,6 @@
 ---
 name: shodan
-description: Search Shodan for internet-connected devices, open ports, and services — host lookups and database queries
+description: Shodan lookups: internet-connected devices, ports, services
 category: security
 version: 1.0.0
 license: Apache-2.0

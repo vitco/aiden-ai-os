@@ -1,6 +1,6 @@
 ---
 name: github-auth
-description: Set up GitHub authentication via gh CLI, SSH keys, and HTTPS personal access tokens
+description: GitHub auth setup via gh CLI, SSH keys, HTTPS PATs
 category: developer
 version: 1.0.0
 origin: aiden

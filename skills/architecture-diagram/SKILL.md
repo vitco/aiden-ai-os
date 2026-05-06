@@ -1,6 +1,6 @@
 ---
 name: architecture-diagram
-description: Generate dark-themed system architecture and component diagrams as HTML/SVG for rendering in the browser
+description: Architecture and component diagrams as HTML/SVG (dark-themed)
 category: creative
 version: 1.0.0
 origin: aiden

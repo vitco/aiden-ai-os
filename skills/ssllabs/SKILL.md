@@ -1,6 +1,6 @@
 ---
 name: ssllabs
-description: Comprehensive TLS/SSL analysis via Qualys SSL Labs — grades cipher suites, certificate chains, protocol versions, and known vulnerabilities
+description: TLS/SSL audit via Qualys SSL Labs — grade ciphers, chains, vulns
 category: security
 version: 1.0.0
 license: Apache-2.0

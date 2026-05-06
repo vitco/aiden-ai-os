@@ -1,6 +1,6 @@
 ---
 name: system_control
-description: Interact with the Windows desktop environment — clipboard, windows, and running applications
+description: Windows desktop control — clipboard, windows, running applications
 version: 1.0.0
 ---
 

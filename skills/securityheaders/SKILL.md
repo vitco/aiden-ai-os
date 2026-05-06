@@ -1,6 +1,6 @@
 ---
 name: securityheaders
-description: Audit HTTP security headers for any URL and receive a grade (A+ to F) with specific recommendations for missing headers
+description: HTTP security header audit (A+ to F) with fix recommendations
 category: security
 version: 1.0.0
 license: Apache-2.0

@@ -1,6 +1,6 @@
 ---
 name: research-paper-writing
-description: Structured pipeline for writing ML and AI research papers — from literature review to LaTeX submission
+description: Pipeline for ML/AI research papers — lit review to LaTeX submission
 category: research
 version: 1.0.0
 origin: aiden

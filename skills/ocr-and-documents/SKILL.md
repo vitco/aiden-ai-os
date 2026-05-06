@@ -1,6 +1,6 @@
 ---
 name: ocr-and-documents
-description: Extract text from PDFs, images, scans, and Word documents using Python libraries and CLI tools
+description: Extract text from PDFs, images, scans, Word docs (Python)
 category: productivity
 version: 1.0.0
 origin: aiden

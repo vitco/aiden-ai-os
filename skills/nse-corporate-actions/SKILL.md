@@ -1,6 +1,6 @@
 ---
 name: nse-corporate-actions
-description: Fetch NSE corporate actions — dividends, bonus issues, stock splits, rights issues, and buybacks for any listed stock
+description: NSE corp actions: dividends, bonus, splits, rights, buybacks
 category: india
 version: 1.0.0
 tags: nse, corporate-actions, dividend, bonus, split, rights, buyback, india, equity

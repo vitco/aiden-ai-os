@@ -1,6 +1,6 @@
 ---
 name: blogwatcher
-description: Monitor RSS and Atom feeds for new posts from blogs, news sites, and podcasts using Python feedparser
+description: Monitor RSS / Atom feeds for new posts (Python feedparser)
 category: research
 version: 1.0.0
 origin: aiden

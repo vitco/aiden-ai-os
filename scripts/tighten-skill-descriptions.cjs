@@ -1,15 +1,20 @@
 #!/usr/bin/env node
 /**
- * Phase 22 Group C, Task 8 — one-shot description tightener.
+ * Phase 22 Group C, Task 8 + smoke-fix #4 — description tightener.
  *
- * Rewrites every skill.json `description` that exceeds 80 chars to a
- * tightened form preserving the specific capability. Drops adjective
- * fluff, connecting phrases ("using the public REST API",
+ * Rewrites every skill description that exceeds 80 chars to a tightened
+ * form preserving the specific capability. Drops adjective fluff,
+ * connecting phrases ("using the public REST API",
  * "for rendering in the browser"), and redundant qualifiers.
  *
- * Re-runnable: idempotent. If a skill description is already in its
- * tightened form (or already ≤80 chars and not in the map) it is
- * left untouched.
+ * Patches BOTH source-of-truth files:
+ *   - skills/<name>/SKILL.md frontmatter `description:` line
+ *     (the runtime read path — SkillLoader reads frontmatter)
+ *   - skills/<name>/skill.json (the manifest — kept in sync for any
+ *     consumer that prefers structured metadata)
+ *
+ * Re-runnable: idempotent. Skills already in tightened form are left
+ * untouched.
  *
  * Run: node scripts/tighten-skill-descriptions.cjs
  */
@@ -57,6 +62,8 @@ const REWRITES = {
     'India tax calc: income, STCG/LTCG, advance tax, TDS (FY 2025-26)',
   'jupyter-live-kernel':
     'Stateful Jupyter kernel — variables persist across cells (hamelnb)',
+  'media-search':
+    'Find and play music/videos via web_search + open_url',
   'minecraft-modpack-server':
     'Set up a modded Minecraft server (NeoForge or Forge)',
   'network-diagnostics':
@@ -116,10 +123,63 @@ const REWRITES = {
     'Zerodha Kite Connect: holdings, positions, orders, live quotes',
 };
 
+/**
+ * Patch the `description:` line inside a SKILL.md YAML frontmatter
+ * block. Returns true when the file was modified, false if the new
+ * description was already in place. Throws when no frontmatter or no
+ * description line exists (those skills are skipped by main()).
+ */
+function patchSkillMd(filePath, newDescription) {
+  const raw = fs.readFileSync(filePath, 'utf-8');
+  const lines = raw.split(/\r?\n/);
+  // Frontmatter starts at line 0 with `---` and ends at the next `---`.
+  if (lines[0] !== '---') {
+    throw new Error(`no frontmatter in ${filePath}`);
+  }
+  let endIdx = -1;
+  for (let i = 1; i < lines.length; i += 1) {
+    if (lines[i] === '---') {
+      endIdx = i;
+      break;
+    }
+  }
+  if (endIdx === -1) {
+    throw new Error(`unterminated frontmatter in ${filePath}`);
+  }
+  let descIdx = -1;
+  for (let i = 1; i < endIdx; i += 1) {
+    if (/^description:\s*/i.test(lines[i])) {
+      descIdx = i;
+      break;
+    }
+  }
+  if (descIdx === -1) {
+    throw new Error(`no description: line in ${filePath} frontmatter`);
+  }
+  const next = `description: ${newDescription}`;
+  if (lines[descIdx] === next) return false;
+  lines[descIdx] = next;
+  // Preserve trailing newline if original had one.
+  const out = raw.endsWith('\n')
+    ? lines.join('\n').replace(/\n*$/, '\n')
+    : lines.join('\n');
+  fs.writeFileSync(filePath, out, 'utf-8');
+  return true;
+}
+
+function patchSkillJson(filePath, newDescription) {
+  const m = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+  if (m.description === newDescription) return false;
+  m.description = newDescription;
+  fs.writeFileSync(filePath, JSON.stringify(m, null, 2) + '\n', 'utf-8');
+  return true;
+}
+
 function main() {
   const root = path.resolve(__dirname, '..');
   const skillsDir = path.join(root, 'skills');
-  let updated = 0;
+  let mdUpdated = 0;
+  let jsonUpdated = 0;
   let already = 0;
   let skipped = 0;
   const stillTooLong = [];
@@ -129,21 +189,33 @@ function main() {
       stillTooLong.push([name, newDesc.length]);
       continue;
     }
-    const j = path.join(skillsDir, name, 'skill.json');
-    if (!fs.existsSync(j)) {
-      console.warn(`[skip] no manifest: ${name}`);
-      skipped += 1;
-      continue;
+    const skillDir = path.join(skillsDir, name);
+    const mdPath = path.join(skillDir, 'SKILL.md');
+    const jsonPath = path.join(skillDir, 'skill.json');
+    let touched = false;
+
+    if (fs.existsSync(mdPath)) {
+      try {
+        if (patchSkillMd(mdPath, newDesc)) {
+          mdUpdated += 1;
+          touched = true;
+        }
+      } catch (err) {
+        console.warn(`[md-skip] ${name}: ${err.message}`);
+      }
     }
-    const raw = fs.readFileSync(j, 'utf8');
-    const m = JSON.parse(raw);
-    if (m.description === newDesc) {
-      already += 1;
-      continue;
+    if (fs.existsSync(jsonPath)) {
+      try {
+        if (patchSkillJson(jsonPath, newDesc)) {
+          jsonUpdated += 1;
+          touched = true;
+        }
+      } catch (err) {
+        console.warn(`[json-skip] ${name}: ${err.message}`);
+      }
     }
-    m.description = newDesc;
-    fs.writeFileSync(j, JSON.stringify(m, null, 2) + '\n', 'utf8');
-    updated += 1;
+    if (!touched) already += 1;
+    if (!fs.existsSync(mdPath) && !fs.existsSync(jsonPath)) skipped += 1;
   }
 
   if (stillTooLong.length) {
@@ -151,7 +223,9 @@ function main() {
     for (const [n, l] of stillTooLong) console.error(`  ${l} ${n}`);
     process.exit(1);
   }
-  console.log(`Updated: ${updated} · Already tight: ${already} · Skipped: ${skipped}`);
+  console.log(
+    `SKILL.md updated: ${mdUpdated} · skill.json updated: ${jsonUpdated} · already: ${already} · skipped: ${skipped}`,
+  );
 }
 
 main();

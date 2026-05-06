@@ -1,6 +1,6 @@
 ---
 name: indian-tax-calc
-description: Calculate Indian income tax, capital gains tax (STCG/LTCG), advance tax, and TDS for FY 2025-26 under old and new regimes
+description: India tax calc: income, STCG/LTCG, advance tax, TDS (FY 2025-26)
 category: india
 version: 1.0.0
 tags: tax, india, income-tax, capital-gains, stcg, ltcg, itr, advance-tax, tds, fy2526

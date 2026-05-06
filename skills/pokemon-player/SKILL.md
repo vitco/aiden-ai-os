@@ -1,6 +1,6 @@
 ---
 name: pokemon-player
-description: Run and automate Pokémon games using headless emulation, RAM state reading, and programmatic button inputs
+description: Automate Pokémon games via headless emulation + RAM reading
 category: gaming
 version: 1.0.0
 origin: aiden

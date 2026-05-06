@@ -1,6 +1,6 @@
 ---
 name: code_interpreter
-description: Run Python or Node.js code in an isolated sandbox for data analysis, calculations, and file processing
+description: Run Python / Node.js in an isolated sandbox for analysis and file work
 version: 1.0.0
 ---
 

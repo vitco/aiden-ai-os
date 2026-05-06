@@ -1,6 +1,6 @@
 ---
 name: gif-search
-description: Search and fetch GIFs from Tenor using the public API with curl or PowerShell — requires a free Tenor API key
+description: Search and fetch Tenor GIFs (free Tenor API key required)
 category: media
 version: 1.0.1
 origin: aiden

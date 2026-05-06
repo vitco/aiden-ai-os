@@ -1,6 +1,6 @@
 ---
 name: explainshell
-description: Break down shell commands and one-liners into plain-English explanations — powered by explainshell.com
+description: Explain shell commands in plain English (explainshell.com)
 category: developer
 version: 1.0.0
 license: Apache-2.0

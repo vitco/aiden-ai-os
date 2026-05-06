@@ -1,6 +1,6 @@
 ---
 name: excalidraw
-description: Create hand-drawn style diagrams and sketches in Excalidraw JSON format for architecture, flowcharts, and system design
+description: Hand-drawn diagrams in Excalidraw JSON (architecture, flowcharts)
 category: productivity
 version: 1.0.0
 origin: aiden

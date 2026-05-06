@@ -1,6 +1,6 @@
 ---
 name: haveibeenpwned
-description: Check if an email address or username appears in known data breaches using the Have I Been Pwned v3 API
+description: Check email/username against HIBP v3 breach database
 category: security
 version: 1.0.0
 license: Apache-2.0

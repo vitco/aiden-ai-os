@@ -1,6 +1,6 @@
 ---
 name: media-search
-description: Find and play music or videos via web_search + open_url. Handles "play X", "listen to X", "music", "song" requests with autoplay-friendly URLs.
+description: Find and play music/videos via web_search + open_url
 category: media
 version: 1.0.0
 origin: aiden

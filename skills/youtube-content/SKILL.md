@@ -1,6 +1,6 @@
 ---
 name: youtube-content
-description: Extract transcripts, download audio/video, and analyze YouTube content using youtube-transcript-api and yt-dlp
+description: YouTube: transcripts, audio/video downloads (yt-dlp, transcript-api)
 category: research
 version: 1.0.0
 origin: aiden

@@ -1,6 +1,6 @@
 ---
 name: censys
-description: Search Censys for internet-exposed hosts, certificates, and services — host lookups, queries, and certificate analysis
+description: Censys lookups: hosts, certificates, services on the public internet
 category: security
 version: 1.0.0
 license: Apache-2.0

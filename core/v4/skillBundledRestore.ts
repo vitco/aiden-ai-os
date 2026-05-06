@@ -297,6 +297,63 @@ function sha256(text: string): string {
 }
 
 /**
+ * Compare every bundled SKILL.md against the recorded BundledManifest
+ * hash. Returns true the first time a mismatch (or new bundled skill)
+ * is found. Used by syncBundledSkillsIfStale to detect smoke-fix
+ * content updates that ship without a package-version bump.
+ *
+ * Bounded cost: one sha256 over each bundled SKILL.md (~70 small
+ * files = sub-second on warm caches). Runs only when the version
+ * file's value matches the package version — version-mismatch path
+ * skips the probe and goes straight to refresh.
+ */
+async function detectBundledContentDrift(
+  paths: AidenPaths,
+  sourceDir: string,
+): Promise<boolean> {
+  const recorded = await new BundledManifest(paths).read().catch(() => ({}));
+  if (Object.keys(recorded).length === 0) return false;
+  let bundledEntries: string[];
+  try {
+    bundledEntries = await fs.readdir(sourceDir);
+  } catch {
+    return false;
+  }
+  for (const entry of bundledEntries) {
+    const lc = entry.toLowerCase();
+    if (lc === 'aiden_catalog.md' || lc === 'skill_template.md') continue;
+    const fullPath = path.join(sourceDir, entry);
+    let stat;
+    try {
+      stat = await fs.stat(fullPath);
+    } catch {
+      continue;
+    }
+    let skillFile: string;
+    let key: string;
+    if (stat.isDirectory()) {
+      skillFile = path.join(fullPath, 'SKILL.md');
+      key = entry;
+    } else if (stat.isFile() && lc.endsWith('.md')) {
+      skillFile = fullPath;
+      key = entry.replace(/\.md$/i, '');
+    } else {
+      continue;
+    }
+    let content: string;
+    try {
+      content = await fs.readFile(skillFile, 'utf-8');
+    } catch {
+      continue;
+    }
+    const recordedEntry = recorded[key];
+    if (!recordedEntry) return true; // new bundled skill since last sync
+    if (sha256(content) !== recordedEntry.hash) return true; // bundle changed
+  }
+  return false;
+}
+
+/**
  * Sync bundled skills into `paths.skillsDir` whenever the package's
  * bundled-skill version differs from the version recorded on disk.
  *
@@ -335,15 +392,25 @@ export async function syncBundledSkillsIfStale(
 
   result.bundleVersion = await resolvePackageVersion(opts.bundleVersion);
   result.installedVersion = await readInstalledVersion(paths.skillsBundleVersion);
-  if (result.installedVersion === result.bundleVersion) {
-    return result; // already in sync — common case after the first boot
-  }
 
   const sourceDir = await resolveBundledSkillsDir({
     override: opts.sourceOverride,
   });
   result.sourceDir = sourceDir;
   if (!sourceDir) return result;
+
+  // Phase 22 Group C smoke-fix #4 (Bug 2 round 2): even when the
+  // bundle VERSION matches what's recorded, the bundled SKILL.md
+  // CONTENT may have changed (e.g. tightened descriptions shipped
+  // without a version bump). Probe the bundle vs the manifest hashes;
+  // when no drift is found we early-out, otherwise fall through to
+  // the per-skill refresh walk below.
+  if (result.installedVersion === result.bundleVersion) {
+    const drifted = await detectBundledContentDrift(paths, sourceDir);
+    if (!drifted) {
+      return result;
+    }
+  }
 
   let bundledEntries: string[];
   try {
@@ -376,35 +443,81 @@ export async function syncBundledSkillsIfStale(
         result.added += 1;
         continue;
       }
-      // Skill present — preserve user-modified, otherwise refresh.
-      const userModified = await manifest.isUserModified(entry).catch(() => false);
-      if (userModified) {
+      // Phase 22 Group C smoke-fix #4: pick the refresh-vs-preserve
+      // decision on bundle-vs-user-data hash directly, not on
+      // BundledManifest.isUserModified. The hash-comparison fallback
+      // there flags false-positives when prior syncs left a stale
+      // recorded hash (initialize() never updates existing entries),
+      // and v4.0 has no skill-editing UI anyway — only the EXPLICIT
+      // userModified flag on the manifest entry is trusted here.
+      const bundleSkillFile = path.join(src, 'SKILL.md');
+      const userSkillFile = path.join(dst, 'SKILL.md');
+      let bundleHash = '';
+      let userHash: string | null = null;
+      try {
+        bundleHash = sha256(await fs.readFile(bundleSkillFile, 'utf-8'));
+      } catch {
+        /* shouldn't happen — fileExists check above */
+      }
+      try {
+        userHash = sha256(await fs.readFile(userSkillFile, 'utf-8'));
+      } catch {
+        /* user dir exists but missing SKILL.md — treat as "needs refresh" */
+      }
+      if (userHash === bundleHash && bundleHash.length > 0) {
+        // Already in sync; refresh manifest hash if drifted.
+        const recorded = await manifest.get(entry).catch(() => null);
+        if (!recorded || recorded.hash !== bundleHash) {
+          await manifest.upsert(entry, { hash: bundleHash, userModified: false });
+        }
+        result.preserved += 1;
+        continue;
+      }
+      const recorded = await manifest.get(entry).catch(() => null);
+      if (recorded?.userModified === true) {
+        // User explicitly marked this as their own — never overwrite.
         result.preserved += 1;
         continue;
       }
       await copyDirRecursive(src, dst);
+      if (bundleHash.length > 0) {
+        await manifest.upsert(entry, { hash: bundleHash, userModified: false });
+      }
       result.refreshed += 1;
     } else if (stat.isFile() && lc.endsWith('.md')) {
-      // Single-file skill (legacy shape). Compare hashes; overwrite
-      // when content actually differs.
+      // Single-file skill (e.g. code_interpreter.md). Phase 22 Group C
+      // smoke-fix #4: refresh on drift. Same v4.0 rule as directory
+      // skills — there's no skill-editing UI yet, so an explicit
+      // userModified flag is the only signal we trust to preserve.
+      const skillKey = entry.replace(/\.md$/i, '');
       const bundledRaw = await fs.readFile(src, 'utf-8');
+      const bundleHash = sha256(bundledRaw);
       let userRaw = '';
       try {
         userRaw = await fs.readFile(dst, 'utf-8');
       } catch {
         await fs.copyFile(src, dst);
+        await manifest.upsert(skillKey, { hash: bundleHash, userModified: false });
         result.added += 1;
         continue;
       }
-      if (sha256(userRaw) === sha256(bundledRaw)) {
+      if (sha256(userRaw) === bundleHash) {
+        // Already in sync; refresh manifest hash if drifted.
+        const recorded = await manifest.get(skillKey).catch(() => null);
+        if (!recorded || recorded.hash !== bundleHash) {
+          await manifest.upsert(skillKey, { hash: bundleHash, userModified: false });
+        }
         result.preserved += 1;
         continue;
       }
-      // Content drifted but we have no per-file user-modified flag for
-      // single-file skills — Phase 10 manifest tracks dirs only.
-      // Conservative: leave drifted single-file skills alone, surface as
-      // preserved. v4.1 expansion can add per-file tracking.
-      result.preserved += 1;
+      const recorded = await manifest.get(skillKey).catch(() => null);
+      if (recorded?.userModified === true) {
+        result.preserved += 1;
+        continue;
+      }
+      await fs.copyFile(src, dst);
+      await manifest.upsert(skillKey, { hash: bundleHash, userModified: false });
+      result.refreshed += 1;
     }
   }
 

@@ -1,6 +1,6 @@
 ---
 name: network-diagnostics
-description: Diagnose Windows network issues — ping, traceroute, DNS lookup, port scan, interface info, and connection testing via PowerShell
+description: Windows net diag: ping, traceroute, DNS, port scan (PowerShell)
 category: windows
 version: 1.0.0
 tags: network, diagnostics, ping, dns, traceroute, port, connectivity, powershell, netstat

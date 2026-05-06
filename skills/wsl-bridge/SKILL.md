@@ -1,6 +1,6 @@
 ---
 name: wsl-bridge
-description: Run Linux commands inside WSL from Windows, share files between Windows and WSL, and manage WSL distributions
+description: Run Linux in WSL from Windows; share files between hosts
 category: windows
 version: 1.0.0
 platform: windows

@@ -1,6 +1,6 @@
 ---
 name: codex
-description: Delegate coding tasks to OpenAI Codex CLI for automated code generation, editing, and explanation
+description: Delegate coding tasks to OpenAI Codex CLI
 category: agent-bridge
 version: 1.0.0
 origin: aiden

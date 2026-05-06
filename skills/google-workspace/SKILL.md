@@ -1,6 +1,6 @@
 ---
 name: google-workspace
-description: Interact with Gmail, Google Calendar, Drive, Sheets, and Docs via the Google API with service account or OAuth credentials
+description: Gmail, Calendar, Drive, Sheets, Docs via Google API (SA / OAuth)
 category: productivity
 version: 1.0.0
 origin: aiden

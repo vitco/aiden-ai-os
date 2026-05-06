@@ -1,6 +1,6 @@
 ---
 name: opencode
-description: Delegate coding tasks to the OpenCode CLI — an open-source AI coding agent supporting multiple LLM providers
+description: Delegate coding to OpenCode CLI (multi-LLM open-source coding agent)
 category: agent-bridge
 version: 1.0.0
 origin: aiden

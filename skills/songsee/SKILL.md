@@ -1,6 +1,6 @@
 ---
 name: songsee
-description: Visualize audio files as mel spectrograms, chromagrams, and MFCC plots using Python librosa
+description: Visualize audio as mel spectrograms, chromagrams, MFCC (librosa)
 category: media
 version: 1.0.0
 origin: aiden

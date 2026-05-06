@@ -1,6 +1,6 @@
 ---
 name: onenote
-description: Read and write OneNote notebooks, sections, and pages via Microsoft Graph API or COM automation
+description: Read/write OneNote pages via Microsoft Graph or COM
 category: windows
 version: 1.0.0
 platform: windows

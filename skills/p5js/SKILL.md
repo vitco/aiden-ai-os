@@ -1,6 +1,6 @@
 ---
 name: p5js
-description: Create generative visual art and interactive sketches using p5.js, rendered as self-contained HTML files
+description: Generative visual art and sketches in p5.js (self-contained HTML)
 category: creative
 version: 1.0.0
 origin: aiden

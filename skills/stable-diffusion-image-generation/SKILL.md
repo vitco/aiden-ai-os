@@ -1,6 +1,6 @@
 ---
 name: stable-diffusion-image-generation
-description: Generate images using Stable Diffusion via HuggingFace Diffusers library locally or via API
+description: Generate images via Stable Diffusion (HuggingFace Diffusers, local/API)
 category: creative
 version: 1.0.0
 origin: aiden

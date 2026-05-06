@@ -1,6 +1,6 @@
 ---
 name: taskscheduler
-description: Create, list, enable, disable, and delete Windows Task Scheduler jobs using PowerShell ScheduledTasks module
+description: Windows Task Scheduler: create, list, enable, disable, delete (PS)
 category: windows
 version: 1.0.0
 platform: windows

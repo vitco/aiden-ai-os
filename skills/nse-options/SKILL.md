@@ -1,6 +1,6 @@
 ---
 name: nse-options
-description: Fetch NSE options chain data, analyze OI buildup, PCR ratio, max pain, and IV for Nifty and BankNifty
+description: NSE options chain: OI buildup, PCR, max pain, IV (Nifty/BankNifty)
 category: india
 version: 1.0.0
 tags: nse, options, derivatives, oi, pcr, maxpain, nifty, banknifty, iv, chain

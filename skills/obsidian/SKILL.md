@@ -1,6 +1,6 @@
 ---
 name: obsidian
-description: Read, search, and create notes in Obsidian vaults using file system operations and CLI tools
+description: Read, search, and create notes in Obsidian vaults
 category: productivity
 version: 1.0.0
 origin: aiden
