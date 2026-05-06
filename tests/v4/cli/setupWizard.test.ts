@@ -32,17 +32,23 @@ function makePaths(root: string): AidenPaths {
   };
 }
 
+type ScriptedPromptIO = PromptIO & { defaultIndexCalls: (number | undefined)[] };
+
 /** Build a scripted PromptIO: each method dequeues from a queue. */
 function scriptedPrompts(answers: {
   choose?: number[];
   input?: string[];
   confirm?: boolean[];
-}): PromptIO {
+}): ScriptedPromptIO {
   const choose = [...(answers.choose ?? [])];
   const input = [...(answers.input ?? [])];
   const confirm = [...(answers.confirm ?? [])];
-  return {
-    async choose() {
+  // Capture defaultIndex args so tests can assert on them. Index N = the
+  // defaultIndex passed to the Nth choose() call (1-based on call order).
+  const defaultIndexCalls: (number | undefined)[] = [];
+  const io: PromptIO & { defaultIndexCalls: (number | undefined)[] } = {
+    async choose(_q: string, _choices: string[], defaultIndex?: number) {
+      defaultIndexCalls.push(defaultIndex);
       if (choose.length === 0) throw new Error('scripted choose ran out');
       return choose.shift()!;
     },
@@ -54,7 +60,9 @@ function scriptedPrompts(answers: {
       if (confirm.length === 0) return false;
       return confirm.shift()!;
     },
+    defaultIndexCalls,
   };
+  return io;
 }
 
 /** Sink display — captures writes for assertions. */
@@ -108,6 +116,39 @@ describe('SetupWizard', () => {
 
   it('PROVIDERS has 19 numbered entries', () => {
     expect(PROVIDERS).toHaveLength(19);
+  });
+
+  it('wizard pre-selects Together AI as the recommended provider default', async () => {
+    // Phase 22 Task 1: Together is the fastest path to a working REPL —
+    // the wizard's first choose() call should pass Together's index as
+    // defaultIndex so Enter accepts it.
+    const expectedIdx = PROVIDERS.findIndex((p) => p.id === 'together') + 1;
+    expect(expectedIdx).toBeGreaterThan(0);
+    const { display } = sinkDisplay();
+    const prompts = scriptedPrompts({ choose: [expectedIdx, 1], input: ['tg-key'] });
+    const result = await runSetupWizard({
+      paths,
+      display,
+      prompts,
+      skipValidation: true,
+    });
+    expect(result.ran).toBe(true);
+    expect(result.config?.model.provider).toBe('together');
+    // The first choose() call was the provider picker — its defaultIndex
+    // arg must equal Together's 1-based index.
+    expect(prompts.defaultIndexCalls[0]).toBe(expectedIdx);
+  });
+
+  it('wizard prints the "Press Enter to accept the recommended" hint', async () => {
+    const { display, chunks } = sinkDisplay();
+    await runSetupWizard({
+      paths,
+      display,
+      prompts: scriptedPrompts({ choose: [1], confirm: [false] }),
+    });
+    const text = chunks.join('\n');
+    expect(text).toMatch(/Press Enter to accept the recommended Together AI/i);
+    expect(text).toMatch(/fastest path to a working REPL/i);
   });
 
   it('skips when config exists with providers and force=false', async () => {

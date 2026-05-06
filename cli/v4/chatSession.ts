@@ -457,6 +457,11 @@ export class ChatSession implements ChatSessionLike {
         BOX_WIDTH,
       ),
     );
+    // Phase 22 Task 1: concrete first-task suggestions inside the box —
+    // collapses time-to-first-tool-call by giving the user something to
+    // type. Constant content (not the rotating tip below the banner).
+    lines.push(boxLine('', BOX_WIDTH));
+    lines.push(boxLine(BOOT_TRY_HINT, BOX_WIDTH));
     lines.push(boxBottom(BOX_WIDTH));
 
     for (const line of lines) {
@@ -565,6 +570,13 @@ export class ChatSession implements ChatSessionLike {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
+
+/**
+ * Boot-card "Try:" hint (Phase 22 Task 1). Two concrete first-task
+ * examples picked so a fresh user can press Enter on the wizard, see
+ * the boot card, and have something specific to type within seconds.
+ */
+export const BOOT_TRY_HINT = `Try: 'play me a popular song'  or  'list my Downloads'`;
 
 function boxTop(width: number): string {
   return '╭' + '─'.repeat(width) + '╮';

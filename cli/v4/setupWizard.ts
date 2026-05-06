@@ -179,8 +179,16 @@ export interface SetupAnswers {
 }
 
 export interface PromptIO {
-  /** Multi-choice prompt; returns the 1-based selected index. */
-  choose(question: string, choices: string[]): Promise<number>;
+  /**
+   * Multi-choice prompt; returns the 1-based selected index.
+   *
+   * `defaultIndex` (Phase 22 Task 1): 1-based index pre-selected when the
+   * user just presses Enter. Wires to inquirer's `default:` field on the
+   * real prompt; scripted test prompts ignore it (they pop from the queue).
+   * Used by the wizard to default the provider picker to Together AI —
+   * fastest path to a working REPL.
+   */
+  choose(question: string, choices: string[], defaultIndex?: number): Promise<number>;
   /** Free-text input. */
   input(question: string, opts?: { default?: string; mask?: boolean }): Promise<string>;
   /** Yes/no confirmation. */
@@ -225,10 +233,13 @@ async function defaultPrompts(): Promise<PromptIO> {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const inq = require('@inquirer/prompts');
   return {
-    async choose(question, choices) {
+    async choose(question, choices, defaultIndex) {
       const ans: string = await inq.select({
         message: question,
         choices: choices.map((c, i) => ({ name: `[${i + 1}] ${c}`, value: String(i + 1) })),
+        ...(defaultIndex && defaultIndex >= 1 && defaultIndex <= choices.length
+          ? { default: String(defaultIndex) }
+          : {}),
       });
       return Number.parseInt(ans, 10);
     },
@@ -406,12 +417,20 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
   await ensureAidenDirsExist(paths);
 
   display.printBanner();
-  display.write('\nWelcome — let\'s pick a provider.\n\n');
+  display.write('\nWelcome — let\'s pick a provider.\n');
+  display.write(
+    `${kleur.dim('(Press Enter to accept the recommended Together AI option — fastest path to a working REPL.)')}\n\n`,
+  );
 
-  // Step 1: provider selection
+  // Step 1: provider selection. Phase 22 Task 1: pre-select Together as
+  // the recommended default. Together's signup is fast, the free credit
+  // covers a few hundred turns, and Qwen3-235B has strong tool calling —
+  // optimises for time-to-first-tool-call.
+  const togetherDefaultIdx = PROVIDERS.findIndex((p) => p.id === 'together') + 1;
   const providerIndex = await prompts.choose(
     'Which provider would you like to use?',
     PROVIDERS.map((p) => p.label),
+    togetherDefaultIdx > 0 ? togetherDefaultIdx : undefined,
   );
   const provider = PROVIDERS[providerIndex - 1];
   if (!provider) throw new Error(`invalid provider selection: ${providerIndex}`);
