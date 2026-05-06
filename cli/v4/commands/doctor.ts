@@ -18,7 +18,7 @@
  */
 
 import type { SlashCommand } from '../commandRegistry';
-import { runDoctor } from '../doctor';
+import { renderHealthBox, runDoctor } from '../doctor';
 
 export const doctor: SlashCommand = {
   name: 'doctor',
@@ -32,21 +32,11 @@ export const doctor: SlashCommand = {
     }
     ctx.display.info('Running diagnostic checks...');
     const report = await runDoctor({ paths: ctx.paths });
-
-    for (const r of report.results) {
-      const text = `${r.name}: ${r.message}`;
-      if (r.passed) ctx.display.success(text);
-      else ctx.display.printError(text, r.suggestion);
-    }
-    ctx.display.write('\n');
-    if (report.passed) {
-      ctx.display.success(`all ${report.results.length} checks passed in ${report.totalMs} ms`);
-    } else {
-      const failed = report.results.filter((r) => !r.passed).length;
-      ctx.display.warn(
-        `${failed} of ${report.results.length} checks failed in ${report.totalMs} ms`,
-      );
-    }
+    // Phase 22 Task 5A: orange-bordered rounded box; rows + summary
+    // assembled by renderHealthBox so the slash command stays a thin
+    // adapter and the same renderer can be reused by `aiden doctor`
+    // CLI in a future polish pass.
+    ctx.display.write(renderHealthBox(report, ctx.display) + '\n');
     return {};
   },
 };

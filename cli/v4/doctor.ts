@@ -25,6 +25,8 @@ import { spawn } from 'node:child_process';
 import { resolveAidenPaths, type AidenPaths } from '../../core/v4/paths';
 import { LicenseClient, hasLicense } from '../../core/v4/license';
 import { checkForUpdate } from '../../core/v4/update/checkUpdate';
+import type { Display } from './display';
+import { boxBottom, boxLine, boxTopTitled } from './box';
 
 export interface CheckResult {
   name: string;
@@ -564,6 +566,74 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
     passed: results.every((r) => r.passed),
     totalMs: Date.now() - start,
   };
+}
+
+// ─── Phase 22 Task 5A — boxed /doctor renderer ────────────────────────
+
+const HEALTH_BOX_WIDTH = 70;
+
+/**
+ * Format a single check row inside the box: `<icon>  <name padded>
+ * <message>`. Truncated to fit the box's inner width (HEALTH_BOX_WIDTH
+ * minus 2 for the `│ ` gutter on each side).
+ *
+ * Status icon picks per check outcome:
+ *   ✓ green — passed
+ *   ⚠ yellow — passed but with a remediation suggestion (soft warning)
+ *   ✗ red — failed
+ */
+function checkIconKind(r: CheckResult): { icon: string; colour: 'success' | 'warn' | 'error' } {
+  if (!r.passed) return { icon: '✗', colour: 'error' };
+  if (r.suggestion) return { icon: '⚠', colour: 'warn' };
+  return { icon: '✓', colour: 'success' };
+}
+
+function maxNameWidth(report: DoctorReport): number {
+  return report.results.reduce((m, r) => Math.max(m, r.name.length), 0);
+}
+
+/**
+ * Render the report as an orange-bordered rounded box. Pure — returns
+ * the multi-line string; caller writes it. `display` is needed for
+ * skin-aware colouring of the border, icons, and footer summary.
+ */
+export function renderHealthBox(report: DoctorReport, display: Display): string {
+  const W = HEALTH_BOX_WIDTH;
+  const nameWidth = maxNameWidth(report);
+  const top = display.brand(boxTopTitled('Health Check', W));
+  const bot = display.brand(boxBottom(W));
+  const side = (content: string): string => {
+    // Brand-colour just the verticals so inner content keeps its own colours.
+    const raw = boxLine(content, W);
+    const left = raw.slice(0, 1);
+    const inner = raw.slice(1, raw.length - 1);
+    const right = raw.slice(raw.length - 1);
+    return `${display.brand(left)}${inner}${display.brand(right)}`;
+  };
+
+  const lines: string[] = [top, side('')];
+
+  for (const r of report.results) {
+    const { icon, colour } = checkIconKind(r);
+    const colouredIcon = display.paint(icon, colour);
+    const namePart = ` ${colouredIcon}  ${r.name.padEnd(nameWidth)}  ${r.message}`;
+    lines.push(side(namePart));
+    if (r.suggestion && !r.passed) {
+      // Failed checks get the suggestion on a continuation line, indented
+      // past the icon column. Prefix in soft cyan to read as a hint.
+      const hint = `      ${display.muted('hint:')} ${r.suggestion}`;
+      lines.push(side(hint));
+    }
+  }
+
+  lines.push(side(''));
+  const passedCount = report.results.filter((r) => r.passed).length;
+  const summary = `${passedCount} of ${report.results.length} checks passed in ${report.totalMs} ms`;
+  const summaryColour = report.passed ? 'success' : 'warn';
+  lines.push(side(' ' + display.paint(summary, summaryColour)));
+  lines.push(bot);
+
+  return lines.join('\n');
 }
 
 /**

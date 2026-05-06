@@ -18,6 +18,7 @@
  */
 
 import type { Display } from './display';
+import { boxBottom, boxLine, boxTopTitled } from './box';
 import type {
   ApprovalRequest,
   ApprovalDecision,
@@ -98,15 +99,11 @@ export class CliCallbacks {
 
   /** ApprovalEngine.callbacks.promptUser */
   promptApproval = async (req: ApprovalRequest): Promise<ApprovalDecision> => {
-    const tierBadge = badgeForTier(req.riskTier);
-    this.display.line(60);
-    this.display.warn(
-      `Approval required: ${req.toolName} ${tierBadge}`,
-    );
-    if (req.reason) this.display.dim(`  reason: ${req.reason}`);
-    const argsPreview = JSON.stringify(req.args).slice(0, 200);
-    this.display.dim(`  args: ${argsPreview}`);
-    this.display.line(60);
+    // Phase 22 Task 5B: yellow-bordered rounded box for emphasis.
+    // Yellow distinguishes the awaiting-attention state from the
+    // brand-orange (informational) frames used by setup-complete and
+    // /doctor.
+    this.display.write(renderApprovalBox(req, this.display) + '\n');
 
     const prompts = await this.promptsPromise;
     let choice: string;
@@ -243,4 +240,62 @@ function badgeForTier(tier?: RiskTier): string {
     default:
       return '';
   }
+}
+
+// ─── Phase 22 Task 5B — boxed approval prompt ─────────────────────────
+
+const APPROVAL_BOX_WIDTH = 64;
+// Args limit kept under the visible content width (BOX_WIDTH minus the
+// 1-char gutter on each side and the ` Args: ` label) so the explicit
+// ellipsis we append surfaces inside the box. Setting this above the
+// visible budget would let `boxLine`'s hard truncation eat the ellipsis
+// and the user wouldn't see they were viewing a partial value.
+const APPROVAL_ARGS_LIMIT = 50;
+
+/**
+ * Render an approval request as a yellow-bordered rounded box. Pure —
+ * returns the multi-line string; caller writes it. Args are truncated
+ * to APPROVAL_ARGS_LIMIT chars for display only; the full args stay
+ * with the tool call.
+ */
+export function renderApprovalBox(req: ApprovalRequest, display: Display): string {
+  const W = APPROVAL_BOX_WIDTH;
+  const top = display.paint(boxTopTitled('Approval required', W), 'warn');
+  const bot = display.paint(boxBottom(W), 'warn');
+  const side = (content: string): string => {
+    const raw = boxLine(content, W);
+    const left = raw.slice(0, 1);
+    const inner = raw.slice(1, raw.length - 1);
+    const right = raw.slice(raw.length - 1);
+    return `${display.paint(left, 'warn')}${inner}${display.paint(right, 'warn')}`;
+  };
+
+  const tierBadge = badgeForTier(req.riskTier);
+  let argsPreview = '';
+  try {
+    argsPreview = JSON.stringify(req.args);
+  } catch {
+    argsPreview = String(req.args);
+  }
+  if (argsPreview.length > APPROVAL_ARGS_LIMIT) {
+    argsPreview = argsPreview.slice(0, APPROVAL_ARGS_LIMIT - 1) + '…';
+  }
+
+  const lines: string[] = [
+    top,
+    side(''),
+    side(` ${display.muted('Tool:')} ${req.toolName}${tierBadge ? '  ' + tierBadge : ''}`),
+  ];
+  if (req.reason) {
+    lines.push(side(` ${display.muted('Reason:')} ${req.reason}`));
+  }
+  lines.push(side(` ${display.muted('Args:')} ${argsPreview}`));
+  lines.push(side(''));
+  lines.push(
+    side(
+      ` ${display.brand('[y]')} allow once  ${display.brand('[a]')} allow always  ${display.brand('[n]')} deny`,
+    ),
+  );
+  lines.push(bot);
+  return lines.join('\n');
 }

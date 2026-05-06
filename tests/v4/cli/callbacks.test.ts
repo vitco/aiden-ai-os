@@ -60,9 +60,11 @@ describe('CliCallbacks.promptApproval', () => {
     });
     expect(decision).toBe('allow');
     const out = output();
-    expect(out).toMatch(/Approval required: shell_exec/);
+    // Phase 22 Task 5B: rendered as a yellow-bordered rounded box.
+    expect(out).toMatch(/╭── Approval required /);
+    expect(out).toMatch(/Tool: shell_exec/);
     expect(out).toMatch(/dangerous/);
-    expect(out).toMatch(/destructive command/);
+    expect(out).toMatch(/Reason: destructive command/);
   });
 
   it('returns the chosen decision verbatim', async () => {

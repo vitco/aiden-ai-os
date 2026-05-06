@@ -34,6 +34,13 @@ function captured() {
   o.write = (m: string) => o.out.push(m);
   o.printError = (...m: string[]) => o.errs.push(m.join(' | '));
   o.success = (m: string) => o.out.push('ok:' + m);
+  // Phase 22 Task 5A: renderHealthBox composes coloured fragments via
+  // display.brand / display.paint / display.muted. Mock the colour
+  // helpers as identity functions so the string-content assertions
+  // below still see the underlying text.
+  o.brand = (m: string) => m;
+  o.muted = (m: string) => m;
+  o.paint = (m: string) => m;
   return o;
 }
 
