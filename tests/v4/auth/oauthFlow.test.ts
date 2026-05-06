@@ -93,7 +93,7 @@ describe('runCopyPasteFlow', () => {
     expect(r.refreshToken).toBe('R');
     expect(r.expiresInSeconds).toBe(3600);
     expect(captures[0].url).toBe(cfg.tokenUrl);
-    // Phase 18.1: login body is JSON (matches Hermes anthropic_adapter.py:1092).
+    // Phase 18.1: login body is JSON ( anthropic_adapter.py:1092).
     const parsed = JSON.parse(captures[0].body);
     expect(parsed.grant_type).toBe('authorization_code');
     expect(parsed.code).toBe('AUTHCODE');

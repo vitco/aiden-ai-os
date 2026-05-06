@@ -15,7 +15,6 @@
  *   - format user/agent/tool/error turns with skin-aware colour
  *   - drive a lightweight spinner that works on Windows ConPTY
  *
- * Hermes reference: hermes_cli/banner.py + agent/display.py.
  */
 
 import { marked } from 'marked';
@@ -240,7 +239,7 @@ export class Display {
    * the first call of a turn, then writes raw text directly via the
    * underlying `write` so token boundaries remain visible. Markdown
    * rendering is deferred — applying `marked` per-token would render
-   * partial code fences as broken HTML; matches Hermes's pattern of
+   * partial code fences as broken HTML; pattern of
    * showing raw streamed text and reformatting on completion only when
    * the full body is in hand.
    */

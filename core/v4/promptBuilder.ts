@@ -12,10 +12,9 @@
  *
  * Slot-ordered system-prompt assembler, frozen at session start.
  *
- * Hermes reference: agent/prompt_builder.py — _build_system_prompt() with
  * its identity / memory / skills / platform sections. Aiden simplifies
- * Hermes' multiple branches into a single ordered slot list because v4
- * doesn't have Hermes' Kanban / acp_adapter / hermes-md layering.
+ *multiple branches into a single ordered slot list because v4
+ * doesn't haveKanban / acp_adapter / hermes-md layering.
  *
  * Slot order (top → bottom):
  *   1. SOUL.md          (identity)
@@ -162,7 +161,7 @@ export class PromptBuilder {
 
     // ── Slot 4: USER.md ──────────────────────────────────────────────
     // Same pattern as slot 3 but framed as user identity. "(who the user
-    // is)" matches Hermes verbatim — it's the framing that prevents the
+    // is)" — it's the framing that prevents the
     // model from treating this as transcript history.
     if (opts.memorySnapshot && opts.memorySnapshot.userMd.trim()) {
       const sep = '═'.repeat(51);
@@ -181,7 +180,7 @@ export class PromptBuilder {
     // ── Slot 5: Active skills list ───────────────────────────────────
     // Phase 16g: framing copied from Hermes (prompt_builder.py:907-934).
     // "## Available skills" was passive; the model would skip it on fuzzy
-    // intents. Mandatory framing matches Hermes's "you MUST load it via
+    // intents. Mandatory framing "you MUST load it via
     // skill_view if even partially relevant" — model is forced to scan
     // before giving up.
     if (opts.skillsList && opts.skillsList.length > 0) {

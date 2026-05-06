@@ -11,9 +11,8 @@
  * Backed by `providers/v4/modelCatalog.ts` for the per-model context length;
  * adds compression-threshold + reserved-output policy on top.
  *
- * Hermes reference: agent/model_metadata.py — get_model_context_length(),
  * estimate_messages_tokens_rough(). We trim the live models.dev / OpenRouter
- * hydration (Hermes uses both) to keep v4.0.0 offline-first; the catalog
+ * hydration to keep v4.0.0 offline-first; the catalog
  * is the source of truth.
  *
  * Token estimation strategy:

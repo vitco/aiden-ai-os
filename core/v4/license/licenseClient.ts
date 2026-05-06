@@ -26,7 +26,6 @@
  * `verifyLicense()` returns the cached license if the network is down and
  * the key has not yet expired by its `expiresAt`.
  *
- * Hermes reference: none. Hermes has no license server. The v3 client
  * (`core/licenseManager.ts`) is the authoritative reference; v4 trims it
  * to async/await + a clean Result type and drops the legacy `/validate`,
  * `/verify-install`, `/register` endpoints (those were the email-gated

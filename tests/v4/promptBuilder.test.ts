@@ -79,7 +79,7 @@ describe('PromptBuilder', () => {
     expect(out).toContain('User prefers concise');
   });
 
-  it('4a. memory section uses Hermes-style identity framing (Phase 16e)', async () => {
+  it('4a. memory section uses identity framing (Phase 16e)', async () => {
     // Locks the parenthetical phrasing copied from Hermes
     // (`tools/memory_tool.py:393-409`). Without this framing the model
     // treats USER.md as past conversation and refuses to surface it
@@ -102,7 +102,7 @@ describe('PromptBuilder', () => {
   });
 
   it('4c. skills slot uses mandatory framing (Phase 16g)', async () => {
-    // Locks Hermes-style "## Skills (mandatory) — you MUST load it"
+    // Locks "## Skills (mandatory) — you MUST load it"
     // framing. Pre-16g header was "## Available skills" which the
     // model treated as passive and skipped on fuzzy intents.
     const pb = new PromptBuilder();

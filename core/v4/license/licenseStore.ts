@@ -35,7 +35,6 @@
  * Honest framing: this is OBFUSCATION, not PROTECTION. The /license
  * status surface and the audit doc both say so explicitly.
  *
- * Hermes reference: none — Hermes has no Pro tier. The v3 Aiden
  * `licenseManager.ts` stored license cache as plaintext JSON at
  * `workspace/license.json`. v4 upgrades that to machine-bound encryption
  * for parity with `tokenStore` and so users on shared machines (corporate

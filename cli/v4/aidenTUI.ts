@@ -17,7 +17,6 @@
  * This is a pure rendering layer that drives the same `ChatSession`
  * engine via a swapped Display surface and a TUI-flavoured promptApi.
  *
- * Hermes reference: prompt_toolkit `Application` full-screen mode +
  * Hermes `HermesCLI.run()` modal flow. Translated into blessed widgets.
  */
 

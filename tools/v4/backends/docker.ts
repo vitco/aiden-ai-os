@@ -14,7 +14,6 @@
  * Phase 9 hardens: image build, network policies, resource limits,
  * volume management. Phase 8 just proves the route works.
  *
- * Hermes reference: hermes-agent/tools/environments/docker.py.
  */
 
 import { spawn, spawnSync } from 'node:child_process';

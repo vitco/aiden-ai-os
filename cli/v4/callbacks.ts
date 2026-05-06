@@ -11,7 +11,6 @@
  * Phase 14c when AidenAgent is constructed; each callback is otherwise
  * self-contained so unit tests don't need a chat REPL.
  *
- * Hermes reference: hermes_cli/callbacks.py — clarify, sudo, approval
  * prompt callbacks. Aiden v4 trims the scope to what Phase 14b needs:
  * approval prompts, smart-mode risk assessment, skill-teacher proposals,
  * planner-guard / compression / budget notices. Clarify + sudo arrive in

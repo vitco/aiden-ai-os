@@ -14,7 +14,6 @@
  * Python isn't on PATH the tool returns a clear error rather than
  * crashing the agent.
  *
- * Hermes reference: hermes-agent/tools/code_execution_tool.py — far
  * more elaborate (dedicated container, IPython-style state). v4
  * starts with the simplest thing that proves the loop.
  *

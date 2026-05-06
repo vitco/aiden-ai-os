@@ -129,7 +129,7 @@ describe('PlannerGuard — rule_based', () => {
     // Phase 16g: pre-16g returned only CORE_TOOL_NAMES (3 tools), which
     // broke fuzzy multi-step intents like "play me a song on youtube"
     // — model couldn't see browser/web/shell tools and had no pathway
-    // to chain. Now matches Hermes pattern (no per-turn narrowing on
+    // to chain. Now pattern (no per-turn narrowing on
     // fuzzy intents).
     const guard = new PlannerGuard(FULL_REGISTRY, 'rule_based');
     const decision = await guard.decide('hi there friend', []);

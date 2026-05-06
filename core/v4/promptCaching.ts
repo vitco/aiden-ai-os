@@ -14,7 +14,6 @@
  * Other providers' caching is implicit (OpenAI prefix cache, Groq cache)
  * and needs no markers — `applyMarkers` is a no-op for them.
  *
- * Hermes reference: agent/anthropic_adapter.py — _attach_cache_control()
  * and _ephemeral_blocks(). Aiden v4.0.0 only marks the system message
  * (the most-stable prefix); marking the last-tool-result for incremental
  * cache extension lands in v4.1.

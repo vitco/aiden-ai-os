@@ -14,7 +14,6 @@
  * tool — only background work (`process_spawn`) lands in the
  * registry.
  *
- * Hermes reference: hermes-agent/tools/process_registry.py — but
  * Aiden's surface is much smaller. Hermes wraps multiple sandbox
  * environments (local, Docker, SSH, Modal); v4 ships local-only
  * here and routes Docker through `shell_exec` instead.

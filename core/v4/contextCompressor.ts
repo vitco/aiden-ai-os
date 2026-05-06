@@ -10,7 +10,6 @@
  * Watches conversation token count, fires a summarize-and-replace pass
  * when utilisation crosses `compressionThreshold` (default 50%).
  *
- * Hermes reference: agent/context_compressor.py — auto-compression with
  * a structured summary template and tail protection. Aiden's algorithm is
  * the same shape but trimmed: no tool-output pruning pre-pass, no
  * iterative summary updates, single summary message replaces the middle.

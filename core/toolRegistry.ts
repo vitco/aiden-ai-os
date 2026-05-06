@@ -2784,7 +2784,7 @@ public class AidenVolSet {
 const externalTools: Record<string, (payload: any) => Promise<RawResult>> = {}
 const externalToolsMeta: Record<string, { source: string }> = {}
 
-// v3.19 Phase 1 — registry generation counter (Hermes run_agent.py:113,159).
+// v3.19 Phase 1 — registry generation counter.
 // Incremented whenever a new external tool is registered so deriver caches
 // know to recompute.  Declared here so registerExternalTool can reference it
 // before the deriver block (which appears after TOOL_REGISTRY).

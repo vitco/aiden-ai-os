@@ -14,7 +14,6 @@
  *
  * Status: PHASE 5.
  *
- * Hermes reference: hermes_cli/auth.py — PROVIDER_REGISTRY (auth_type,
  *   api_key_env_vars, inference_base_url) + hermes_cli/runtime_provider.py
  *   for the (provider → api_mode) mapping per branch.
  *
@@ -76,7 +75,7 @@ export interface ProviderRegistryEntry {
  *
  * Phase 21 #5 unification: ONE registry entry per OAuth service. The
  * legacy `claude_subscription` / `chatgpt_subscription` snake_case stubs
- * (Phase 5, no OAuth wiring) have been removed. Hermes pattern: one
+ * (Phase 5, no OAuth wiring) have been removed.: one
  * canonical provider name per service. Sources (claude_code, hermes_pkce,
  * device_code, etc.) seed credentials INTO that single entry — they
  * never appear as parallel registry rows.

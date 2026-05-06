@@ -21,7 +21,6 @@
  * enforcement, no scheduling. Those concerns live in `AidenAgent`,
  * Phase 9's approval engine, and individual tool wrappers.
  *
- * Hermes reference: hermes-agent/model_tools.py — flat dict lookup with
  * per-call dispatch. Aiden adds a typed `ToolHandler` shape and per-tool
  * risk metadata (`category`, `mutates`) so Phase 9 can gate tool calls
  * without scanning the wrapper bodies.

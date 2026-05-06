@@ -7,7 +7,7 @@ import {
 
 /**
  * Phase 21 #6 reopen — Cloudflare-bypass headers required by
- * chatgpt.com/backend-api/codex. Hermes pattern verbatim from
+ * chatgpt.com/backend-api/codex. verbatim from
  * agent/auxiliary_client.py:_codex_cloudflare_headers.
  *
  * Without these headers the Codex backend returns
@@ -24,7 +24,7 @@ function makeJwt(payload: object): string {
   return `${b64('{"alg":"HS256"}')}.${b64(JSON.stringify(payload))}.sig`;
 }
 
-describe('extractChatGptAccountId (Hermes JWT decode)', () => {
+describe('extractChatGptAccountId', () => {
   it('1. extracts chatgpt_account_id from the auth claim', () => {
     const token = makeJwt({
       'https://api.openai.com/auth': { chatgpt_account_id: 'acct_abc123' },

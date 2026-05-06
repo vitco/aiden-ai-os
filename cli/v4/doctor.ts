@@ -16,7 +16,6 @@
  * runtime is therefore bounded at roughly N × 3 s in the worst case but
  * will normally be sub-second.
  *
- * Hermes reference: hermes_cli/doctor.py.
  */
 
 import { promises as fs } from 'node:fs';

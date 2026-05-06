@@ -11,7 +11,6 @@
  * and any registration errors. Read by `/plugins list` and `/plugins info`,
  * mutated only by `PluginLoader`.
  *
- * Hermes reference: hermes_cli/plugins.py::PluginManager._plugins (L601).
  *
  * Status: PHASE 17 Task 1.
  */

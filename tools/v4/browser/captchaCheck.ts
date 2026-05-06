@@ -11,7 +11,7 @@
  * post-load checks. Pure function — no Playwright dependency, easy to
  * unit test against fixture text.
  *
- * Per docs/sprint/hermes-tool-honesty-audit.md, Aiden's CAPTCHA-claimed-
+ *, Aiden's CAPTCHA-claimed-
  * success bug was browser_navigate returning {success: true} even when
  * the resulting page was a Cloudflare wall. This module gives the tool
  * wrapper the heuristic to detect that case and return success=false

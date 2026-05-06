@@ -19,7 +19,6 @@
  *
  * Status: PHASE 4 — non-streaming only.
  *
- * Hermes reference: environments/tool_call_parsers/hermes_parser.py
  *   (Aiden v4 adopts the same `<tool_call>` regex format verbatim.)
  *
  * Wire-format quirks handled here:

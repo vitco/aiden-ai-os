@@ -175,9 +175,7 @@ function buildToolHandlers(cdpClient) {
  * no longer pops a browser window — the user only sees Chrome appear
  * when the agent actually decides to use a real-Chrome tool.
  *
- * Hermes pattern (cli.py:6850 _handle_browser_command): Chrome launch
- * is bound to the explicit `/browser connect` slash command — never
- * automatic. Aiden v4 takes a slightly more permissive line: the first
+ * Aiden v4 takes a permissive line on this: the first
  * browser_real_* tool call triggers the launch (no slash ritual). The
  * tool itself is gated by the approval engine, so user consent still
  * happens at exactly one point — just on first use rather than at boot.

@@ -21,8 +21,6 @@
  *
  * Status: PHASE 3 — non-streaming only. Streaming lands Phase 13.
  *
- * Hermes reference: agent/transports/chat_completions.py (ChatCompletionsTransport)
- *
  * Wire-format quirks handled here:
  *   1. tool_calls[].function.arguments is a JSON STRING — parsed; falls back to {} on bad JSON.
  *   2. choices[0].message.content can be null when only tool_calls present.
@@ -272,14 +270,15 @@ export function parseLegacyFunctionSyntax(
 /**
  * Phase 21 #4 — Hermes/Qwen `<tool_call>...</tool_call>` extraction.
  *
- * Direct port of Hermes `environments/tool_call_parsers/hermes_parser.py`
- * (commit synced 2026-05). Together's Qwen3-Instruct intermittently emits
+ * Implements the Hermes/Qwen tool-call format spec (a public format used
+ * by Nous Hermes and Qwen open-source models). Together's Qwen3-Instruct
+ * intermittently emits
  * `<tool_call>{"name": "...", "arguments": {...}}</tool_call>` inside
  * `message.content` of a 200-OK response — bypassing the OpenAI
  * tool_calls envelope entirely. Without this extraction the raw tag text
  * leaks to the user (Phase 21 #4 user report).
  *
- * Strategy mirrors Hermes exactly:
+ * Strategy:
  *   1. Skip when `<tool_call>` is not in the text — fast no-op.
  *   2. Match closed `<tool_call>X</tool_call>` AND unclosed `<tool_call>X`
  *      (truncated generation) via the same compiled regex.
@@ -292,18 +291,18 @@ export function parseLegacyFunctionSyntax(
  * Exposed at module scope for unit tests and for the streaming
  * finaliser to share the same logic.
  */
-const HERMES_TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>|<tool_call>\s*([\s\S]*)/g;
+const INLINE_TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>|<tool_call>\s*([\s\S]*)/g;
 
-export function extractHermesToolCalls(text: string | null | undefined): {
+export function extractInlineToolCalls(text: string | null | undefined): {
   content: string | null;
   toolCalls: ToolCallRequest[];
 } | null {
   if (!text || !text.includes('<tool_call>')) return null;
-  HERMES_TOOL_CALL_RE.lastIndex = 0;
+  INLINE_TOOL_CALL_RE.lastIndex = 0;
   const calls: ToolCallRequest[] = [];
   let match: RegExpExecArray | null;
   let counter = 0;
-  while ((match = HERMES_TOOL_CALL_RE.exec(text)) !== null) {
+  while ((match = INLINE_TOOL_CALL_RE.exec(text)) !== null) {
     const rawJson = (match[1] ?? match[2] ?? '').trim();
     if (!rawJson) continue;
     let parsed: unknown;
@@ -321,7 +320,7 @@ export function extractHermesToolCalls(text: string | null | undefined): {
         : {};
     counter += 1;
     calls.push({
-      id: `tc-hermes-${counter}-${Date.now().toString(36)}`,
+      id: `tc-inline-${counter}-${Date.now().toString(36)}`,
       name: tc.name,
       arguments: args,
     });
@@ -341,9 +340,6 @@ export function extractHermesToolCalls(text: string | null | undefined): {
  * Why hand-rolled vs an SSE library: dependency-free, ~30 lines, and the
  * v4 server already does the same thing for OpenAI-wire output. The SSE
  * spec is trivially simple — newline-delimited `field: value` lines.
- *
- * Hermes reference: openai SDK's Stream() handles this internally; v4
- * uses raw fetch so we parse the wire ourselves.
  *
  * Exported for unit tests.
  */
@@ -610,7 +606,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
       );
     }
 
-    // Accumulators mirror Hermes _call_chat_completions exactly.
+    // Accumulators for the streaming pass (mirrors `_call_chat_completions`).
     const contentParts: string[] = [];
     const toolCallsAcc = new Map<
       number,
@@ -664,10 +660,10 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
         const delta = choice.delta ?? {};
         if (typeof delta.content === 'string' && delta.content.length > 0) {
           contentParts.push(delta.content);
-          // Per Hermes line 6852: only stream deltas while no tool call
-          // has appeared in this turn. Once a tool_call event fires the
-          // visible stream goes silent; the display layer is expected to
-          // switch into "executing tool" mode.
+          // Only stream deltas while no tool call has appeared in this
+          // turn. Once a tool_call event fires the visible stream goes
+          // silent; the display layer is expected to switch into
+          // "executing tool" mode.
           if (!toolCallSeen) {
             yield { type: 'delta', content: delta.content };
           }
@@ -685,7 +681,8 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
             const fn = tcDelta.function;
             if (fn) {
               if (typeof fn.name === 'string' && fn.name.length > 0) {
-                // Assignment, not concat — see Hermes comment at 6907.
+                // Assignment, not concat — once a name is set it does not
+                // change across deltas for the same tool-call index.
                 entry.name = fn.name;
               }
               if (typeof fn.arguments === 'string') {
@@ -779,7 +776,7 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
     // non-streaming path applies. Stream of bare `<tool_call>` tags
     // ended in contentParts; the OpenAI envelope was empty.
     if (toolCalls.length === 0 && typeof fullContent === 'string') {
-      const extracted = extractHermesToolCalls(fullContent);
+      const extracted = extractInlineToolCalls(fullContent);
       if (extracted) {
         fullContent = extracted.content;
         finalToolCalls = extracted.toolCalls;
@@ -928,12 +925,11 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
     // Phase 21 #4: when the OpenAI tool_calls envelope is empty AND the
     // content carries Hermes/Qwen `<tool_call>...</tool_call>` tags,
     // extract them client-side. Otherwise the raw tags leak to the user.
-    // Direct port of Hermes hermes_parser.py — see hermes-toolcall-leak-audit.md.
     let visibleContent: string | null = message.content ?? null;
     let effectiveToolCalls = toolCalls;
     let effectiveFinish = finishReason;
     if (toolCalls.length === 0 && typeof visibleContent === 'string') {
-      const extracted = extractHermesToolCalls(visibleContent);
+      const extracted = extractInlineToolCalls(visibleContent);
       if (extracted) {
         visibleContent = extracted.content;
         effectiveToolCalls = extracted.toolCalls;

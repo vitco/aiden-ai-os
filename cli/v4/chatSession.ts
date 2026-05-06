@@ -17,7 +17,6 @@
  *   4. Persists each turn via `SessionManager.recordTurn()`.
  *   5. Re-renders the status line after every turn.
  *
- * Hermes reference: cli.py::HermesCLI.run() / .chat() / .process_command().
  */
 
 import type { AidenAgent } from '../../core/v4/aidenAgent';

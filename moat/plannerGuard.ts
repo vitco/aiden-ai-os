@@ -77,7 +77,7 @@ export interface PlannerGuardDecision {
     /**
      * Phase 16g: no keyword rule matched — open the inventory rather
      * than narrow to CORE_TOOL_NAMES. Per
-     * `docs/sprint/hermes-autonomy-audit.md`, Hermes never narrows
+     * `docs/sprint/hermes-autonomy-audit.md`,
      * per-turn. Restoring full agency for fuzzy multi-step intents
      * ("play me a song on youtube") that don't match any rule.
      */
@@ -257,7 +257,7 @@ export class PlannerGuard {
     // CORE_TOOL_NAMES (3 tools), which broke fuzzy multi-step intents
     // like "play me a song on youtube" — the model could not see
     // browser_navigate / web_search / open_url and had no pathway to
-    // chain. Per docs/sprint/hermes-autonomy-audit.md, Hermes never
+    // chain.,
     // narrows per-turn; restoring full agency on fuzzy intents.
     //
     // Explicit single-domain intents still narrow correctly because

@@ -15,7 +15,7 @@
  * - YAML parsed via `js-yaml` (already a transitive dep, now direct).
  * - `${ENV_VAR}` interpolation runs at `get()` / `getValue()` time.
  *   Unset vars are left as `${X}` so callers can detect-and-fail rather
- *   than silently use empty strings (Hermes pattern, _expand_env_vars).
+ *   than silently use empty strings (, _expand_env_vars).
  * - Schema is permissive: unknown top-level keys log a warning and are
  *   preserved on disk so a future Aiden version can pick them up.
  * - `set()` mutates the in-memory copy; persistence is `save()`.
@@ -24,7 +24,6 @@
  *
  * Status: PHASE 6.
  *
- * Hermes reference: hermes_cli/config.py (_expand_env_vars, load_config,
  * save_config). Aiden trims hot-reload + the `aiden config` slash
  * commands to Phase 13 — only the parser surface is needed now.
  */

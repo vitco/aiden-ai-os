@@ -55,7 +55,6 @@ export type ApiMode =
  * diagnostics and for honest user-facing error messages ("API key from
  * config.yaml is rejected" beats "401").
  *
- * Hermes reference: hermes_cli/runtime_provider.py — RuntimeProvider.resolve()
  */
 export interface RuntimeResolution {
   provider: string;
@@ -169,7 +168,7 @@ export interface ProviderCallOutput {
  *      turn, the adapter SHOULD stop emitting `delta` events for the
  *      same turn — agent loops use `tool_call` arrival as the cue to
  *      switch the display from "streaming reply" to "executing tool"
- *      mode (mirrors Hermes `_call_chat_completions` line 6852).
+ *      mode ( `_call_chat_completions` line 6852).
  *   3. Exactly one `done` event at end-of-turn carrying finish reason +
  *      usage + the assembled final `ProviderCallOutput`. The agent loop
  *      pushes `output` onto its conversation history just like the
@@ -211,7 +210,6 @@ export interface ProviderAdapter {
  * from the refresh token in `auth.json`; the adapter should retry once on
  * a 401 before propagating the error.
  *
- * Hermes reference: hermes_cli/auth.py — Credential / RefreshableCredential
  */
 export interface CredentialSource {
   apiKey?: string;

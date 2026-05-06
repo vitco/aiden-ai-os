@@ -14,7 +14,6 @@
  *
  * Status: PHASE 6 — interface + shared types only. Plugins land in v4.1.
  *
- * Hermes reference: agent/memory_provider.py::MemoryProvider (full ABC
  * with prefetch/sync_turn/tool_schemas hooks). v4.0.0 trims to the
  * minimal CRUD surface — prefetch and tool schemas are reintroduced when
  * we wire the first external plugin.

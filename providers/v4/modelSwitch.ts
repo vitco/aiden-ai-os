@@ -14,7 +14,6 @@
  *
  * Status: PHASE 5.
  *
- * Hermes reference: hermes_cli/model_switch.py — switch_model().
  *
  * Divergence from Hermes: Aiden v4 supports a `provider:model` colon
  * syntax that Hermes deliberately rejected (Hermes uses `--provider`

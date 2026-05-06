@@ -21,7 +21,6 @@
  *
  * Status: PHASE 6.
  *
- * Hermes reference: gateway/session.py::SessionStore (the application-side
  * session manager, not the SQLite layer).
  */
 

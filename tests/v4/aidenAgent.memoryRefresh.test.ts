@@ -1,7 +1,7 @@
 /**
  * Phase 16d: AidenAgent memory-snapshot refresh on mutation.
  *
- * Strategy (b) per docs/sprint/hermes-memory-refresh-audit.md:
+ * Strategy (b):
  *   - System prompt frozen by default for prefix-cache stability
  *   - `markMemoryDirty()` flips a dirty bit
  *   - Next `runConversation` reloads MEMORY.md / USER.md, rebuilds slot 3+4

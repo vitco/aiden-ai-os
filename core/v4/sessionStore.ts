@@ -23,7 +23,6 @@
  *
  * Status: PHASE 6.
  *
- * Hermes reference: hermes_state.py::SessionDB.
  */
 
 import Database from 'better-sqlite3';

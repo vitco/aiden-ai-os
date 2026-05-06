@@ -13,7 +13,7 @@
  *   - inter-delta gap distribution (median + max) — confirms tokens are
  *     genuinely incremental, not one big flush
  *
- * Tool-call prompts buffer per Phase 16c spec (Hermes pattern). That's
+ * Tool-call prompts buffer per Phase 16c spec (). That's
  * by design and tested by `smoke-phase16c.ts`. THIS script complements
  * by isolating the pure-text streaming behaviour.
  */

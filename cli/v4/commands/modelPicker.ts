@@ -12,7 +12,6 @@
  * supplied, the picker short-circuits to spec parsing via Phase 5's
  * ModelSwitcher.
  *
- * Hermes reference: hermes_cli/model_switch.py — switch_model() prompts
  * for provider then model and validates each pick against the catalog.
  */
 

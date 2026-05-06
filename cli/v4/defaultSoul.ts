@@ -16,7 +16,6 @@
  *   2. Hard fallback in `core/v4/promptBuilder.ts` when the file IS missing
  *      at slot-1 build time (e.g. user nuked it, sandbox without disk).
  *
- * Hermes reference: `hermes_cli/default_soul.py::DEFAULT_SOUL_MD`. We diverge
  * on content (Aiden-specific identity, mentions skills/tools/local-first)
  * but copy the seed-on-first-run + idempotent-write pattern verbatim.
  *

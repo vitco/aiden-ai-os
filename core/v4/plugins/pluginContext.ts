@@ -11,7 +11,6 @@
  * it to contribute tools, lifecycle hooks, and (later) skills/providers
  * into the running agent.
  *
- * Hermes reference: hermes_cli/plugins.py::PluginContext (L233). Aiden's
  * version is leaner — fewer surfaces (no slash commands, no CLI commands,
  * no message injection) until those needs are concrete. Tool registration
  * is the load-bearing surface for Phase 17 Task 2 (CDP browser plugin).
@@ -232,7 +231,7 @@ export class PluginContext {
   /**
    * Register a lifecycle hook callback. v4.0 hooks: onLoad, onActivate,
    * onTeardown. The plugin manager invokes them at the appropriate
-   * point with all callbacks wrapped in try/catch (Hermes pattern).
+   * point with all callbacks wrapped in try/catch ().
    *
    * `onLoad` fires synchronously inside `register()`. Plugins typically
    * use `onActivate` for setup that may fail (e.g. spawn subprocesses)

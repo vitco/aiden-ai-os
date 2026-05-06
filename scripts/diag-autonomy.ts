@@ -80,7 +80,7 @@ async function main() {
   }
 
   // ── 4. What would Hermes do?
-  console.log('\n[4] Comparison (Hermes pattern, see hermes-autonomy-audit.md):');
+  console.log('\n[4] Comparison (, see hermes-autonomy-audit.md):');
   console.log('    Hermes: all tools always passed to model (no per-turn filter).');
   console.log('    Hermes: skills slot framed as "MUST load if even partially relevant"');
   console.log('    Hermes: prompt has <act_dont_ask> + <prerequisite_checks> + autonomy directives');

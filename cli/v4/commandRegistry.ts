@@ -11,7 +11,6 @@
  * them to registered handlers, and exposes both `list()` (for `/help`) and
  * `filter()` (for the autocomplete dropdown landing in 14c).
  *
- * Hermes reference: hermes_cli/commands.py + hermes_cli/_parser.py.
  *
  * Status: PHASE 14b.
  */

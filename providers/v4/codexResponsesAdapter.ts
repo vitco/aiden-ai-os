@@ -26,7 +26,6 @@
  * and an OpenAI Responses-API key (gpt-5-codex is gated). Unit tests with
  * mocked fetch carry the load until then.
  *
- * Hermes reference: agent/transports/codex.py + agent/codex_responses_adapter.py
  *
  * Wire-format quirks handled here:
  *   1. Endpoint: /v1/responses (NOT /v1/chat/completions).
@@ -250,7 +249,7 @@ export class CodexResponsesAdapter implements ProviderAdapter {
     // rejects requests without codex_cli_rs originator + UA + the
     // ChatGPT-Account-ID extracted from the OAuth JWT. Without these, the
     // backend returns 400 "model not supported when using Codex with a
-    // ChatGPT account" regardless of slug. Hermes pattern verbatim from
+    // ChatGPT account" regardless of slug. verbatim from
     // agent/auxiliary_client.py:_codex_cloudflare_headers.
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -370,7 +369,7 @@ export class CodexResponsesAdapter implements ProviderAdapter {
     if (input.temperature != null) body.temperature = input.temperature;
     // Phase 21 #6c: chatgpt.com/backend-api/codex requires `stream: true`
     // on every request — sending stream:false (or omitting) returns
-    // HTTP 400 "Stream must be set to true." Hermes always streams the
+    // HTTP 400 "Stream must be set to true."
     // Codex backend (run_agent.py _run_codex_stream call site). Aiden's
     // call() collects the SSE frames internally and returns the final
     // aggregated ResponsesAPIResponse so v4 callers that don't request
@@ -632,14 +631,14 @@ export class CodexResponsesAdapter implements ProviderAdapter {
     }
     const debug = process.env.AIDEN_DEBUG_CODEX === '1';
     const aggregate: ResponsesAPIResponse = { output: [], status: undefined };
-    // Hermes parity: track collected `output_item.done` items separately
+    // track collected `output_item.done` items separately
     // from the in-progress aggregate so backfill can use them when
     // `completed.response.output` is empty.
     const collectedItems: ResponsesOutputItem[] = [];
     // Per-item-id text buffer — `output_text.delta` events reference
     // an item_id that matches an earlier `output_item.added`.
     const textBuffers = new Map<string, string>();
-    // Joined text deltas across all items (Hermes `_codex_streamed_text_parts`).
+    // Joined text deltas across all items.
     const textParts: string[] = [];
     let hasToolCalls = false;
     let final: ResponsesAPIResponse | null = null;
@@ -676,7 +675,7 @@ export class CodexResponsesAdapter implements ProviderAdapter {
         continue;
       }
       if (t === 'response.incomplete') {
-        // Hermes treats incomplete as a recoverable terminal — proceed
+        //
         // to backfill rather than throwing.
         final = event.response ?? null;
         terminalEvent = 'incomplete';
@@ -710,7 +709,7 @@ export class CodexResponsesAdapter implements ProviderAdapter {
         );
         if (idx >= 0) aggregate.output[idx] = event.item;
         else aggregate.output.push(event.item);
-        // Hermes parity: collectedItems is the backfill source of truth.
+        // collectedItems is the backfill source of truth.
         collectedItems.push(event.item);
         if ((event.item as { type?: string }).type === 'function_call') {
           hasToolCalls = true;
@@ -723,7 +722,7 @@ export class CodexResponsesAdapter implements ProviderAdapter {
         textParts.push(event.delta);
         continue;
       }
-      // Hermes parity: any event_type containing `function_call`
+      // any event_type containing `function_call`
       // signals tool-call mode; suppress synthesis from text deltas.
       if (t.includes('function_call')) {
         hasToolCalls = true;
@@ -739,7 +738,7 @@ export class CodexResponsesAdapter implements ProviderAdapter {
       }
     }
 
-    // ─── Three-stage recovery (Hermes run_agent.py:5895-5917) ───
+    // ─── Three-stage recovery ───
     const result: ResponsesAPIResponse = final ?? aggregate;
     const out = Array.isArray(result.output) ? result.output : [];
 

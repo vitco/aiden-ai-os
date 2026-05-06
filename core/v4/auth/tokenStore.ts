@@ -37,7 +37,6 @@
  * surface and the audit doc both say so explicitly. Users deserve to
  * know what they're getting.
  *
- * Hermes reference: hermes_cli/auth.py stores plain JSON with no
  * encryption at all. v4.0's machine-bound encryption is a strict
  * upgrade vs Hermes; v4.1's keychain integration brings it to parity
  * with Claude Code / Codex CLI.

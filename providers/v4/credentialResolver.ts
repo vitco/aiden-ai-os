@@ -22,7 +22,6 @@
  *   The actual OAuth refresh HTTP calls are stubbed (logged, no network).
  *   Real refresh + browser-flow initiation lands in Phase 13.
  *
- * Hermes reference: hermes_cli/auth.py — Credential / RefreshableCredential.
  */
 
 import { promises as fs } from 'node:fs';

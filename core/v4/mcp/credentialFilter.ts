@@ -21,7 +21,6 @@
  *   2. `redact()` — replace credential-shaped substrings with
  *      `[REDACTED]` before they hit logs or LLM context.
  *
- * Hermes reference: tools/mcp_tool.py::_build_safe_env, _sanitize_error.
  *
  * Status: PHASE 11.
  */

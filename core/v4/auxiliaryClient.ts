@@ -15,7 +15,6 @@
  *   - SkillTeacher        (purpose: 'skill_describe')
  *   - smart approval      (purpose: 'risk_assess', wired in Phase 14)
  *
- * Hermes reference: agent/auxiliary_client.py — call_llm() with auto
  * resolution chain (main provider → OpenRouter → Nous Portal → custom →
  * Anthropic). Aiden v4.0.0 keeps a single resolved adapter for simplicity;
  * the multi-provider fallback chain comes back in v4.1.

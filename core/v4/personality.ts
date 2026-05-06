@@ -20,7 +20,6 @@
  * User overlays of the same name shadow bundled ones. The "default"
  * personality has an empty body — it represents "use SOUL.md as-is."
  *
- * Hermes reference: Hermes uses `agent/prompt_builder.py` overlays without
  * a dedicated personality module; Aiden makes the surface explicit because
  * /personality is a documented v4 UX feature.
  */

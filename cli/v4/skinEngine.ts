@@ -19,7 +19,6 @@
  * SkinEngine falls back to the default skin and surfaces a warning via
  * the optional `onError` callback.
  *
- * Hermes reference: hermes_cli/skin_engine.py.
  */
 
 import { promises as fs } from 'node:fs';

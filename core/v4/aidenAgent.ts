@@ -15,7 +15,7 @@
  * Status: PHASE 2 — loop core implementation. Provider adapters land in Phase 3,
  *   tool execution in Phase 6+, prompt builder in Phase 12.
  *
- * Hermes reference: hermes-agent/run_agent.py
+ * Upstream provenance (run_agent.py line refs):
  *   - AIAgent class                                L873
  *   - AIAgent.run_conversation()                   L10382
  *   - AIAgent._execute_tool_calls_sequential()     L9779
@@ -86,7 +86,7 @@ export interface AidenAgentOptions {
   provider: ProviderAdapter;
   toolExecutor: ToolExecutor;
   tools: ToolSchema[];
-  /** Hard cap on assistant turns. Hermes default is 90. */
+  /** Hard cap on assistant turns. Default is 90. */
   maxTurns?: number;
   fallback?: FallbackStrategy;
   /** Observability hook — invoked before and after each tool call. */
@@ -379,7 +379,7 @@ export class AidenAgent {
         } catch {
           // Refresh failed (disk error?) — fall through to existing cache
           // rather than crash the turn. Dirty bit stays set so we retry
-          // next turn. This matches Hermes' "tool responses always show
+          // next turn. This' "tool responses always show
           // live state" fallback: if disk read fails, the agent still has
           // the tool result message from the mutation in its history.
         }
@@ -502,7 +502,7 @@ export class AidenAgent {
             this.provider = swapped;
             fallbackActivated = true;
             // Re-attempt this turn with the new provider. Decrement turn so
-            // the swap doesn't count against the budget — matches Hermes
+            // the swap doesn't count against the budget —
             // _activate_fallback semantics.
             turnCount -= 1;
             continue;
@@ -546,7 +546,7 @@ export class AidenAgent {
       }
 
       // Dispatch tool calls sequentially. Parallel execution
-      // (Hermes _execute_tool_calls_concurrent) is deferred to v4.1.
+      // is deferred to v4.1.
       const toolMessages: Message[] = [];
       for (const call of output.toolCalls) {
         toolCallCount += 1;
@@ -557,7 +557,7 @@ export class AidenAgent {
           result = await this.toolExecutor(call);
         } catch (err) {
           // Tool throws don't crash the loop. The model sees the error in
-          // its context and decides what to do — Hermes pattern.
+          // its context and decides what to do —.
           const message = err instanceof Error ? err.message : String(err);
           result = { id: call.id, name: call.name, result: null, error: message };
         }

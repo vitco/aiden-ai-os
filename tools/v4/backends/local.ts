@@ -15,7 +15,6 @@
  * sits in front of `shell_exec` and inspects the command before it
  * reaches this backend.
  *
- * Hermes reference: hermes-agent/tools/environments/local.py.
  */
 
 import { spawn } from 'node:child_process';

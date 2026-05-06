@@ -21,7 +21,6 @@
  * for tests, Docker overlays, multi-profile workflows). When set we never
  * touch the platform-specific defaults.
  *
- * Hermes reference: hermes_constants.py::get_hermes_home(). Hermes uses
  * `~/.hermes` on every platform (no Windows native support); Aiden treats
  * native Windows paths as a first-class moat.
  */

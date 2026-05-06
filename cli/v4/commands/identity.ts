@@ -11,7 +11,6 @@
  * persona is being injected into slot #1 of the system prompt. Falls back
  * to the bundled default identity when SOUL.md is missing/empty.
  *
- * Hermes reference: Hermes has no equivalent slash command — the user
  * `cat`s `~/.hermes/SOUL.md`. We add this because the v4 sprint has
  * surfaced "identity drift" twice, and an in-REPL diagnostic is faster
  * than asking users to fish through %LOCALAPPDATA% on Windows.

@@ -21,9 +21,8 @@
  *   - `aiden mcp <…>`      → manage MCP servers (Phase 11 stub).
  *   - `aiden batch | gateway | cron | pairing | tui | update` → v4.1 stubs.
  *
- * Hermes reference: hermes_cli/main.py — its `main()` dispatches via
  * `argparse` subparsers. We use `commander` instead but the surface
- * matches Hermes's chat-first invocation flow.
+ * chat-first invocation flow.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -361,7 +360,7 @@ export async function buildAgentRuntime(
   // (from the user's shell or Windows User env) win — this is fill-only.
   loadAidenEnvFile(paths.envFile);
 
-  // Phase 16b.3: first-run SOUL.md seed. Hermes-style idempotent write.
+  // Phase 16b.3: first-run SOUL.md seed. idempotent write.
   // Phase 16g: the seeder may emit a one-time `notice` when SOUL.md is
   // user-edited and the bundled default has been upgraded — we surface
   // it via a dim line on boot so the user can opt in to the new
@@ -738,7 +737,7 @@ export async function buildAgentRuntime(
   // ── Phase 16b.4: assemble system-prompt context ─────────────────────
   // PromptBuilder needs SOUL.md (read at build time from `paths.soulMd`),
   // a frozen MemorySnapshot (loaded once at boot — same lifecycle as
-  // Hermes' `_cached_system_prompt`), the active personality overlay, and
+  //`_cached_system_prompt`), the active personality overlay, and
   // a compact skills list. All optional except the SOUL.md path itself.
   const promptBuilder = new PromptBuilder();
   const personalityManager = new PersonalityManager({
@@ -759,13 +758,13 @@ export async function buildAgentRuntime(
   }
   let skillsList: Array<{ name: string; description: string }> = [];
   try {
-    // Phase 16g: drop the slice(0,32) cap. Hermes surfaces every
+    // Phase 16g: drop the slice(0,32) cap.
     // installed skill (prompt_builder.py:929-931) — the model needs
     // the full inventory to find a partially-relevant match for fuzzy
     // intents. 71 skills × ~120 chars ≈ 8.5KB; well within prompt
     // budget for 131k-context models. If the user has hundreds of
     // skills and prompt size becomes a real concern, the next polish
-    // is lazy-loading via skill_view (Hermes pattern) — but that's
+    // is lazy-loading via skill_view () — but that's
     // future work, not 16g.
     const loaded = await skillLoader.list();
     skillsList = loaded.map((s) => ({
@@ -817,7 +816,7 @@ export async function buildAgentRuntime(
 
   // Phase 16d: wire the dirty-bit signal — every successful memory mutation
   // flips the agent's flag so the NEXT turn's system prompt reflects the
-  // change. Strategy (b) per docs/sprint/hermes-memory-refresh-audit.md.
+  // change. Strategy (b).
   memoryManager.onMutation((file) => {
     agent.markMemoryDirty(file === 'user' ? 'user' : 'memory');
   });

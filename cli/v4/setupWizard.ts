@@ -20,7 +20,6 @@
  * The wizard's prompt functions are injectable so unit tests can stub
  * answers without spawning a TTY. Defaults wire to `@inquirer/prompts`.
  *
- * Hermes reference: hermes_cli/setup.py.
  */
 
 import { promises as fs } from 'node:fs';

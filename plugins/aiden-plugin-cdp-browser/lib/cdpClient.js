@@ -3,8 +3,8 @@
  *
  * Thin wrapper over chrome-remote-interface that the three browser_real_*
  * tool handlers share. One persistent CDP client per plugin instance —
- * matches Hermes's CDPSupervisor (one WS per task; tools/browser_supervisor.py)
- * but without the dialog-bridge layer (Aiden v4.0 doesn't surface dialogs).
+ * one WebSocket per task, no dialog-bridge layer (Aiden v4.0 doesn't
+ * surface dialogs).
  *
  * Tools call connect() on first use; the singleton is cached and reused.
  * On disconnect (Chrome closed, network glitch) the next call reconnects.

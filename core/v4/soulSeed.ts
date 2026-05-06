@@ -10,7 +10,6 @@
  * First-run seed for `<aiden-home>/SOUL.md`. Idempotent: only writes when the
  * file is missing or empty so user edits are never overwritten.
  *
- * Hermes reference: `hermes_cli/config.py::_ensure_default_soul_md`. Same
  * shape: read path → bail if exists → write the bundled default. We add an
  * explicit empty-file check (zero bytes / whitespace) because some test
  * setups create the file as a placeholder.

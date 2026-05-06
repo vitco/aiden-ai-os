@@ -36,7 +36,7 @@ export interface DangerPattern {
 }
 
 export const DANGEROUS_PATTERNS: readonly DangerPattern[] = [
-  // ── Filesystem destruction (Hermes parity) ────────────────────
+  // ── Filesystem destruction ────────────────────
   { name: 'recursive_delete', regex: /\brm\s+(-[a-zA-Z]*r[a-zA-Z]*|--recursive)/i, tier: 'dangerous', description: 'recursive delete' },
   { name: 'delete_root', regex: /\brm\s+(-[^\s]*\s+)*\/(?:\s|$)/, tier: 'dangerous', description: 'delete pointing at root' },
   { name: 'mkfs', regex: /\bmkfs\b/i, tier: 'dangerous', description: 'filesystem format' },

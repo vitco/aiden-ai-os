@@ -26,7 +26,6 @@
  *                                            the in-memory entry is the
  *                                            same as the session list).
  *
- * Hermes reference: tools/approval.py — same shape, smaller scope (no
  * heartbeat/HTTP approval surface yet; that lands in Phase 14-15 TUI).
  *
  * Status: PHASE 9.

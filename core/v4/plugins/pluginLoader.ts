@@ -15,7 +15,7 @@
  *      on Windows, ~/.aiden/plugins/ elsewhere). Loaded by default; users
  *      can disable individual plugins via Task 3's `/plugins` command.
  *
- * On collision (same `manifest.name`), user plugins win — matches Hermes
+ * On collision (same `manifest.name`), user plugins win —
  * "later wins" rule (plugins.py:680). Per-plugin try/catch isolates
  * failures: one broken plugin sets its own LoadedPlugin.error and the
  * others keep loading. Same isolation pattern Hermes uses (plugins.py:947).
@@ -137,7 +137,7 @@ export class PluginLoader {
     sources.push({ dir: this.opts.paths.pluginsDir, source: 'user' });
 
     // Walk in order so user plugins overwrite bundled on name collision —
-    // matches Hermes "later wins" semantics.
+    // "later wins" semantics.
     for (const { dir, source } of sources) {
       const manifests = await this.scanDirectory(dir, source);
       for (const m of manifests) {

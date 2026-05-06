@@ -23,7 +23,6 @@
  *
  * Status: PHASE 5.
  *
- * Hermes reference: hermes_cli/runtime_provider.py — resolve_runtime_provider().
  *   Hermes branches on provider id with explicit per-provider handlers;
  *   Aiden v4 collapses these into one switch on `apiMode` because the
  *   per-provider quirks (URL stripping, OpenCode model-family inference,

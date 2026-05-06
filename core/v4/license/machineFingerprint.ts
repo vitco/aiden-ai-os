@@ -26,7 +26,6 @@
  * users who want to share a license across a dev VM and host (e.g. WSL
  * → Windows). The Pro license terms allow this — it counts as one seat.
  *
- * Hermes reference: none. Hermes has no license subsystem. Aiden v3 had
  * `core/machineId.ts` that pulled CPU/disk/baseboard serials via wmic;
  * v4 deliberately drops those. Reasoning:
  *

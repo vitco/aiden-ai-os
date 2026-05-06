@@ -19,7 +19,6 @@
  * Status: PHASE 4 — non-streaming only. Streaming + prefix caching breakpoints
  *   land Phase 12-13.
  *
- * Hermes reference: agent/transports/anthropic.py + agent/anthropic_adapter.py
  *
  * Wire-format quirks handled here:
  *   1. Top-level `system` field (NOT in messages array). String OR list of blocks.
@@ -420,7 +419,7 @@ export class AnthropicAdapter implements ProviderAdapter {
           const d = evt.delta;
           if (d.type === 'text_delta' && typeof d.text === 'string') {
             block.text += d.text;
-            // Per Hermes line 7053: only stream text while no tool_use
+            // only stream text while no tool_use
             // block has appeared in this turn.
             if (!toolUseSeen && d.text.length > 0) {
               yield { type: 'delta', content: d.text };
@@ -634,7 +633,7 @@ export class AnthropicAdapter implements ProviderAdapter {
     const stopReason = json.stop_reason ?? 'end_turn';
 
     // Empty content[] is legitimate when stop_reason==='end_turn'.
-    // Hermes treats this as a valid completion (model has nothing to add).
+    //.
     // For other stop_reasons with empty content, the response is malformed.
     if (blocks.length === 0 && stopReason !== 'end_turn') {
       throw new ProviderError(

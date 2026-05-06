@@ -1,7 +1,7 @@
 /**
  * Phase 18.1 regression tests — four OAuth fixes per diagnostic 292c7cd.
  *
- *   1. runCopyPasteFlow login body is JSON (Hermes verbatim).
+ *   1. runCopyPasteFlow login body is JSON.
  *   2. runCopyPasteFlow login Content-Type is application/json.
  *   3. refreshTokens stays form-encoded.
  *   4. Claude Pro plugin login token URL ordering: console first.
@@ -96,7 +96,7 @@ describe('Phase 18.1: runCopyPasteFlow login posts JSON body', () => {
 // ── 3. Refresh stays form-encoded ──────────────────────────────────
 
 describe('Phase 18.1: refreshTokens stays form-encoded', () => {
-  it('71. refresh body is form-encoded (matches Hermes refresh path)', async () => {
+  it('71. refresh body is form-encoded ( refresh path)', async () => {
     const captures: Capture[] = [];
     const fetchImpl = makeFetch(
       [{ status: 200, body: JSON.stringify({ access_token: 'A2', expires_in: 3600 }) }],

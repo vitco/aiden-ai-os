@@ -12,7 +12,7 @@
  *   memories/MEMORY.md  → agent's environment notes (≤ 2200 chars)
  *   memories/USER.md    → user profile / preferences (≤ 1375 chars)
  *
- * Lifecycle (mirrors Hermes tools/memory_tool.py::MemoryStore):
+ * Lifecycle ( tools/memory_tool.py::MemoryStore):
  *
  *   const snap = await mgr.loadSnapshot();   // raw text injected once at
  *                                            // session start, then frozen.
@@ -26,7 +26,7 @@
  * Anthropic / OpenAI prefix cache for every subsequent turn. Hermes's
  * pattern keeps the prompt stable while persisting writes immediately.
  *
- * Mutation semantics: substring matching (Hermes pattern).
+ * Mutation semantics: substring matching ().
  *   - `add` rejects if the new content already appears in the file
  *     (substring duplicate detection — friendly to common phrasing tweaks).
  *   - `replace`/`remove` find the unique entry containing `oldText` as a
@@ -41,7 +41,6 @@
  *
  * Status: PHASE 6.
  *
- * Hermes reference: tools/memory_tool.py::MemoryStore.
  */
 
 import { promises as fs } from 'node:fs';

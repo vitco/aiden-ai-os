@@ -202,7 +202,7 @@ export async function runCopyPasteFlow(
   // Phase 18.1: per Hermes verbatim (anthropic_adapter.py:1092-1109), the
   // LOGIN token exchange is JSON-only — the Phase 18 audit incorrectly
   // recorded "form-encoded works; JSON also accepted." Refresh stays
-  // form-encoded (refreshTokens helper below; matches Hermes refresh path
+  // form-encoded (refreshTokens helper below; refresh path
   // anthropic_adapter.py:760-821).
   const body = JSON.stringify({
     grant_type: 'authorization_code',

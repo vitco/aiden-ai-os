@@ -16,7 +16,7 @@
  * turn in `chatSession.runAgentTurn`, so the toggle is effective on the
  * next message — no restart needed.
  *
- * Default for v4.0 launch is OFF (matches Hermes default; opt-in per the
+ * Default for v4.0 launch is OFF ( default; opt-in per the
  * Phase 16a "safe fallback first" discipline).
  */
 import type { SlashCommand } from '../commandRegistry';

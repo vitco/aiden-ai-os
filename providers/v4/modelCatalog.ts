@@ -12,7 +12,6 @@
  *
  * Status: PHASE 5.
  *
- * Hermes reference: hermes_cli/models.py — _PROVIDER_MODELS,
  *   OPENROUTER_MODELS, _xai_curated_models() (curated lists keyed by
  *   provider id). Hermes pulls metadata live from models.dev; Aiden v4
  *   keeps a static, hand-curated baseline so the picker works offline and
@@ -27,7 +26,7 @@
  *   - Subscription-tier rows (claude-pro, chatgpt-plus) never carry
  *     pricing — the user pays Anthropic / OpenAI a flat fee. Legacy
  *     `claude_subscription` / `chatgpt_subscription` rows were removed
- *     in Phase 21 #5 (Hermes one-name-per-service unification); their
+ *     in Phase 21 #5; their
  *     models migrated under canonical IDs below.
  */
 
