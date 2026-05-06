@@ -46,6 +46,23 @@ export const doctor: SlashCommand = {
       ctx.display.write(
         `[skill-enforcement] armed=${m.armed} recovered=${m.recovered} failed=${m.failed} (session)\n`,
       );
+      // Phase 23.4a: same shape, different concern — URL provenance
+      // gate counters. blocked = open_url calls rejected for unknown
+      // YouTube ids; recovered = corrective retry produced a real
+      // youtube_search; failed = retry cap exceeded and the turn
+      // ended with an honest-failure message.
+      const u = ctx.agent.getUrlProvenanceMetrics();
+      ctx.display.write(
+        `[url-provenance]    blocked=${u.blocked} recovered=${u.recovered} failed=${u.failed} (session)\n`,
+      );
+      // Phase 23.4a-fix2: empty-response counters. detected =
+      // Codex backend completed a turn with no content and no tool
+      // calls; retried = corrective system message injected (cap
+      // 1/turn); recovered = retry yielded a non-empty reply.
+      const e = ctx.agent.getEmptyResponseMetrics();
+      ctx.display.write(
+        `[empty-response]    detected=${e.detected} retried=${e.retried} recovered=${e.recovered} (session)\n`,
+      );
     }
     return {};
   },

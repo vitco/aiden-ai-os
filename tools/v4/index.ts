@@ -27,6 +27,7 @@ import { webFetchTool } from './web/webFetch';
 import { webPageTool } from './web/webPage';
 import { deepResearchTool } from './web/deepResearch';
 import { openUrlTool } from './web/openUrl';
+import { youtubeSearchTool } from './web/youtubeSearch';
 
 import { fileReadTool } from './files/fileRead';
 import { fileListTool } from './files/fileList';
@@ -85,6 +86,12 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
   // Phase 16f: open_url uses shell launch (start chrome / open / xdg-open)
   // for "open X in browser" requests — bypasses Playwright detection.
   registry.register(openUrlTool);
+  // Phase 23.4a: youtube_search returns real /watch?v= URLs scraped
+  // from youtube.com/results. media-search uses it before open_url so
+  // the URL provenance gate has a candidate set to validate against —
+  // closes the URL-hallucination failure mode where the model invented
+  // 11-char IDs.
+  registry.register(youtubeSearchTool);
 
   registry.register(fileReadTool);
   registry.register(fileListTool);

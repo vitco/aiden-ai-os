@@ -211,6 +211,12 @@ We're shipping honest. Things that work, things that don't:
 - ACP integration (VSCode, Zed, JetBrains)
 - 18+ items in [v4.1-roadmap.md](docs/v4.1-roadmap.md)
 
+### ChatGPT Plus backend session degradation
+
+When using the ChatGPT Plus OAuth provider, rapid back-to-back queries in the same session may occasionally produce empty responses after 3-4 turns. Aiden detects this and retries once; if the second attempt is also empty, it surfaces an honest failure message.
+
+Workaround: type `/exit` and run `aiden` again for a fresh session. This is a quirk of the Codex backend, not Aiden's agent loop. Provider fallback on empty-response is planned for v4.1.
+
 Found a bug? Report at https://github.com/taracodlabs/Aiden-v4/issues with output of `aiden doctor` for fast triage.
 
 ---

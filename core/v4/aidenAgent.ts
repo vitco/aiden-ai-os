@@ -65,6 +65,10 @@ import {
   extractSkillViewRequiredTools,
   type SkillEnforcementMetrics,
 } from './agent/skillEnforcement';
+import {
+  UrlProvenanceTracker,
+  type UrlProvenanceMetrics,
+} from './agent/urlProvenance';
 
 /**
  * Tool executor — runs a single tool call and returns the result.
@@ -194,6 +198,24 @@ export interface AidenAgentResult {
    * required-tool skill ever fired.
    */
   skillEnforcement: { recovered: number; failed: number; armed: number };
+  /**
+   * Phase 23.4a: cumulative URL-provenance counters across the agent's
+   * lifetime (process-scoped). `blocked` = a YouTube watch URL was
+   * rejected because its id wasn't in the turn's youtube_search
+   * ledger; `recovered` = a corrective retry produced a now-passing
+   * open_url call; `failed` = retry cap exceeded and the turn ended
+   * with an honest-failure assistant message. Always present.
+   */
+  urlProvenance: { recovered: number; failed: number; blocked: number };
+  /**
+   * Phase 23.4a-fix2: cumulative empty-response counters.
+   * `detected` = Codex-backend completion with text.len=0 and no
+   * tool calls was observed; `retried` = a corrective system
+   * message was injected and the loop continued (cap=1 per turn);
+   * `recovered` = the retry produced non-empty content. Always
+   * present.
+   */
+  emptyResponse: { detected: number; retried: number; recovered: number };
 }
 
 /**
@@ -263,6 +285,40 @@ export class AidenAgent {
     recovered: 0,
     failed: 0,
     armed: 0,
+  };
+  /**
+   * Phase 23.4a: process-scoped url-provenance counters. Same
+   * lifecycle as skillEnforcementMetrics — agent-instance scope so
+   * /doctor sees cumulative counts across user turns within a
+   * session, but the per-turn ledger lives on the tracker
+   * constructed inside runConversation.
+   */
+  private readonly urlProvenanceMetrics: UrlProvenanceMetrics = {
+    recovered: 0,
+    failed: 0,
+    blocked: 0,
+  };
+  /**
+   * Phase 23.4a-fix2: empty-response counters. Bug Z2: Codex
+   * backend occasionally returns terminal=completed with
+   * text.len=0 and no tool calls — model said nothing, agent
+   * loop's existing message-final exit treats it as a clean stop
+   * and returns an empty reply to the user. This counter tracks:
+   *   detected — empty completion was observed
+   *   retried  — corrective system message was injected and the
+   *              loop continued (once per turn, cap=1)
+   *   recovered — the retry produced a non-empty reply
+   * Cumulative across the agent instance (same lifecycle as the
+   * other Phase 23 metric blocks).
+   */
+  private readonly emptyResponseMetrics: {
+    detected: number;
+    retried: number;
+    recovered: number;
+  } = {
+    detected: 0,
+    retried: 0,
+    recovered: 0,
   };
   /**
    * Phase 16d: dirty bit set by `markMemoryDirty()`. The next
@@ -433,6 +489,19 @@ export class AidenAgent {
     // call to runConversation; metrics object is shared with the agent
     // instance so /doctor sees cumulative counts.
     const enforcement = new SkillEnforcementTracker(this.skillEnforcementMetrics);
+    // Phase 23.4a: per-user-turn URL provenance ledger. Tracks the
+    // youtube_search candidates this turn so the gate can reject any
+    // open_url call the model invents off-canon.
+    const urlProvenance = new UrlProvenanceTracker(this.urlProvenanceMetrics);
+    // Phase 23.4a-fix2: per-turn empty-response retry counter (cap=1).
+    // Bug Z2 — Codex backend can return a completed response with no
+    // content and no tool calls. We retry once with a corrective
+    // system message before falling back to honest failure.
+    let emptyResponseRetries = 0;
+    const EMPTY_RESPONSE_RETRY_CAP = 1;
+    const emptyResponseDebug =
+      typeof process !== 'undefined' &&
+      process.env?.AIDEN_DEBUG_EMPTY_RESPONSE === '1';
     const totalUsage = { inputTokens: 0, outputTokens: 0 };
     const toolCallTrace: HonestyTraceEntry[] = [];
 
@@ -558,6 +627,80 @@ export class AidenAgent {
       // (If finishReason is 'tool_use' but toolCalls is empty, treat as stop —
       // a known provider quirk; logging hook can be wired later.)
       if (!hasToolCalls) {
+        // Phase 23.4a-fix2 (Bug Z2): empty-response retry guard.
+        // Codex backend occasionally returns a completed response
+        // with text.len=0 AND no tool calls. The user sees a blank
+        // reply. Detect that condition BEFORE skill enforcement —
+        // skill enforcement of an empty message is meaningless (the
+        // model said nothing, not "the model said the wrong thing").
+        // Retry once with a corrective system message; on cap-
+        // exceeded surface honest failure prefix.
+        const replyText = (output.content ?? '').trim();
+        const isEmptyResponse = replyText.length === 0;
+        if (isEmptyResponse) {
+          this.emptyResponseMetrics.detected += 1;
+          if (emptyResponseDebug) {
+            const lastUser = lastUserMessage(messages);
+            const armed = enforcement.armedSkill();
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[empty-response] detected turn=${turnCount} ` +
+                `lastUser=${JSON.stringify(lastUser.slice(0, 120))} ` +
+                `tools.count=${activeTools.length} ` +
+                `skill.armed=${armed ?? '(none)'} ` +
+                `enforcement.attempt=${enforcement.attempt()} ` +
+                `emptyRetries=${emptyResponseRetries}/${EMPTY_RESPONSE_RETRY_CAP}`,
+            );
+          }
+          if (emptyResponseRetries < EMPTY_RESPONSE_RETRY_CAP) {
+            // Discard the empty assistant message — keeping it in
+            // history confuses the model on the retry ("I already
+            // replied, why is the user asking again?").
+            messages.pop();
+            messages.push({
+              role: 'system',
+              content:
+                '[empty-response] Your previous turn returned no ' +
+                'content and no tool calls. Respond to the user’s ' +
+                'most recent message now — call the appropriate ' +
+                'tool, or write a direct answer if no tool is ' +
+                'needed. Do not return a blank reply.',
+            });
+            this.emptyResponseMetrics.retried += 1;
+            emptyResponseRetries += 1;
+            continue;
+          }
+          // Cap exceeded — finalize honestly. Surface the failure
+          // verbatim so the user sees the truth instead of a blank.
+          const honest =
+            `[empty-response] failed: model returned no content ` +
+            `after ${EMPTY_RESPONSE_RETRY_CAP} retry. The provider ` +
+            `(model/backend) produced an empty completion twice in ` +
+            `a row. Try sending the message again, or restart the ` +
+            `session if it persists.`;
+          finalContent = honest;
+          messages[messages.length - 1] = {
+            role: 'assistant',
+            content: honest,
+          };
+          finishReason = 'stop';
+          return await this.finalize({
+            finalContent,
+            messages,
+            turnCount,
+            toolCallCount,
+            fallbackActivated,
+            finishReason,
+            totalUsage,
+            toolCallTrace,
+            aborted: false,
+          });
+        }
+        // Recovery accounting: a non-empty response after at least
+        // one empty-response retry counts as recovered.
+        if (emptyResponseRetries > 0) {
+          this.emptyResponseMetrics.recovered += 1;
+        }
         // Phase 23.1: skill-required-tool enforcement. Before letting
         // the turn end, check whether a skill_view armed a required
         // sequence and whether every required tool actually fired.
@@ -623,9 +766,64 @@ export class AidenAgent {
       // Dispatch tool calls sequentially. Parallel execution
       // is deferred to v4.1.
       const toolMessages: Message[] = [];
+      // Phase 23.4a: track if the gate blocked any call this iteration.
+      // When it does, we inject a corrective system message after the
+      // tool messages and continue the outer loop (provenance retry).
+      // gateCapExceeded short-circuits to honest failure on next final.
+      let provenanceBlockMessage: string | null = null;
+      let provenanceCapExceeded:
+        | null
+        | { videoId: string; cap: number } = null;
       for (const call of output.toolCalls) {
         toolCallCount += 1;
         this.onToolCall?.(call, 'before');
+
+        // Phase 23.4a: pre-dispatch URL provenance gate. Blocks
+        // open_url calls whose YouTube watch id wasn't deposited
+        // by a youtube_search call earlier this turn. Tool does
+        // NOT execute on block — we synthesize an error result so
+        // the model sees the gate fired and the tool didn't,
+        // mirror what a tool-level error looks like in history.
+        const verdict = urlProvenance.checkOpenUrl(call.name, call.arguments);
+        if (verdict.kind === 'block-can-retry' || verdict.kind === 'block-cap-exceeded') {
+          const blockMsg =
+            `Blocked: open_url URL https://www.youtube.com/watch?v=` +
+            `${verdict.videoId} was not returned by any youtube_search ` +
+            `call this turn (URL provenance gate).`;
+          const result: ToolCallResult = {
+            id: call.id,
+            name: call.name,
+            result: null,
+            error: blockMsg,
+          };
+          this.onToolCall?.(call, 'after', result);
+          toolCallTrace.push({
+            name: call.name,
+            result: null,
+            error: blockMsg,
+            verified: false,
+          });
+          toolMessages.push({
+            role: 'tool',
+            toolCallId: call.id,
+            content: `Error: ${blockMsg}`,
+          });
+          if (verdict.kind === 'block-can-retry') {
+            provenanceBlockMessage =
+              urlProvenance.buildCorrectiveMessage(verdict.videoId);
+            urlProvenance.incrementRetry();
+          } else {
+            provenanceCapExceeded = {
+              videoId: verdict.videoId,
+              cap: verdict.cap,
+            };
+          }
+          // Skill enforcement still observes the call name (the
+          // attempt happened even if blocked) so its retry budget
+          // stays consistent with skill_view-armed sequences.
+          enforcement.recordToolCall(call.name);
+          continue;
+        }
 
         let result: ToolCallResult;
         try {
@@ -638,6 +836,16 @@ export class AidenAgent {
         }
 
         this.onToolCall?.(call, 'after', result);
+
+        // Phase 23.4a: deposit youtube_search candidates into the
+        // ledger so subsequent open_url calls this turn can clear
+        // the gate. Recovered-counter increments when an open_url
+        // passes after a prior block — handled below at dispatch
+        // pass-through.
+        urlProvenance.recordToolResult(call.name, result.result);
+        if (call.name === 'open_url' && verdict.kind === 'pass') {
+          urlProvenance.recordRecovery();
+        }
 
         // Phase 23.1: tracker sees every dispatch (regardless of error).
         // A failed tool still counts as "called" — the model's job was
@@ -690,6 +898,41 @@ export class AidenAgent {
       }
 
       messages.push(...toolMessages);
+
+      // Phase 23.4a: handle the URL-provenance gate decision now that
+      // tool messages are on history. On cap-exceeded, finalize with
+      // an honest-failure prefix on the assistant content so the user
+      // sees the truth instead of a confabulated open. On block-can-
+      // retry, inject the corrective system message so the next loop
+      // iteration prompts the model with explicit guidance.
+      if (provenanceCapExceeded) {
+        const honestPrefix =
+          `[url-provenance] failed: open_url for ` +
+          `https://www.youtube.com/watch?v=${provenanceCapExceeded.videoId} ` +
+          `blocked after ${provenanceCapExceeded.cap} retries — ` +
+          `the video id was never returned by youtube_search this turn. ` +
+          `The model invented the URL. No browser was opened.\n\n`;
+        finalContent = honestPrefix;
+        // Append a final assistant turn that surfaces the failure
+        // without a model round-trip — we have nothing useful left to
+        // ask the model and forcing another turn just burns budget.
+        messages.push({ role: 'assistant', content: finalContent });
+        finishReason = 'stop';
+        return await this.finalize({
+          finalContent,
+          messages,
+          turnCount,
+          toolCallCount,
+          fallbackActivated,
+          finishReason,
+          totalUsage,
+          toolCallTrace,
+          aborted: false,
+        });
+      }
+      if (provenanceBlockMessage) {
+        messages.push({ role: 'system', content: provenanceBlockMessage });
+      }
     }
 
     // Budget exhausted — return partial result. The last assistant message
@@ -853,6 +1096,8 @@ export class AidenAgent {
       compressionEvents: this.compressionEvents,
       auxiliaryUsage: this.auxiliaryClient?.getUsage() ?? {},
       skillEnforcement: { ...this.skillEnforcementMetrics },
+      urlProvenance: { ...this.urlProvenanceMetrics },
+      emptyResponse: { ...this.emptyResponseMetrics },
       ...(honestyFindings ? { honestyFindings } : {}),
       ...(skillCreated ? { skillCreated } : {}),
     };
@@ -866,6 +1111,29 @@ export class AidenAgent {
    */
   getSkillEnforcementMetrics(): SkillEnforcementMetrics {
     return { ...this.skillEnforcementMetrics };
+  }
+
+  /**
+   * Phase 23.4a: read-only snapshot of cumulative URL-provenance
+   * counters. Same shape and lifecycle as
+   * getSkillEnforcementMetrics — /doctor reads it for the diagnostic
+   * line, tests for assertions.
+   */
+  getUrlProvenanceMetrics(): UrlProvenanceMetrics {
+    return { ...this.urlProvenanceMetrics };
+  }
+
+  /**
+   * Phase 23.4a-fix2: read-only snapshot of cumulative empty-
+   * response counters. /doctor reads it for the diagnostic line,
+   * tests for assertions.
+   */
+  getEmptyResponseMetrics(): {
+    detected: number;
+    retried: number;
+    recovered: number;
+  } {
+    return { ...this.emptyResponseMetrics };
   }
 }
 
