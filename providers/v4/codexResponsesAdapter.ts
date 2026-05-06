@@ -663,8 +663,28 @@ export class CodexResponsesAdapter implements ProviderAdapter {
       }
       const t = event.type ?? '';
       if (debug) {
+        // Per-event detail to distinguish (A) function_call items vs.
+        // (B) Harmony-tokenized text leak vs. (C) clean confabulation.
+        // Bug B SSE diagnostics — see
+        // docs/sprint/_internal/hermes-codex-dispatch-audit.md.
+        const item = event.item as
+          | { type?: string; status?: string; name?: string; arguments?: unknown; content?: unknown }
+          | undefined;
+        const parts: string[] = [`event=${t}`];
+        if (item?.type) parts.push(`item.type=${item.type}`);
+        if (item?.status) parts.push(`item.status=${item.status}`);
+        if (item?.name) parts.push(`item.name=${item.name}`);
+        if (item?.type === 'function_call' && item.arguments != null) {
+          const args = typeof item.arguments === 'string'
+            ? item.arguments
+            : JSON.stringify(item.arguments);
+          parts.push(`item.args=${args.slice(0, 120)}`);
+        }
+        if (typeof event.delta === 'string' && event.delta.length > 0) {
+          parts.push(`delta=${JSON.stringify(event.delta.slice(0, 80))}`);
+        }
         // eslint-disable-next-line no-console
-        console.warn(`[codex-debug] event=${t}`);
+        console.warn(`[codex-debug] ${parts.join(' ')}`);
       }
 
       if (t === 'response.completed' && event.response) {
@@ -735,6 +755,35 @@ export class CodexResponsesAdapter implements ProviderAdapter {
         // eslint-disable-next-line no-console
         console.warn(`[codex-debug] unhandled event type: ${t}`);
       }
+    }
+
+    // ─── End-of-stream summary (Bug B diagnostic) ───
+    // Distinguish between (A) real function_call items in stream,
+    // (B) Harmony-tokenized text leak, (C) clean confabulation.
+    if (debug) {
+      const aggregateText = textParts.join('');
+      const collectedTypes = collectedItems
+        .map((i) => (i as { type?: string }).type ?? 'unknown')
+        .join(',');
+      const finalOut = Array.isArray((final ?? aggregate).output)
+        ? (final ?? aggregate).output
+        : [];
+      const finalTypes = (finalOut ?? [])
+        .map((i) => (i as { type?: string }).type ?? 'unknown')
+        .join(',');
+      const harmonyHit = /(?:^|[\s>|])to=functions\.[A-Za-z_][\w.]*/i.test(
+        aggregateText,
+      );
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[codex-debug] ===SUMMARY=== terminal=${terminalEvent} ` +
+          `final.output.types=[${finalTypes}] ` +
+          `collected.types=[${collectedTypes}] ` +
+          `hasToolCalls=${hasToolCalls} ` +
+          `text.len=${aggregateText.length} ` +
+          `harmonyLeak=${harmonyHit} ` +
+          `text.head=${JSON.stringify(aggregateText.slice(0, 200))}`,
+      );
     }
 
     // ─── Three-stage recovery ───
