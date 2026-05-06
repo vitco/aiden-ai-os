@@ -26,7 +26,7 @@ import { resolveAidenPaths, type AidenPaths } from '../../core/v4/paths';
 import { LicenseClient, hasLicense } from '../../core/v4/license';
 import { checkForUpdate } from '../../core/v4/update/checkUpdate';
 import type { Display } from './display';
-import { boxBottom, boxLine, boxTopTitled } from './box';
+import { boxBottom, boxLine, boxTopTitled, visibleLength } from './box';
 
 export interface CheckResult {
   name: string;
@@ -664,7 +664,21 @@ export async function runDoctor(opts: DoctorOptions = {}): Promise<DoctorReport>
 
 // ─── Phase 22 Task 5A — boxed /doctor renderer ────────────────────────
 
-const HEALTH_BOX_WIDTH = 70;
+/**
+ * Box width policy:
+ * - Auto-fit to the widest content row (icon + padded name + message,
+ *   plus any hint continuation), so Windows paths like
+ *   `C:\Users\shiva\AppData\Local\aiden\.bundled_manifest` don't get
+ *   truncated mid-word as they did at the previous fixed 70.
+ * - Floor at HEALTH_BOX_MIN_WIDTH so empty-content cases still feel
+ *   intentional rather than narrow.
+ * - Cap at HEALTH_BOX_MAX_WIDTH so the box doesn't blow out to
+ *   beyond the typical terminal — content past that point is wrapped
+ *   onto a continuation row instead of forcing horizontal overflow.
+ */
+const HEALTH_BOX_MIN_WIDTH = 60;
+const HEALTH_BOX_MAX_WIDTH = 100;
+const HEALTH_BOX_TITLE = 'Health Check';
 
 /**
  * Format a single check row inside the box: `<icon>  <name padded>
@@ -687,14 +701,52 @@ function maxNameWidth(report: DoctorReport): number {
 }
 
 /**
+ * Compute the inner-cell width for the health box: widest visible
+ * content row across all check rows + any hint continuations + the
+ * footer summary, plus a 1-char trailing gutter. Floored / capped per
+ * HEALTH_BOX_MIN/MAX_WIDTH. Title length also factored so the
+ * `╭── Health Check ─...─╮` row doesn't underflow.
+ */
+function computeHealthBoxWidth(report: DoctorReport, nameWidth: number): number {
+  // The minimum width the title needs (`╭── <title> ──╮` shape):
+  // 2 corners + 2 leading dashes + 1 space + title + 1 space + at
+  // least 2 trailing dashes, minus the 2 corners since the cell is
+  // measured between them.
+  const titleMin = 2 + 1 + HEALTH_BOX_TITLE.length + 1 + 2;
+  let widest = titleMin;
+
+  const measureRow = (row: string): void => {
+    const v = visibleLength(row);
+    if (v + 1 > widest) widest = v + 1; // +1 for trailing gutter
+  };
+
+  for (const r of report.results) {
+    measureRow(` ✓  ${r.name.padEnd(nameWidth)}  ${r.message}`);
+    if (r.suggestion && !r.passed) {
+      measureRow(`      hint: ${r.suggestion}`);
+    }
+  }
+
+  const passedCount = report.results.filter((x) => x.passed).length;
+  measureRow(` ${passedCount} of ${report.results.length} checks passed in ${report.totalMs} ms`);
+
+  return Math.max(HEALTH_BOX_MIN_WIDTH, Math.min(HEALTH_BOX_MAX_WIDTH, widest));
+}
+
+/**
  * Render the report as an orange-bordered rounded box. Pure — returns
  * the multi-line string; caller writes it. `display` is needed for
  * skin-aware colouring of the border, icons, and footer summary.
+ *
+ * Phase 22 Group C smoke-fix #3 (Bug 1 round 2): box width now
+ * auto-fits to the widest content row instead of clamping at a fixed
+ * 70 chars. The previous fix correctly aligned the right border but
+ * truncated content mid-word for any Windows path > 65-ish chars.
  */
 export function renderHealthBox(report: DoctorReport, display: Display): string {
-  const W = HEALTH_BOX_WIDTH;
   const nameWidth = maxNameWidth(report);
-  const top = display.brand(boxTopTitled('Health Check', W));
+  const W = computeHealthBoxWidth(report, nameWidth);
+  const top = display.brand(boxTopTitled(HEALTH_BOX_TITLE, W));
   const bot = display.brand(boxBottom(W));
   const side = (content: string): string => {
     // Brand-colour just the verticals so inner content keeps its own colours.

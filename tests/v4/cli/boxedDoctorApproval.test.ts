@@ -84,6 +84,70 @@ describe('renderHealthBox (Phase 22 Task 5A)', () => {
     expect(out).not.toContain('\x1b[38;2;128;128;128m');
   });
 
+  it('auto-fits width to widest content row (no mid-word truncation on long paths)', () => {
+    // Phase 22 Group C smoke-fix #3: pre-fix the box was clamped at
+    // a fixed 70 chars and Windows paths > 65 chars got truncated
+    // mid-word. The auto-fit now grows the box to fit the widest row.
+    const longPathReport: DoctorReport = {
+      results: [
+        {
+          name: 'config file',
+          passed: true,
+          message: 'found at C:\\Users\\shiva\\AppData\\Local\\aiden\\config.yaml',
+          durationMs: 1,
+        },
+        {
+          name: 'bundled manifest',
+          passed: true,
+          message: 'present at C:\\Users\\shiva\\AppData\\Local\\aiden\\.bundled_manifest',
+          durationMs: 1,
+        },
+      ],
+      passed: true,
+      totalMs: 50,
+    };
+    const display = makeDisplay({ mono: true });
+    const out = stripAnsi(renderHealthBox(longPathReport, display));
+    // Both full paths must appear intact — no `con` / `.bun` truncation.
+    expect(out).toContain('C:\\Users\\shiva\\AppData\\Local\\aiden\\config.yaml');
+    expect(out).toContain('C:\\Users\\shiva\\AppData\\Local\\aiden\\.bundled_manifest');
+    // Top, all rows, and bottom share the same visible width.
+    const lines = out.split('\n').filter((l) => l.length > 0);
+    const widths = new Set(lines.map((l) => l.length));
+    expect(widths.size).toBe(1);
+  });
+
+  it('floors at the 60-char minimum even with trivially short rows', () => {
+    const tinyReport: DoctorReport = {
+      results: [{ name: 'x', passed: true, message: 'ok', durationMs: 1 }],
+      passed: true,
+      totalMs: 1,
+    };
+    const display = makeDisplay({ mono: true });
+    const out = stripAnsi(renderHealthBox(tinyReport, display));
+    const topLine = out.split('\n')[0];
+    expect(topLine.length).toBeGreaterThanOrEqual(60 + 2); // 60 inner + 2 corners
+  });
+
+  it('caps at the 100-char maximum even with extremely long messages', () => {
+    const giantReport: DoctorReport = {
+      results: [
+        {
+          name: 'oversized',
+          passed: true,
+          message: 'x'.repeat(500),
+          durationMs: 1,
+        },
+      ],
+      passed: true,
+      totalMs: 1,
+    };
+    const display = makeDisplay({ mono: true });
+    const out = stripAnsi(renderHealthBox(giantReport, display));
+    const topLine = out.split('\n')[0];
+    expect(topLine.length).toBeLessThanOrEqual(100 + 2); // 100 inner + 2 corners
+  });
+
   it('all-pass report shows summary in success colour', () => {
     const display = makeDisplay({ mono: false });
     const allPass: DoctorReport = {
