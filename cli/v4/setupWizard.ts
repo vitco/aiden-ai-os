@@ -44,6 +44,7 @@ import {
   loadOAuthProvider,
   openOAuthBrowserUrl,
 } from './auth/loadProvider';
+import { boxBottom, boxLine, boxTopTitled } from './box';
 
 export interface ProviderOption {
   id: string;
@@ -343,23 +344,70 @@ export async function isFreshInstall(paths: AidenPaths): Promise<boolean> {
 }
 
 /**
- * Print the post-wizard tutorial. Under 10 lines. Lives here so both
- * the API-key path and the OAuth path render the same closing screen
- * without copy-pasting copy.
+ * Render the user-visible Aiden home directory in a platform-native
+ * format. Windows shows `%LOCALAPPDATA%\aiden\`; macOS / Linux show
+ * `~/.aiden/`. Used by the setup-complete config map (Phase 22 Task 6)
+ * so users can copy-paste the path straight into their shell.
+ */
+export function aidenHomeDisplayPath(): string {
+  if (process.platform === 'win32') return '%LOCALAPPDATA%\\aiden\\';
+  return '~/.aiden/';
+}
+
+/**
+ * Print the post-wizard tutorial — Phase 22 Task 6 boxed format.
  *
- * Phase 18 Task 7: deliberately minimal. No feature lists, no
- * architecture explanations, no marketing copy — users discover via
- * use. Banked for v4.1: post-launch onboarding analytics on which
- * examples users try first.
+ * Replaces the prior bullet list with a Hermes-style "all your files
+ * in" config map: where state lives, plus the two re-run commands
+ * users will reach for next. Border colour is the brand orange so the
+ * box reads as a celebration moment, not a wall of muted text. Path
+ * adapts per platform via `aidenHomeDisplayPath()`.
+ *
+ * Both the API-key path and the OAuth path render this same closing
+ * screen.
  */
 export function printPostWizardTutorial(display: Display, version: string): void {
-  display.write(`\n✓ Setup complete. Aiden v${version} is ready.\n\n`);
-  display.write('Try one of these to get started:\n');
-  display.write('  • ask me anything\n');
-  display.write('  • remember that I prefer concise answers\n');
-  display.write('  • search the web for the latest on <topic>\n');
-  display.write('  • play me a popular song\n');
-  display.write('\nType /help for all commands, /quit to exit.\n');
+  const W = 50;
+  const top = display.brand(boxTopTitled('Setup Complete', W));
+  const bot = display.brand(boxBottom(W));
+  const side = (content: string): string => {
+    // Brand-colour just the verticals so the inner content keeps its
+    // default colour and stays scannable.
+    const raw = boxLine(content, W);
+    const left = raw.slice(0, 1);
+    const inner = raw.slice(1, raw.length - 1);
+    const right = raw.slice(raw.length - 1);
+    return `${display.brand(left)}${inner}${display.brand(right)}`;
+  };
+
+  const homePath = aidenHomeDisplayPath();
+
+  const lines: string[] = [
+    '',
+    top,
+    side(''),
+    side(`  Aiden v${version} is ready.`),
+    side(''),
+    side('  All your files in:'),
+    side(`    ${homePath}`),
+    side(''),
+    side('    config.yaml    main config'),
+    side('    .env           API keys'),
+    side('    SOUL.md        identity prompt'),
+    side('    sessions/      conversation history'),
+    side('    skills/        installed skills'),
+    side(''),
+    side('  Re-run setup:'),
+    side('    aiden setup        full wizard'),
+    side('    aiden setup model  change provider'),
+    side(''),
+    bot,
+    '',
+    `  ${kleur.dim("Try: aiden  to start chatting")}`,
+    '',
+  ];
+
+  display.write(lines.join('\n'));
 }
 
 export async function probeOllama(opts: { fetchImpl: typeof fetch; timeoutMs?: number }): Promise<boolean> {

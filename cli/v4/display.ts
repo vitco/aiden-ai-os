@@ -224,6 +224,16 @@ export class Display {
     this.out.write(`${this.skin.applyColors(text, 'muted')}\n`);
   }
 
+  /**
+   * Wrap `text` with the active skin's brand colour (orange #FF6B35 in
+   * the default skin). Used by boxed framing for major UX moments —
+   * setup-complete, /doctor results, critical errors. Returns a string
+   * so callers can compose lines; does not write.
+   */
+  brand(text: string): string {
+    return this.skin.applyColors(text, 'brand');
+  }
+
   /** Horizontal rule for grouping CLI output. */
   line(width = 60): void {
     const ch = this.skin.getActive().glyphs?.bullet === '*' ? '-' : '─';

@@ -6,6 +6,8 @@ import path from 'node:path';
 import {
   runSetupWizard,
   isFreshInstall,
+  printPostWizardTutorial,
+  aidenHomeDisplayPath,
   PROVIDERS,
   type PromptIO,
   type SetupAnswers,
@@ -312,5 +314,58 @@ describe('SetupWizard', () => {
       prompts: scriptedPrompts({ choose: [1] }), // pro stub — short-circuit, but banner runs first
     });
     expect(chunks.join('\n')).toMatch(/Aiden v/);
+  });
+
+  describe('printPostWizardTutorial (Phase 22 Task 6)', () => {
+    function captureTutorial(): string {
+      const { display, chunks } = sinkDisplay();
+      printPostWizardTutorial(display, '4.0.0');
+      return chunks.join('');
+    }
+
+    it('renders a rounded box with the Setup Complete title', () => {
+      const out = captureTutorial();
+      expect(out).toMatch(/╭── Setup Complete /);
+      expect(out).toMatch(/╰─+╯/);
+    });
+
+    it('shows the platform-aware aiden home path', () => {
+      const out = captureTutorial();
+      expect(out).toContain(aidenHomeDisplayPath());
+      if (process.platform === 'win32') {
+        expect(out).toMatch(/%LOCALAPPDATA%\\aiden\\/);
+      } else {
+        expect(out).toMatch(/~\/\.aiden\//);
+      }
+    });
+
+    it('lists all five user-state files with one-line labels', () => {
+      const out = captureTutorial();
+      expect(out).toMatch(/config\.yaml\s+main config/);
+      expect(out).toMatch(/\.env\s+API keys/);
+      expect(out).toMatch(/SOUL\.md\s+identity prompt/);
+      expect(out).toMatch(/sessions\/\s+conversation history/);
+      expect(out).toMatch(/skills\/\s+installed skills/);
+    });
+
+    it('lists both re-run commands inside the box', () => {
+      const out = captureTutorial();
+      expect(out).toMatch(/aiden setup\s+full wizard/);
+      expect(out).toMatch(/aiden setup model\s+change provider/);
+    });
+
+    it('closes with the "Try: aiden" CTA below the box', () => {
+      const out = captureTutorial();
+      // CTA appears AFTER the closing border.
+      const closeIdx = out.lastIndexOf('╯');
+      expect(closeIdx).toBeGreaterThan(0);
+      expect(out.slice(closeIdx)).toMatch(/Try: aiden/);
+    });
+
+    it('prints the supplied version', () => {
+      const { display, chunks } = sinkDisplay();
+      printPostWizardTutorial(display, '4.7.3');
+      expect(chunks.join('')).toMatch(/Aiden v4\.7\.3 is ready/);
+    });
   });
 });

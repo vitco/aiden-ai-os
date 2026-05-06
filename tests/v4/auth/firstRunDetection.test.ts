@@ -15,6 +15,8 @@ import {
   isFreshInstall,
   printPostWizardTutorial,
 } from '../../../cli/v4/setupWizard';
+import { Display } from '../../../cli/v4/display';
+import { SkinEngine } from '../../../cli/v4/skinEngine';
 import {
   resolveAidenPaths,
   ensureAidenDirsExist,
@@ -103,28 +105,37 @@ describe('isFreshInstall', () => {
 });
 
 describe('printPostWizardTutorial', () => {
-  it('67. renders under 10 lines with the four canonical examples', () => {
-    const out: string[] = [];
-    const display: any = {
-      write: (m: string) => out.push(m),
-    };
-    printPostWizardTutorial(display, '4.0.0');
-    const text = out.join('');
-    const lines = text.split('\n').filter((l) => l.length > 0);
-    expect(lines.length).toBeLessThanOrEqual(10);
-    expect(text).toContain('Setup complete. Aiden v4.0.0 is ready');
-    expect(text).toContain('ask me anything');
-    expect(text).toContain('remember');
-    expect(text).toContain('search the web');
-    expect(text).toContain('play me a popular song');
-    expect(text).toContain('/help');
-    expect(text).toContain('/quit');
+  // Phase 22 Task 6 replaced the bullet-list tutorial with a rounded
+  // box ("Setup Complete" + config map + re-run commands + Try CTA).
+  // Detailed shape assertions live in tests/v4/cli/setupWizard.test.ts;
+  // this file keeps the cross-cutting first-run / version-flow checks.
+  function captureTutorial(version: string): string {
+    const chunks: string[] = [];
+    const stdout = {
+      isTTY: false,
+      write(s: string) {
+        chunks.push(s);
+        return true;
+      },
+    } as unknown as NodeJS.WriteStream;
+    const display = new Display({
+      skin: new SkinEngine({ forceMono: true }),
+      stdout,
+    });
+    printPostWizardTutorial(display, version);
+    return chunks.join('');
+  }
+
+  it('67. renders the boxed setup-complete summary', () => {
+    const text = captureTutorial('4.0.0');
+    expect(text).toMatch(/╭── Setup Complete /);
+    expect(text).toMatch(/Aiden v4\.0\.0 is ready/);
+    expect(text).toMatch(/All your files in:/);
+    expect(text).toMatch(/Re-run setup:/);
+    expect(text).toMatch(/Try: aiden/);
   });
 
   it('68. version string flows through verbatim', () => {
-    const out: string[] = [];
-    const display: any = { write: (m: string) => out.push(m) };
-    printPostWizardTutorial(display, '4.1.7-beta');
-    expect(out.join('')).toContain('Aiden v4.1.7-beta is ready');
+    expect(captureTutorial('4.1.7-beta')).toContain('Aiden v4.1.7-beta is ready');
   });
 });
