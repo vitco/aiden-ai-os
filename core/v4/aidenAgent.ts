@@ -69,6 +69,7 @@ import {
   UrlProvenanceTracker,
   type UrlProvenanceMetrics,
 } from './agent/urlProvenance';
+import { preArmIntent } from './agent/intentPreArm';
 
 /**
  * Tool executor — runs a single tool call and returns the result.
@@ -163,6 +164,22 @@ export interface AidenAgentOptions {
    * diagnostics without coupling to the underlying mutation event.
    */
   onMemoryRefresh?: (file: 'memory' | 'user' | 'both') => void;
+  /**
+   * Phase 23.4b — Stage-0 intent pre-arm hook.  When the user's message
+   * matches an imperative intent regex (intentPreArm.ts), the agent
+   * loop calls this to fetch the skill's `required_tools` from its
+   * SKILL.md frontmatter before soft-arming the enforcement tracker.
+   *
+   * Implementation lives in `aidenCLI.ts:buildAgentRuntime` and reads
+   * via the SkillLoader.  Returns `null` when the skill is unknown,
+   * unloaded, or has no `required_tools` — the loop treats that as a
+   * no-op-arm (counters bump but tracker stays disarmed).
+   *
+   * Async to keep parity with the SkillLoader API; the agent awaits it
+   * once per matched user turn.  Test paths can omit this option and
+   * pre-arming silently no-ops.
+   */
+  lookupSkillRequiredTools?: (skillName: string) => Promise<string[] | null>;
 }
 
 export interface AidenAgentResult {
@@ -193,11 +210,17 @@ export interface AidenAgentResult {
    * Phase 23.1: cumulative skill-enforcement counters across the agent's
    * lifetime (process-scoped). `recovered` = corrective retry produced
    * the missing tool call; `failed` = retry cap exceeded and the turn
-   * ended with honest failure; `armed` = skills_view returned a non-empty
-   * required_tools at least once. Always present, all zeroes when no
-   * required-tool skill ever fired.
+   * ended with honest failure; `armed` = skills_view OR pre-arm armed
+   * the tracker at least once.  `preArmed` (Phase 23.4b) = Stage-0
+   * intent regex fired regardless of redundancy with skill_view.
+   * Always present, all zeroes when no required-tool skill ever fired.
    */
-  skillEnforcement: { recovered: number; failed: number; armed: number };
+  skillEnforcement: {
+    recovered: number;
+    failed: number;
+    armed: number;
+    preArmed: number;
+  };
   /**
    * Phase 23.4a: cumulative URL-provenance counters across the agent's
    * lifetime (process-scoped). `blocked` = a YouTube watch URL was
@@ -272,6 +295,8 @@ export class AidenAgent {
   private readonly onCompression?: AidenAgentOptions['onCompression'];
   private readonly refreshMemorySnapshot?: AidenAgentOptions['refreshMemorySnapshot'];
   private readonly onMemoryRefresh?: AidenAgentOptions['onMemoryRefresh'];
+  // Phase 23.4b — Stage-0 intent pre-arm: SkillLoader-backed lookup.
+  private readonly lookupSkillRequiredTools?: AidenAgentOptions['lookupSkillRequiredTools'];
   /** Cached system prompt — frozen after first build for session-long prefix cache. */
   private cachedSystemPrompt: string | null = null;
   private compressionEvents = 0;
@@ -285,6 +310,8 @@ export class AidenAgent {
     recovered: 0,
     failed: 0,
     armed: 0,
+    // Phase 23.4b: count of Stage-0 intent pre-arms fired this session.
+    preArmed: 0,
   };
   /**
    * Phase 23.4a: process-scoped url-provenance counters. Same
@@ -356,6 +383,7 @@ export class AidenAgent {
     this.onCompression = options.onCompression;
     this.refreshMemorySnapshot = options.refreshMemorySnapshot;
     this.onMemoryRefresh = options.onMemoryRefresh;
+    this.lookupSkillRequiredTools = options.lookupSkillRequiredTools;
   }
 
   /**
@@ -489,6 +517,41 @@ export class AidenAgent {
     // call to runConversation; metrics object is shared with the agent
     // instance so /doctor sees cumulative counts.
     const enforcement = new SkillEnforcementTracker(this.skillEnforcementMetrics);
+
+    // Phase 23.4b — Stage-0 intent pre-arm.  Run a deterministic regex
+    // on the most recent user message; on match, soft-arm the
+    // enforcement tracker before the model dispatches.  Closes the
+    // bug-Y window where vague conversational queries
+    // ("play me an obscure indie band") cause the model to skip
+    // skill_view entirely and the guard never arms.  The hard-arm
+    // path via skill_view stays as-is — pre-arm just primes.
+    const lastUserMsg = (() => {
+      for (let i = initialMessages.length - 1; i >= 0; i--) {
+        const m = initialMessages[i];
+        if (m && m.role === 'user' && typeof m.content === 'string') {
+          return m.content;
+        }
+      }
+      return '';
+    })();
+    const intent = preArmIntent(lastUserMsg);
+    if (intent && this.lookupSkillRequiredTools) {
+      try {
+        const required = await this.lookupSkillRequiredTools(intent.skill);
+        // preArm always bumps preArmed counter; arm transition only
+        // fires when required_tools is a non-empty list.  Order-safe
+        // with a later skill_view firing in the same turn.
+        enforcement.preArm(intent.skill, required ?? []);
+      } catch {
+        // Best-effort — skill lookup must never break the loop.
+        enforcement.preArm(intent.skill, []);
+      }
+    } else if (intent) {
+      // No lookup wired (test paths, minimal harnesses) — bump the
+      // counter so /doctor still surfaces the regex hit, but the
+      // tracker stays disarmed (no requiredTools to enforce).
+      enforcement.preArm(intent.skill, []);
+    }
     // Phase 23.4a: per-user-turn URL provenance ledger. Tracks the
     // youtube_search candidates this turn so the gate can reject any
     // open_url call the model invents off-canon.

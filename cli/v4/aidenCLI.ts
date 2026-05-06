@@ -839,6 +839,24 @@ export async function buildAgentRuntime(
         // diagnostics must not break the loop
       }
     },
+    // Phase 23.4b — feed the agent's Stage-0 intent pre-arm with the
+    // skill's `required_tools` from its SKILL.md frontmatter.  Returns
+    // null when the skill is unknown / unloaded / empty so the agent
+    // treats it as a no-op-arm (counter bumps, tracker stays disarmed).
+    lookupSkillRequiredTools: async (skillName: string) => {
+      try {
+        const skill = await skillLoader.load(skillName);
+        if (!skill) return null;
+        const raw = skill.frontmatter.required_tools;
+        if (!Array.isArray(raw)) return null;
+        const filtered = raw
+          .filter((t): t is string => typeof t === 'string' && t.trim().length > 0)
+          .map((t) => t.trim());
+        return filtered.length > 0 ? filtered : null;
+      } catch {
+        return null;
+      }
+    },
   });
 
   // Phase 16d: wire the dirty-bit signal — every successful memory mutation

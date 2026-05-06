@@ -44,7 +44,9 @@ export const doctor: SlashCommand = {
     if (ctx.agent) {
       const m = ctx.agent.getSkillEnforcementMetrics();
       ctx.display.write(
-        `[skill-enforcement] armed=${m.armed} recovered=${m.recovered} failed=${m.failed} (session)\n`,
+        // Phase 23.4b: surface the Stage-0 intent pre-arm counter so
+        // smoke runs can confirm the regex fired on bug-Y queries.
+        `[skill-enforcement] armed=${m.armed} pre-armed=${m.preArmed} recovered=${m.recovered} failed=${m.failed} (session)\n`,
       );
       // Phase 23.4a: same shape, different concern — URL provenance
       // gate counters. blocked = open_url calls rejected for unknown

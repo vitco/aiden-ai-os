@@ -54,6 +54,15 @@ export interface SkillEnforcementMetrics {
   failed: number;
   /** Total times any skill armed enforcement (sanity check). */
   armed: number;
+  /**
+   * Phase 23.4b — times the Stage-0 intent pre-arm regex (intentPreArm.ts)
+   * fired on a user turn, soft-arming the tracker before the model
+   * dispatched.  Counted independently of `armed` so /doctor can show
+   * "regex caught N turns the model otherwise would have skipped".
+   * Counts every pre-arm call, even when redundant with a later
+   * skill_view (the regex still helped close the model-decision gap).
+   */
+  preArmed: number;
 }
 
 function debugEnabled(): boolean {
@@ -87,6 +96,11 @@ export class SkillEnforcementTracker {
    * a non-empty `requiredTools` array. If multiple skill_views fire in
    * one turn, the most recent armed skill wins — that matches user
    * intent (a fresh skill_view supersedes the prior one).
+   *
+   * Phase 23.4b: when the tracker is already armed (by a prior
+   * preArm() pre-fire OR a prior skill_view), recordSkillView updates
+   * the active skill but does NOT double-bump the `armed` counter —
+   * the turn was already counted as armed.
    */
   recordSkillView(name: string, requiredTools: readonly string[]): void {
     if (!Array.isArray(requiredTools) || requiredTools.length === 0) return;
@@ -94,11 +108,58 @@ export class SkillEnforcementTracker {
       (t) => typeof t === 'string' && t.length > 0,
     );
     if (filtered.length === 0) return;
+    const wasArmed = this.skillName !== null;
     this.skillName = name;
     this.requiredTools = filtered;
     // Don't reset calledTools — a tool already called this turn still counts.
-    this.metrics.armed += 1;
+    if (!wasArmed) this.metrics.armed += 1;
     debugLog(`arm skill=${name} required=[${filtered.join(', ')}]`);
+  }
+
+  /**
+   * Phase 23.4b — Stage-0 pre-arm.  Called from the agent loop entry
+   * when `intentPreArm.preArmIntent()` matched the user message.
+   * Behaves identically to a successful `skill_view` for the same
+   * skill: arms the tracker with `requiredTools` so the turn-final
+   * boundary check can force a retry if the model skips them.
+   *
+   * Differences from recordSkillView:
+   *   - Always increments `metrics.preArmed` (pre-arm fired this turn).
+   *   - Increments `metrics.armed` only on first transition to armed.
+   *     If skill_view runs later in the same turn, recordSkillView
+   *     sees `wasArmed=true` and skips its own bump.  Net: one armed
+   *     count per turn, regardless of which path armed it.
+   *   - Empty `requiredTools` is a no-op-arm: counter bumps preArmed
+   *     so /doctor sees the intent fired, but tracker stays disarmed
+   *     (no tools to enforce).
+   *
+   * Order-independent with recordSkillView.  Either-or-both leave the
+   * tracker in the same final state.
+   */
+  preArm(name: string, requiredTools: readonly string[]): void {
+    this.metrics.preArmed += 1;
+    if (!Array.isArray(requiredTools) || requiredTools.length === 0) {
+      debugLog(`pre-arm skill=${name} no-op (no required_tools)`);
+      return;
+    }
+    const filtered = requiredTools.filter(
+      (t) => typeof t === 'string' && t.length > 0,
+    );
+    if (filtered.length === 0) {
+      debugLog(`pre-arm skill=${name} no-op (empty after filter)`);
+      return;
+    }
+    if (this.skillName !== null) {
+      // Already armed (by a prior preArm or skill_view) — no-op-arm.
+      // Don't overwrite the active skill: the model's explicit choice
+      // (skill_view) outranks the regex-derived guess.
+      debugLog(`pre-arm skill=${name} already-armed (active=${this.skillName})`);
+      return;
+    }
+    this.skillName = name;
+    this.requiredTools = filtered;
+    this.metrics.armed += 1;
+    debugLog(`pre-arm skill=${name} required=[${filtered.join(', ')}]`);
   }
 
   /** Called for every tool dispatch (regardless of result). */
