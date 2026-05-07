@@ -1,52 +1,50 @@
 /**
- * Copyright (c) 2026 Shiva Deore (Taracod).
- * Licensed under AGPL-3.0. See LICENSE for details.
+ * Aiden v4 — local-first AI agent
+ * Copyright (C) 2026 Shiva Deore (Taracod)
  *
- * Aiden — local-first agent.
- *
- * Portions adapted from NousResearch/hermes-agent (MIT).
- * Original copyright (c) NousResearch.
+ * Licensed under AGPL-3.0-or-later. See LICENSE.
  */
 /**
- * providers/v4/codexResponsesAdapter.ts — Aiden v4.0.0
+ * providers/v4/codexResponsesAdapter.ts
  *
- * Adapter for OpenAI's /v1/responses (Codex) wire format.
+ * Adapter for OpenAI's Responses API (`/v1/responses`). Two backends in one
+ * file:
  *
- * Status: PHASE 4 — minimum-viable API-key path. Sufficient to validate the
- *   wire-format mapping (request shape, response.output[] item parsing,
- *   finish-reason semantics). Full feature set lands Phase 13:
- *     - ChatGPT subscription OAuth flow
- *     - Reasoning-item replay (encrypted_content round-trip)
- *     - Streaming
- *     - prompt_cache_key + Codex-backend session_id headers
- *     - xAI / GitHub Models / chatgpt.com backend variants
- *     - _preflight_codex_api_kwargs sanitization
+ *   1. **Plain API key path** (`baseUrl` = `https://api.openai.com/v1`).
+ *      Standard JSON request and response. Used when a user supplies an
+ *      ordinary OpenAI API key for a Responses-API model (gpt-5-codex,
+ *      gpt-4.1-mini, etc.).
  *
- * No real-network integration test in Phase 4 — gated on Phase 13 OAuth wiring
- * and an OpenAI Responses-API key (gpt-5-codex is gated). Unit tests with
- * mocked fetch carry the load until then.
+ *   2. **ChatGPT Plus / Codex backend path** (`baseUrl` =
+ *      `https://chatgpt.com/backend-api/codex`). Cloudflare-fronted; the
+ *      backend rejects requests that don't carry the Codex CLI fingerprint
+ *      (User-Agent + originator + ChatGPT-Account-ID extracted from the
+ *      OAuth JWT) and rejects requests that don't stream. We force
+ *      `stream: true`, parse the SSE event stream, and aggregate it into
+ *      the same `ProviderCallOutput` shape callers see from path #1.
  *
+ * The Codex backend's SSE stream is unreliable on the back end's part:
+ * `response.completed` regularly arrives with an empty `output[]` even
+ * when items WERE streamed via `response.output_item.done` events. To
+ * handle that we run a three-stage recovery in `aggregateSseEvents`:
  *
- * Wire-format quirks handled here:
- *   1. Endpoint: /v1/responses (NOT /v1/chat/completions).
- *   2. Top-level `instructions` field carries the system prompt; messages array
- *      becomes `input` items.
- *   3. Tool schema is FLAT: {type:'function', name, description, strict, parameters}
- *      (no nested function: {...}).
- *   4. Response.output[] is a list of items: message / reasoning / function_call.
- *   5. response.status ∈ {completed, incomplete, failed, cancelled}; mapped to
- *      v4's {stop, tool_use, length}.
- *   6. Empty output[] with output_text backfill is legal (rare stream-recovery case).
- *   7. Usage at response.usage.{input_tokens, output_tokens, cached_tokens}.
- *   8. store=false default — we do not persist threads server-side.
+ *   Stage 1: if `response.completed.response.output` is non-empty, use it.
+ *   Stage 2: else if `output_item.done` events were collected, build a
+ *            response shape from those.
+ *   Stage 3: else if any `output_text.delta` accumulated, synthesise a
+ *            single `message` item with the joined text.
+ *
+ * `AIDEN_DEBUG_CODEX=1` surfaces unknown SSE event types via `console.warn`
+ * so a future API addition shows up loudly instead of being dropped.
  */
 
-import {
+import type {
   ApiMode,
   Message,
   ProviderAdapter,
   ProviderCallInput,
   ProviderCallOutput,
+  StreamEvent,
   ToolCallRequest,
   ToolSchema,
 } from './types';
@@ -55,823 +53,806 @@ import {
   ProviderRateLimitError,
   ProviderTimeoutError,
 } from './errors';
-import { parseSseStream } from './chatCompletionsAdapter';
+
+// ── Public surface ──────────────────────────────────────────────────────
 
 /**
- * Phase 21 #6 reopen — pull `chatgpt_account_id` out of an OpenAI OAuth
- * JWT's `https://api.openai.com/auth` claim. Used to populate the
- * `ChatGPT-Account-ID` header that the Codex Cloudflare layer requires.
- *
- * Direct port of Hermes `agent/auxiliary_client.py:_codex_cloudflare_headers`
- * (lines 384-396): tolerates malformed tokens silently (returns null) so
- * a bad bearer surfaces as a 401 from the backend instead of a crash at
- * adapter construction.
- *
- * Exported for unit tests.
+ * Pull `chatgpt_account_id` from an OpenAI OAuth JWT's
+ * `https://api.openai.com/auth` claim. Returns `null` on any failure
+ * (malformed bearer, no claim, parse error). The Codex backend's
+ * Cloudflare layer requires this header alongside the User-Agent +
+ * originator pair; absent values are quietly omitted so a bad token
+ * surfaces as an upstream 401 instead of a crash here.
  */
-export function extractChatGptAccountId(accessToken: string | null | undefined): string | null {
+export function extractChatGptAccountId(
+  accessToken: string | null | undefined,
+): string | null {
   if (typeof accessToken !== 'string' || accessToken.trim().length === 0) {
     return null;
   }
   const parts = accessToken.split('.');
   if (parts.length < 2) return null;
   try {
-    // base64url + padding compensation, matching Python's `parts[1] + "=" * (-len(...) % 4)`
-    const payload = parts[1].replace(/-/g, '+').replace(/_/g, '/');
-    const padded = payload + '='.repeat((4 - (payload.length % 4)) % 4);
-    const json = Buffer.from(padded, 'base64').toString('utf8');
-    const claims = JSON.parse(json) as Record<string, unknown>;
-    const auth = claims['https://api.openai.com/auth'];
+    const b64url   = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const padded   = b64url + '='.repeat((4 - (b64url.length % 4)) % 4);
+    const decoded  = Buffer.from(padded, 'base64').toString('utf8');
+    const claims   = JSON.parse(decoded) as Record<string, unknown>;
+    const auth     = claims['https://api.openai.com/auth'];
     if (auth && typeof auth === 'object' && !Array.isArray(auth)) {
       const acct = (auth as Record<string, unknown>).chatgpt_account_id;
       if (typeof acct === 'string' && acct.length > 0) return acct;
     }
   } catch {
-    /* malformed token — drop the header */
+    /* malformed JWT — null tells the caller to drop the header */
   }
   return null;
 }
 
 export interface CodexResponsesAdapterOptions {
-  /** Default 'https://api.openai.com/v1'. No trailing slash. */
-  baseUrl?: string;
-  /** Bearer token. */
-  apiKey: string;
-  /** e.g. 'gpt-5-codex', 'gpt-4.1-mini'. */
-  model: string;
-  /** For error messages and logging. */
-  providerName: string;
-  /** Per-request timeout. Default 120_000. */
-  timeoutMs?: number;
-  /** Retries on 429 / 5xx / network. Default 2 (3 attempts total). */
-  maxRetries?: number;
-  /** Extra headers (escape hatch). */
-  extraHeaders?: Record<string, string>;
+  /** No trailing slash. Default `https://api.openai.com/v1`. */
+  baseUrl?:       string;
+  apiKey:         string;
+  model:          string;
+  providerName:   string;
+  timeoutMs?:     number;
+  /** Default 2 (3 attempts total). */
+  maxRetries?:    number;
+  /** Caller-supplied headers — merged in last; wins over computed headers. */
+  extraHeaders?:  Record<string, string>;
 }
 
-interface ResponsesTool {
-  type: 'function';
-  name: string;
+// ── Constants ───────────────────────────────────────────────────────────
+
+const DEFAULT_BASE_URL    = 'https://api.openai.com/v1';
+const DEFAULT_TIMEOUT_MS  = 120_000;
+const DEFAULT_MAX_RETRIES = 2;
+const BACKOFF_BASE_MS     = 1000;
+
+const CODEX_BACKEND_HOST  = 'chatgpt.com/backend-api/codex';
+const CODEX_USER_AGENT    = 'codex_cli_rs/0.0.0 (Aiden Agent)';
+const CODEX_ORIGINATOR    = 'codex_cli_rs';
+
+// ── Wire-format types (private, narrow on purpose) ──────────────────────
+
+interface WireFunctionTool {
+  type:        'function';
+  name:        string;
   description: string;
-  strict: boolean;
-  parameters: ToolSchema['inputSchema'];
+  strict:      boolean;
+  parameters:  ToolSchema['inputSchema'];
 }
 
-interface ResponsesInputContentPart {
-  type: 'input_text' | 'output_text';
-  text: string;
+interface WireMessageItem {
+  type:    'message';
+  role:    'user' | 'assistant';
+  content: Array<{ type: 'input_text' | 'output_text'; text: string }>;
 }
 
-interface ResponsesMessageItem {
-  type: 'message';
-  role: 'user' | 'assistant';
-  content: ResponsesInputContentPart[];
-}
-
-interface ResponsesFunctionCallItem {
-  type: 'function_call';
-  call_id: string;
-  name: string;
+interface WireFunctionCallItem {
+  type:      'function_call';
+  call_id:   string;
+  name:      string;
   arguments: string;
 }
 
-interface ResponsesFunctionCallOutputItem {
-  type: 'function_call_output';
+interface WireFunctionCallOutputItem {
+  type:    'function_call_output';
   call_id: string;
-  output: string;
+  output:  string;
 }
 
-type ResponsesInputItem =
-  | ResponsesMessageItem
-  | ResponsesFunctionCallItem
-  | ResponsesFunctionCallOutputItem;
+type WireInputItem =
+  | WireMessageItem
+  | WireFunctionCallItem
+  | WireFunctionCallOutputItem;
 
-interface ResponsesOutputMessage {
-  type: 'message';
-  role?: string;
+interface WireOutputMessage {
+  type:    'message';
+  id?:     string;
+  role?:   string;
   content?: Array<{ type: string; text?: string }>;
   status?: string;
 }
 
-interface ResponsesOutputFunctionCall {
-  type: 'function_call';
-  id?: string;
-  call_id?: string;
-  name: string;
+interface WireOutputFunctionCall {
+  type:      'function_call';
+  id?:       string;
+  call_id?:  string;
+  name:      string;
   arguments: string | Record<string, unknown>;
-  status?: string;
+  status?:   string;
 }
 
-interface ResponsesOutputReasoning {
-  type: 'reasoning';
-  encrypted_content?: string;
-  summary?: Array<{ type: string; text?: string }>;
-}
-
-type ResponsesOutputItem =
-  | ResponsesOutputMessage
-  | ResponsesOutputFunctionCall
-  | ResponsesOutputReasoning
+type WireOutputItem =
+  | WireOutputMessage
+  | WireOutputFunctionCall
   | { type: string; [k: string]: unknown };
 
-interface ResponsesAPIResponse {
-  output?: ResponsesOutputItem[];
-  output_text?: string;
-  status?: string;
-  incomplete_details?: { reason?: string };
+interface WireResponseShape {
+  output?:              WireOutputItem[];
+  output_text?:         string;
+  status?:              string;
+  incomplete_details?:  { reason?: string };
   usage?: {
-    input_tokens?: number;
-    output_tokens?: number;
-    cached_tokens?: number;
-    input_tokens_details?: { cached_tokens?: number };
+    input_tokens?:           number;
+    output_tokens?:          number;
+    cached_tokens?:          number;
+    input_tokens_details?:   { cached_tokens?: number };
   };
 }
 
-const DEFAULT_BASE_URL = 'https://api.openai.com/v1';
-const DEFAULT_TIMEOUT_MS = 120_000;
-const DEFAULT_MAX_RETRIES = 2;
-
-/**
- * Phase 21 #6c — apply per-item text buffers (collected from
- * `response.output_text.delta` events) to message items inside an
- * aggregated ResponsesAPIResponse. Used as a defensive fallback when
- * `response.completed` arrives before all delta-bound items, or when
- * the stream ends without a `completed` event.
- */
-function applyTextBuffers(
-  resp: ResponsesAPIResponse,
-  buffers: Map<string, string>,
-): void {
-  if (!Array.isArray(resp.output)) return;
-  for (const item of resp.output) {
-    const id = (item as { id?: string }).id ?? '';
-    const buf = buffers.get(id);
-    if (!buf || (item as { type?: string }).type !== 'message') continue;
-    const msg = item as ResponsesOutputMessage;
-    if (!Array.isArray(msg.content) || msg.content.length === 0) {
-      msg.content = [{ type: 'output_text', text: buf }];
-    } else {
-      // If content already has text parts, append; otherwise insert.
-      const hasText = msg.content.some(
-        (p) => p.type === 'output_text' || p.type === 'text',
-      );
-      if (!hasText) {
-        msg.content.push({ type: 'output_text', text: buf });
-      }
-    }
-  }
+interface WireRequestBody {
+  model:                  string;
+  instructions?:          string;
+  input:                  WireInputItem[];
+  tools?:                 WireFunctionTool[];
+  tool_choice?:           'auto';
+  parallel_tool_calls?:   boolean;
+  store?:                 boolean;
+  max_output_tokens?:     number;
+  stream?:                boolean;
+  [extra: string]:        unknown;
 }
 
-export class CodexResponsesAdapter implements ProviderAdapter {
-  apiMode: ApiMode = 'codex_responses';
-  private readonly baseUrl: string;
-  private readonly apiKey: string;
-  private readonly model: string;
-  private readonly providerName: string;
-  private readonly timeoutMs: number;
-  private readonly maxRetries: number;
-  private readonly extraHeaders: Record<string, string>;
+// ── Adapter ─────────────────────────────────────────────────────────────
 
-  constructor(options: CodexResponsesAdapterOptions) {
-    this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
-    this.apiKey = options.apiKey;
-    this.model = options.model;
-    this.providerName = options.providerName;
-    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    this.maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
-    this.extraHeaders = options.extraHeaders ?? {};
+export class CodexResponsesAdapter implements ProviderAdapter {
+  readonly apiMode: ApiMode = 'codex_responses';
+
+  private readonly endpoint:     string;
+  private readonly apiKey:       string;
+  private readonly model:        string;
+  private readonly providerName: string;
+  private readonly timeoutMs:    number;
+  private readonly maxRetries:   number;
+  private readonly extraHeaders: Record<string, string>;
+  private readonly isCodexHost:  boolean;
+  private readonly accountId:    string | null;
+
+  constructor(opts: CodexResponsesAdapterOptions) {
+    const baseUrl     = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/+$/, '');
+    this.endpoint     = `${baseUrl}/responses`;
+    this.apiKey       = opts.apiKey;
+    this.model        = opts.model;
+    this.providerName = opts.providerName;
+    this.timeoutMs    = opts.timeoutMs  ?? DEFAULT_TIMEOUT_MS;
+    this.maxRetries   = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.extraHeaders = opts.extraHeaders ?? {};
+    this.isCodexHost  = baseUrl.includes(CODEX_BACKEND_HOST);
+    // JWT account-id is only meaningful on the Codex backend. We compute
+    // it eagerly so a malformed token surfaces at construction (caller's
+    // chosen point) rather than mid-request.
+    this.accountId    = this.isCodexHost ? extractChatGptAccountId(opts.apiKey) : null;
   }
+
+  // ── Public: non-streaming entry ─────────────────────────────────────
 
   async call(input: ProviderCallInput): Promise<ProviderCallOutput> {
-    const body = this.buildRequestBody(input);
-    const url = `${this.baseUrl}/responses`;
-    // Phase 21 #6 reopen: chatgpt.com/backend-api/codex Cloudflare layer
-    // rejects requests without codex_cli_rs originator + UA + the
-    // ChatGPT-Account-ID extracted from the OAuth JWT. Without these, the
-    // backend returns 400 "model not supported when using Codex with a
-    // ChatGPT account" regardless of slug. verbatim from
-    // agent/auxiliary_client.py:_codex_cloudflare_headers.
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${this.apiKey}`,
-      ...this.codexBackendHeaders(),
-      ...this.extraHeaders,
-    };
+    const body  = this.buildBody(input);
+    const reply = await this.dispatch(body);
 
-    const totalAttempts = this.maxRetries + 1;
-    let lastTransientError: ProviderError | null = null;
+    // Codex backend always streams; aggregate the SSE frames into the
+    // same shape the JSON path returns. Plain api.openai.com path returns
+    // JSON directly.
+    const wire = this.isCodexHost
+      ? await aggregateSseEvents(reply)
+      : await readJsonBody(reply, this.providerName);
 
-    for (let attempt = 1; attempt <= totalAttempts; attempt += 1) {
-      try {
-        const response = await this.fetchWithTimeout(url, headers, body);
-
-        if (response.ok) {
-          // Phase 21 #6c: Codex backend always streams. Collect the SSE
-          // frames into a final ResponsesAPIResponse so the rest of the
-          // adapter (parseResponse, callers) sees the same JSON shape
-          // it expects from non-streaming providers.
-          if (this.isCodexBackend()) {
-            const aggregated = await this.collectStreamedResponse(response);
-            return this.parseResponse(aggregated);
-          }
-          const json = (await response.json()) as ResponsesAPIResponse;
-          return this.parseResponse(json);
-        }
-
-        const status = response.status;
-        const rawText = await this.safeReadText(response);
-
-        if (status >= 400 && status < 500 && status !== 429) {
-          throw new ProviderError(
-            `Provider ${this.providerName} returned ${status}: ${rawText.slice(0, 500)}`,
-            this.providerName,
-            status,
-            rawText,
-            false,
-          );
-        }
-
-        lastTransientError = status === 429
-          ? new ProviderRateLimitError(this.providerName, rawText)
-          : new ProviderError(
-              `Provider ${this.providerName} returned ${status}: ${rawText.slice(0, 500)}`,
-              this.providerName,
-              status,
-              rawText,
-              true,
-            );
-
-        if (attempt < totalAttempts) {
-          await this.sleep(this.backoffMs(attempt));
-          continue;
-        }
-        throw lastTransientError;
-      } catch (err) {
-        if (err instanceof ProviderError && !err.retryable) throw err;
-        if (err instanceof ProviderTimeoutError) {
-          lastTransientError = err;
-          if (attempt < totalAttempts) {
-            await this.sleep(this.backoffMs(attempt));
-            continue;
-          }
-          throw err;
-        }
-        if (err instanceof ProviderError) {
-          lastTransientError = err;
-          if (attempt < totalAttempts) {
-            await this.sleep(this.backoffMs(attempt));
-            continue;
-          }
-          throw err;
-        }
-        const wrapped = new ProviderError(
-          `Provider ${this.providerName} request failed: ${err instanceof Error ? err.message : String(err)}`,
-          this.providerName,
-          undefined,
-          err,
-          true,
-        );
-        lastTransientError = wrapped;
-        if (attempt < totalAttempts) {
-          await this.sleep(this.backoffMs(attempt));
-          continue;
-        }
-        throw wrapped;
-      }
-    }
-
-    throw lastTransientError ?? new ProviderError(
-      `Provider ${this.providerName} exhausted retries`,
-      this.providerName,
-    );
+    return decodeWireResponse(wire, this.providerName);
   }
 
-  private buildRequestBody(input: ProviderCallInput): Record<string, unknown> {
-    const { instructions, items } = this.translateMessages(input.messages);
-    const body: Record<string, unknown> = {
-      model: this.model,
-      input: items,
-      tool_choice: 'auto',
-      parallel_tool_calls: true,
-      store: false,
+  // ── Streaming entry (currently bridges to non-streaming) ────────────
+  //
+  // The Responses API surface doesn't yet expose an Aiden-internal
+  // streaming consumer that benefits from incremental events; the agent
+  // loop reads `done` events. We deliver one synthetic `done` after
+  // aggregation so the contract is uniform.
+  async *callStream(
+    input: ProviderCallInput,
+  ): AsyncGenerator<StreamEvent, void, void> {
+    const out = await this.call(input);
+    yield { type: 'done', output: out };
+  }
+
+  // ── Body assembly ───────────────────────────────────────────────────
+
+  private buildBody(input: ProviderCallInput): WireRequestBody {
+    const { instructions, items } = encodeMessages(input.messages);
+
+    const body: WireRequestBody = {
+      model:                this.model,
+      input:                items,
+      tool_choice:          'auto',
+      parallel_tool_calls:  true,
+      store:                false,
     };
-    if (instructions) body.instructions = instructions;
-    if (input.tools.length > 0) {
-      body.tools = this.translateTools(input.tools);
+    if (instructions)                  body.instructions  = instructions;
+    if (input.tools && input.tools.length > 0) {
+      body.tools = input.tools.map(toWireTool);
     }
-    // Phase 21 #6 reopen: Codex backend (chatgpt.com/backend-api/codex)
-    // does NOT accept max_output_tokens — sending it triggers 400.
-    // Guard: only emit when the backend is regular OpenAI Responses.
-    if (input.maxTokens != null && !this.isCodexBackend()) {
+    if (typeof input.temperature === 'number') {
+      (body as Record<string, unknown>).temperature = input.temperature;
+    }
+    // Codex backend rejects max_output_tokens; only the regular Responses
+    // API accepts it.
+    if (!this.isCodexHost && input.maxTokens !== undefined) {
       body.max_output_tokens = input.maxTokens;
     }
-    if (input.temperature != null) body.temperature = input.temperature;
-    // Phase 21 #6c: chatgpt.com/backend-api/codex requires `stream: true`
-    // on every request — sending stream:false (or omitting) returns
-    // HTTP 400 "Stream must be set to true."
-    // Codex backend (run_agent.py _run_codex_stream call site). Aiden's
-    // call() collects the SSE frames internally and returns the final
-    // aggregated ResponsesAPIResponse so v4 callers that don't request
-    // streaming still see the same JSON-style result.
-    if (this.isCodexBackend()) {
+    // Codex backend requires stream:true (returns 400 otherwise).
+    if (this.isCodexHost) {
       body.stream = true;
     }
     if (input.extraBody) Object.assign(body, input.extraBody);
     return body;
   }
 
-  /**
-   * True when this adapter is talking to the chatgpt.com/backend-api/codex
-   * endpoint — a different protocol surface than `api.openai.com/v1`. The
-   * Codex backend rejects max_output_tokens, requires Cloudflare-bypass
-   * headers, and binds requests to a ChatGPT account via JWT.
-   */
-  private isCodexBackend(): boolean {
-    return this.baseUrl.includes('chatgpt.com/backend-api/codex');
-  }
+  // ── Headers + dispatch ──────────────────────────────────────────────
 
-  /**
-   * Phase 21 #6 reopen — Codex Cloudflare-bypass headers, verbatim from
-   * Hermes `agent/auxiliary_client.py:_codex_cloudflare_headers`:
-   *
-   *   User-Agent: codex_cli_rs/0.0.0 (Aiden Agent)
-   *   originator: codex_cli_rs
-   *   ChatGPT-Account-ID: <chatgpt_account_id from JWT claim>
-   *
-   * No-op for non-Codex backends (returns empty object). Malformed JWTs
-   * drop the account-id header rather than raise — a bad token surfaces
-   * as 401 from the backend, not a crash here.
-   */
-  private codexBackendHeaders(): Record<string, string> {
-    if (!this.isCodexBackend()) return {};
+  private buildHeaders(): Record<string, string> {
     const headers: Record<string, string> = {
-      'User-Agent': 'codex_cli_rs/0.0.0 (Aiden Agent)',
-      originator: 'codex_cli_rs',
+      'Content-Type':  'application/json',
+      'Authorization': `Bearer ${this.apiKey}`,
     };
-    const acctId = extractChatGptAccountId(this.apiKey);
-    if (acctId) {
-      headers['ChatGPT-Account-ID'] = acctId;
-    }
-    return headers;
-  }
-
-  /**
-   * Convert v4 Message[] to Responses API shape.
-   * - System messages are extracted into a single `instructions` string
-   *   (concatenated with \n\n if multiple).
-   * - User/assistant messages become {type:'message', role, content:[...]} items.
-   * - Assistant tool_calls become {type:'function_call', call_id, name, arguments} items.
-   * - Tool result messages become {type:'function_call_output', call_id, output} items.
-   */
-  private translateMessages(messages: Message[]): {
-    instructions: string | undefined;
-    items: ResponsesInputItem[];
-  } {
-    const systemParts: string[] = [];
-    const items: ResponsesInputItem[] = [];
-
-    for (const msg of messages) {
-      switch (msg.role) {
-        case 'system':
-          systemParts.push(msg.content);
-          break;
-        case 'user':
-          items.push({
-            type: 'message',
-            role: 'user',
-            content: [{ type: 'input_text', text: msg.content }],
-          });
-          break;
-        case 'assistant': {
-          if (msg.content) {
-            items.push({
-              type: 'message',
-              role: 'assistant',
-              content: [{ type: 'output_text', text: msg.content }],
-            });
-          }
-          if (msg.toolCalls && msg.toolCalls.length > 0) {
-            for (const tc of msg.toolCalls) {
-              items.push({
-                type: 'function_call',
-                call_id: tc.id,
-                name: tc.name,
-                arguments: JSON.stringify(tc.arguments ?? {}),
-              });
-            }
-          }
-          break;
-        }
-        case 'tool':
-          items.push({
-            type: 'function_call_output',
-            call_id: msg.toolCallId,
-            output: msg.content,
-          });
-          break;
+    if (this.isCodexHost) {
+      headers['User-Agent'] = CODEX_USER_AGENT;
+      headers['originator'] = CODEX_ORIGINATOR;
+      headers['Accept']     = 'text/event-stream';
+      if (this.accountId) {
+        headers['ChatGPT-Account-ID'] = this.accountId;
       }
     }
-
-    const instructions = systemParts.length > 0 ? systemParts.join('\n\n') : undefined;
-    return { instructions, items };
+    return { ...headers, ...this.extraHeaders };
   }
 
-  private translateTools(tools: ToolSchema[]): ResponsesTool[] {
-    return tools.map((t) => ({
-      type: 'function' as const,
-      name: t.name,
-      description: t.description,
-      strict: false,
-      parameters: t.inputSchema,
-    }));
-  }
+  private async dispatch(body: WireRequestBody): Promise<Response> {
+    const headers    = this.buildHeaders();
+    const serialised = JSON.stringify(body);
+    const totalTries = this.maxRetries + 1;
 
-  private parseResponse(json: ResponsesAPIResponse): ProviderCallOutput {
-    let output = Array.isArray(json.output) ? json.output : [];
+    let lastErr: unknown = null;
 
-    // Backfill: when stream recovery left output empty but output_text is set,
-    // synthesize a message item so downstream parsing has something to read.
-    if (output.length === 0 && typeof json.output_text === 'string' && json.output_text.trim()) {
-      output = [
-        {
-          type: 'message',
-          role: 'assistant',
-          content: [{ type: 'output_text', text: json.output_text.trim() }],
-          status: 'completed',
-        } as ResponsesOutputMessage,
-      ];
-    }
+    for (let attempt = 0; attempt < totalTries; attempt++) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), this.timeoutMs);
 
-    const status = (json.status ?? '').toLowerCase();
-    if (status === 'failed' || status === 'cancelled') {
-      throw new ProviderError(
-        `Provider ${this.providerName} returned status='${status}'`,
-        this.providerName,
-        undefined,
-        json,
-      );
-    }
-
-    if (output.length === 0) {
-      throw new ProviderError(
-        `Provider ${this.providerName} returned no output items`,
-        this.providerName,
-        undefined,
-        json,
-      );
-    }
-
-    const textParts: string[] = [];
-    const toolCalls: ToolCallRequest[] = [];
-
-    for (const item of output) {
-      const itemType = (item as { type: string }).type;
-      const itemStatus =
-        typeof (item as { status?: string }).status === 'string'
-          ? ((item as { status: string }).status).toLowerCase()
-          : undefined;
-
-      if (itemType === 'message') {
-        const msg = item as ResponsesOutputMessage;
-        const text = (msg.content ?? [])
-          .filter((c) => c.type === 'output_text' && typeof c.text === 'string')
-          .map((c) => c.text as string)
-          .join('');
-        if (text) textParts.push(text);
-      } else if (itemType === 'function_call') {
-        // Skip in-flight items.
-        if (itemStatus === 'queued' || itemStatus === 'in_progress' || itemStatus === 'incomplete') {
+      let response: Response;
+      try {
+        response = await fetch(this.endpoint, {
+          method:  'POST',
+          headers,
+          body:    serialised,
+          signal:  controller.signal,
+        });
+      } catch (err: any) {
+        clearTimeout(timer);
+        if (err?.name === 'AbortError') {
+          lastErr = new ProviderTimeoutError(this.providerName, this.timeoutMs);
+        } else {
+          lastErr = new ProviderError(
+            `Network failure calling ${this.providerName}: ${err?.message ?? err}`,
+            this.providerName,
+            undefined,
+            err,
+            true,
+          );
+        }
+        if (attempt < totalTries - 1) {
+          await sleep(backoffMs(attempt));
           continue;
         }
-        const fc = item as ResponsesOutputFunctionCall;
-        const argsRaw = fc.arguments;
-        let args: Record<string, unknown> = {};
-        if (typeof argsRaw === 'string') {
-          try {
-            const parsed = argsRaw.trim() === '' ? {} : JSON.parse(argsRaw);
-            if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-              args = parsed as Record<string, unknown>;
-            }
-          } catch {
-            console.warn(
-              `[${this.providerName}] failed to JSON.parse function_call arguments for ${fc.name}; falling back to {}`,
-            );
-            args = {};
-          }
-        } else if (argsRaw && typeof argsRaw === 'object' && !Array.isArray(argsRaw)) {
-          args = argsRaw as Record<string, unknown>;
+        throw lastErr;
+      }
+      clearTimeout(timer);
+
+      if (response.ok) return response;
+
+      const status = response.status;
+      const raw    = await safeReadBody(response);
+
+      if (status === 429) {
+        if (attempt < totalTries - 1) {
+          await sleep(backoffMs(attempt));
+          continue;
         }
-        const callId = (fc.call_id || fc.id || '').trim();
-        toolCalls.push({
-          id: callId || `call_${Math.random().toString(36).slice(2, 10)}`,
-          name: fc.name,
-          arguments: args,
+        throw new ProviderRateLimitError(this.providerName, raw);
+      }
+
+      if (status >= 500 && status < 600) {
+        if (attempt < totalTries - 1) {
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw new ProviderError(
+          `Provider ${this.providerName} server error ${status}`,
+          this.providerName,
+          status,
+          raw,
+          true,
+        );
+      }
+
+      // 4xx (auth, content policy, malformed) — fail fast.
+      throw new ProviderError(
+        `Provider ${this.providerName} request failed (${status})`,
+        this.providerName,
+        status,
+        raw,
+        false,
+      );
+    }
+
+    throw lastErr instanceof Error
+      ? lastErr
+      : new ProviderError(`Provider ${this.providerName} failed after retries`, this.providerName);
+  }
+}
+
+// ── Encoders ────────────────────────────────────────────────────────────
+
+function toWireTool(t: ToolSchema): WireFunctionTool {
+  return {
+    type:        'function',
+    name:        t.name,
+    description: t.description,
+    strict:      false,
+    parameters:  t.inputSchema,
+  };
+}
+
+/**
+ * Convert Aiden's flat `Message[]` into Responses-API wire shape:
+ *   - Multiple system messages collapse into a single `instructions` string.
+ *   - User messages → `message` items with `input_text` parts.
+ *   - Assistant messages → `message` items with `output_text` parts;
+ *     when they carry tool calls, those become separate `function_call`
+ *     items in the SAME order they appeared on the assistant turn.
+ *   - Tool replies → `function_call_output` items, referencing the
+ *     matching `call_id`.
+ */
+function encodeMessages(messages: Message[]): {
+  instructions: string;
+  items:        WireInputItem[];
+} {
+  const sysParts: string[]      = [];
+  const items:    WireInputItem[] = [];
+
+  for (const msg of messages) {
+    if (msg.role === 'system') {
+      sysParts.push(msg.content);
+      continue;
+    }
+    if (msg.role === 'user') {
+      items.push({
+        type:    'message',
+        role:    'user',
+        content: [{ type: 'input_text', text: msg.content }],
+      });
+      continue;
+    }
+    if (msg.role === 'tool') {
+      items.push({
+        type:    'function_call_output',
+        call_id: msg.toolCallId,
+        output:  msg.content,
+      });
+      continue;
+    }
+    // assistant
+    if (msg.content && msg.content.length > 0) {
+      items.push({
+        type:    'message',
+        role:    'assistant',
+        content: [{ type: 'output_text', text: msg.content }],
+      });
+    }
+    if (msg.toolCalls && msg.toolCalls.length > 0) {
+      for (const tc of msg.toolCalls) {
+        items.push({
+          type:      'function_call',
+          call_id:   tc.id,
+          name:      tc.name,
+          arguments: JSON.stringify(tc.arguments ?? {}),
         });
       }
-      // 'reasoning' items intentionally ignored at v4 minimum scope (Phase 13 will replay them).
     }
-
-    let finishReason: ProviderCallOutput['finishReason'];
-    if (toolCalls.length > 0) {
-      finishReason = 'tool_use';
-    } else if (status === 'incomplete') {
-      const reason = json.incomplete_details?.reason;
-      finishReason = reason === 'max_output_tokens' ? 'length' : 'stop';
-    } else {
-      finishReason = 'stop';
-    }
-
-    const usage = json.usage ?? {};
-    const cachedTokens =
-      usage.cached_tokens ?? usage.input_tokens_details?.cached_tokens;
-
-    return {
-      content: textParts.length > 0 ? textParts.join('\n') : '',
-      toolCalls,
-      finishReason,
-      usage: {
-        inputTokens: usage.input_tokens ?? 0,
-        outputTokens: usage.output_tokens ?? 0,
-        ...(cachedTokens != null ? { cacheReadTokens: cachedTokens } : {}),
-      },
-      raw: json,
-    };
   }
 
-  /**
-   * Phase 21 #6c — drain the Codex Responses-API SSE stream.
-   *
-   * Phase 21 #6d — three-stage recovery, ported verbatim from Hermes
-   * `run_agent.py:_run_codex_stream` lines 5895-5917. The Codex backend
-   * (chatgpt.com/backend-api/codex) regularly emits `response.completed`
-   * with an EMPTY `output[]` array even when items were streamed via
-   * `response.output_item.done` or rendered as `output_text.delta`. We
-   * must NOT trust `completed.response.output` blindly — instead:
-   *
-   *   1. If `response.completed.response.output` is non-empty → use it.
-   *   2. Else if `output_item.done` events were collected → use them.
-   *   3. Else if `output_text.delta` accumulated → synthesize one
-   *      assistant message item from the joined text.
-   *   4. Else → return empty (caller throws "no output items").
-   *
-   * Set AIDEN_DEBUG_CODEX=1 to log every event type seen — useful when
-   * a future Codex backend adds new event types we haven't accounted
-   * for. We log unknowns rather than silently drop, on the principle
-   * that provider adapters should be treated as hostile boundaries.
-   */
-  private async collectStreamedResponse(
-    response: Response,
-  ): Promise<ResponsesAPIResponse> {
-    if (!response.body) {
-      throw new ProviderError(
-        `Provider ${this.providerName} returned a streaming response with no body`,
-        this.providerName,
-      );
+  return { instructions: sysParts.join('\n\n').trim(), items };
+}
+
+// ── Decoders ────────────────────────────────────────────────────────────
+
+function decodeWireResponse(
+  wire:         WireResponseShape,
+  providerName: string,
+): ProviderCallOutput {
+  const status = wire.status ?? 'completed';
+  if (status === 'failed') {
+    throw new ProviderError(
+      `Provider ${providerName} reported status=failed`,
+      providerName,
+      undefined,
+      wire,
+      false,
+    );
+  }
+
+  const outputs = Array.isArray(wire.output) ? wire.output : [];
+  let textParts: string[]            = [];
+  const toolCalls: ToolCallRequest[] = [];
+
+  for (const item of outputs) {
+    if (item.type === 'message') {
+      const msg = item as WireOutputMessage;
+      if (Array.isArray(msg.content)) {
+        for (const part of msg.content) {
+          if ((part.type === 'output_text' || part.type === 'text')
+              && typeof part.text === 'string'
+              && part.text.length > 0) {
+            textParts.push(part.text);
+          }
+        }
+      }
+    } else if (item.type === 'function_call') {
+      const fc = item as WireOutputFunctionCall;
+      const id = fc.call_id ?? fc.id ?? '';
+      const args = typeof fc.arguments === 'string'
+        ? parseToolArgs(fc.arguments)
+        : (fc.arguments && typeof fc.arguments === 'object' && !Array.isArray(fc.arguments)
+            ? (fc.arguments as Record<string, unknown>)
+            : {});
+      toolCalls.push({ id, name: fc.name, arguments: args });
     }
-    const debug = process.env.AIDEN_DEBUG_CODEX === '1';
-    const aggregate: ResponsesAPIResponse = { output: [], status: undefined };
-    // track collected `output_item.done` items separately
-    // from the in-progress aggregate so backfill can use them when
-    // `completed.response.output` is empty.
-    const collectedItems: ResponsesOutputItem[] = [];
-    // Per-item-id text buffer — `output_text.delta` events reference
-    // an item_id that matches an earlier `output_item.added`.
-    const textBuffers = new Map<string, string>();
-    // Joined text deltas across all items.
-    const textParts: string[] = [];
-    let hasToolCalls = false;
-    let final: ResponsesAPIResponse | null = null;
-    let terminalEvent: string | null = null; // 'completed' | 'incomplete' | 'failed'
+    // Reasoning / unknown items are ignored at this layer — the Responses
+    // API ships internal model state we don't need to surface.
+  }
 
-    for await (const payload of parseSseStream(response.body)) {
-      let event: {
-        type?: string;
-        response?: ResponsesAPIResponse;
-        item?: ResponsesOutputItem;
-        item_id?: string;
-        delta?: string;
-        error?: { message?: string };
-      };
-      try {
-        event = JSON.parse(payload);
-      } catch {
-        if (debug) {
-          // eslint-disable-next-line no-console
-          console.warn(`[codex-debug] unparseable SSE payload: ${payload.slice(0, 200)}`);
-        }
-        continue;
-      }
-      const t = event.type ?? '';
-      if (debug) {
-        // Per-event detail to distinguish (A) function_call items vs.
-        // (B) Harmony-tokenized text leak vs. (C) clean confabulation.
-        // Bug B SSE diagnostics — see
-        // docs/sprint/_internal/hermes-codex-dispatch-audit.md.
-        const item = event.item as
-          | { type?: string; status?: string; name?: string; arguments?: unknown; content?: unknown }
-          | undefined;
-        const parts: string[] = [`event=${t}`];
-        if (item?.type) parts.push(`item.type=${item.type}`);
-        if (item?.status) parts.push(`item.status=${item.status}`);
-        if (item?.name) parts.push(`item.name=${item.name}`);
-        if (item?.type === 'function_call' && item.arguments != null) {
-          const args = typeof item.arguments === 'string'
-            ? item.arguments
-            : JSON.stringify(item.arguments);
-          parts.push(`item.args=${args.slice(0, 120)}`);
-        }
-        if (typeof event.delta === 'string' && event.delta.length > 0) {
-          parts.push(`delta=${JSON.stringify(event.delta.slice(0, 80))}`);
-        }
-        // eslint-disable-next-line no-console
-        console.warn(`[codex-debug] ${parts.join(' ')}`);
-      }
+  // Stage-3-equivalent for the JSON path: empty output[] but a top-level
+  // `output_text` present (some Responses API replies do this) → synthesise
+  // a message body so callers see the text.
+  if (textParts.length === 0 && toolCalls.length === 0
+      && typeof wire.output_text === 'string' && wire.output_text.length > 0) {
+    textParts = [wire.output_text];
+  }
 
-      if (t === 'response.completed' && event.response) {
-        final = event.response;
-        terminalEvent = 'completed';
-        applyTextBuffers(final, textBuffers);
-        continue;
-      }
-      if (t === 'response.incomplete') {
-        //
-        // to backfill rather than throwing.
-        final = event.response ?? null;
-        terminalEvent = 'incomplete';
-        if (final) applyTextBuffers(final, textBuffers);
-        continue;
-      }
-      if (t === 'response.failed' || t === 'response.error') {
-        const msg = event.error?.message ?? `${t} event from Codex stream`;
-        throw new ProviderError(
-          `Provider ${this.providerName} streaming failed: ${msg}`,
-          this.providerName,
-        );
-      }
-      if (t === 'response.created' && event.response) {
-        Object.assign(aggregate, event.response);
-        if (!Array.isArray(aggregate.output)) aggregate.output = [];
-        continue;
-      }
-      if (t === 'response.output_item.added' && event.item) {
-        if (!Array.isArray(aggregate.output)) aggregate.output = [];
-        aggregate.output.push(event.item);
-        if ((event.item as { type?: string }).type === 'function_call') {
-          hasToolCalls = true;
-        }
-        continue;
-      }
-      if (t === 'response.output_item.done' && event.item) {
-        if (!Array.isArray(aggregate.output)) aggregate.output = [];
-        const idx = aggregate.output.findIndex(
-          (o) => (o as { id?: string }).id === (event.item as { id?: string }).id,
-        );
-        if (idx >= 0) aggregate.output[idx] = event.item;
-        else aggregate.output.push(event.item);
-        // collectedItems is the backfill source of truth.
-        collectedItems.push(event.item);
-        if ((event.item as { type?: string }).type === 'function_call') {
-          hasToolCalls = true;
-        }
-        continue;
-      }
-      if (t === 'response.output_text.delta' && typeof event.delta === 'string') {
-        const id = event.item_id ?? '';
-        textBuffers.set(id, (textBuffers.get(id) ?? '') + event.delta);
-        textParts.push(event.delta);
-        continue;
-      }
-      // any event_type containing `function_call`
-      // signals tool-call mode; suppress synthesis from text deltas.
-      if (t.includes('function_call')) {
-        hasToolCalls = true;
-        continue;
-      }
-      // All other events (reasoning.delta, output_text.done,
-      // content_part.added, refusal, audio, ...) — log when debug is
-      // on, otherwise quietly accept. Unknown types must NOT throw —
-      // forward-compat with future Codex SSE additions.
-      if (debug && t.length > 0) {
-        // eslint-disable-next-line no-console
-        console.warn(`[codex-debug] unhandled event type: ${t}`);
-      }
-    }
+  return {
+    content:      textParts.join(''),
+    toolCalls,
+    finishReason: mapFinishReason(wire, toolCalls.length > 0),
+    usage:        decodeUsage(wire.usage),
+    raw:          wire,
+  };
+}
 
-    // ─── End-of-stream summary (Bug B diagnostic) ───
-    // Distinguish between (A) real function_call items in stream,
-    // (B) Harmony-tokenized text leak, (C) clean confabulation.
-    if (debug) {
-      const aggregateText = textParts.join('');
-      const collectedTypes = collectedItems
-        .map((i) => (i as { type?: string }).type ?? 'unknown')
-        .join(',');
-      const finalOut = Array.isArray((final ?? aggregate).output)
-        ? (final ?? aggregate).output
-        : [];
-      const finalTypes = (finalOut ?? [])
-        .map((i) => (i as { type?: string }).type ?? 'unknown')
-        .join(',');
-      const harmonyHit = /(?:^|[\s>|])to=functions\.[A-Za-z_][\w.]*/i.test(
-        aggregateText,
-      );
-      // eslint-disable-next-line no-console
-      console.warn(
-        `[codex-debug] ===SUMMARY=== terminal=${terminalEvent} ` +
-          `final.output.types=[${finalTypes}] ` +
-          `collected.types=[${collectedTypes}] ` +
-          `hasToolCalls=${hasToolCalls} ` +
-          `text.len=${aggregateText.length} ` +
-          `harmonyLeak=${harmonyHit} ` +
-          `text.head=${JSON.stringify(aggregateText.slice(0, 200))}`,
-      );
-    }
+function mapFinishReason(
+  wire:         WireResponseShape,
+  hasToolCalls: boolean,
+): ProviderCallOutput['finishReason'] {
+  const status = wire.status ?? 'completed';
+  if (status === 'incomplete') {
+    const reason = wire.incomplete_details?.reason ?? '';
+    if (reason === 'max_output_tokens' || reason === 'max_tokens') return 'length';
+  }
+  if (hasToolCalls) return 'tool_use';
+  return 'stop';
+}
 
-    // ─── Three-stage recovery ───
-    const result: ResponsesAPIResponse = final ?? aggregate;
-    const out = Array.isArray(result.output) ? result.output : [];
+function decodeUsage(u: WireResponseShape['usage']): ProviderCallOutput['usage'] {
+  const out: ProviderCallOutput['usage'] = {
+    inputTokens:  u?.input_tokens  ?? 0,
+    outputTokens: u?.output_tokens ?? 0,
+  };
+  // Responses API reports cached tokens either at top-level usage or
+  // inside `input_tokens_details`. Accept either; prefer the nested one.
+  const cached =
+    u?.input_tokens_details?.cached_tokens ?? u?.cached_tokens;
+  if (typeof cached === 'number') {
+    out.cacheReadTokens = cached;
+  }
+  return out;
+}
 
-    // Stage 1: trust completed.output if non-empty.
-    if (out.length > 0) return result;
+function parseToolArgs(s: string): Record<string, unknown> {
+  if (!s) return {};
+  try {
+    const v = JSON.parse(s);
+    return (v && typeof v === 'object' && !Array.isArray(v))
+      ? (v as Record<string, unknown>)
+      : {};
+  } catch {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[codexResponsesAdapter] function_call.arguments is not valid JSON; ' +
+      'falling back to {}',
+    );
+    return {};
+  }
+}
 
-    // Stage 2: backfill from collected output_item.done events.
-    if (collectedItems.length > 0) {
-      if (debug) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[codex-debug] backfilled ${collectedItems.length} output_item.done events into empty completed.output`,
-        );
-      }
-      return { ...result, output: collectedItems };
-    }
+// ── SSE aggregation (Codex backend) ─────────────────────────────────────
+//
+// Recognised event types:
+//
+//   response.created                         — informational, capture initial response
+//   response.in_progress                     — informational
+//   response.output_item.added               — open an item
+//   response.output_item.done                — close an item; collect for backfill
+//   response.output_text.delta               — append text to per-item text buffer
+//   response.function_call_arguments.delta   — append args to per-item args buffer
+//   response.completed                       — terminal, carries `response`
+//   response.incomplete                      — terminal, recoverable
+//   response.failed / response.error         — terminal, throw
 
-    // Stage 3: synthesize a single assistant message from joined deltas.
-    if (textParts.length > 0 && !hasToolCalls) {
-      const assembled = textParts.join('');
-      if (debug) {
-        // eslint-disable-next-line no-console
-        console.warn(
-          `[codex-debug] synthesized 1 message item from ${textParts.length} deltas (${assembled.length} chars)`,
-        );
-      }
+interface AggregationState {
+  finalResponse:  WireResponseShape | null;
+  collectedItems: WireOutputItem[];
+  textBuffers:    Map<string, string>;
+  argsBuffers:    Map<string, string>;
+  failed:         string | null;
+}
+
+async function aggregateSseEvents(reply: Response): Promise<WireResponseShape> {
+  if (!reply.body) {
+    throw new ProviderError(
+      'Codex stream had no body',
+      'codex_responses',
+      reply.status,
+      undefined,
+      true,
+    );
+  }
+  const debug = process.env.AIDEN_DEBUG_CODEX === '1';
+  const state: AggregationState = {
+    finalResponse:  null,
+    collectedItems: [],
+    textBuffers:    new Map(),
+    argsBuffers:    new Map(),
+    failed:         null,
+  };
+
+  for await (const payload of readSseDataLines(reply.body)) {
+    if (!payload || payload === '[DONE]') continue;
+    let event: any;
+    try { event = JSON.parse(payload); }
+    catch { continue; }
+
+    handleSseEvent(event, state, debug);
+    if (state.failed) break;
+  }
+
+  if (state.failed) {
+    throw new ProviderError(
+      `Codex stream reported failure: ${state.failed}`,
+      'codex_responses',
+      undefined,
+      state.failed,
+      false,
+    );
+  }
+
+  // Three-stage recovery:
+  //
+  // Stage 1 — completed.response.output is non-empty.
+  if (state.finalResponse && Array.isArray(state.finalResponse.output)
+      && state.finalResponse.output.length > 0) {
+    applyTextBuffers(state.finalResponse.output, state.textBuffers);
+    return state.finalResponse;
+  }
+
+  // Stage 2 — completed.output is empty but we collected items via
+  // `output_item.done`. Build a synthetic shape from those.
+  if (state.collectedItems.length > 0) {
+    const shape: WireResponseShape = {
+      output: state.collectedItems,
+      status: state.finalResponse?.status ?? 'completed',
+      usage:  state.finalResponse?.usage,
+      ...(state.finalResponse?.incomplete_details
+        ? { incomplete_details: state.finalResponse.incomplete_details }
+        : {}),
+    };
+    applyTextBuffers(shape.output!, state.textBuffers);
+    return shape;
+  }
+
+  // Stage 3 — only text deltas accumulated. Synthesise a single message.
+  if (state.textBuffers.size > 0) {
+    const joined = Array.from(state.textBuffers.values()).join('');
+    if (joined.length > 0) {
       return {
-        ...result,
         output: [
           {
-            type: 'message',
-            role: 'assistant',
-            status: 'completed',
-            content: [{ type: 'output_text', text: assembled }],
-          } as ResponsesOutputItem,
+            type:    'message',
+            role:    'assistant',
+            content: [{ type: 'output_text', text: joined }],
+          } as WireOutputMessage,
         ],
+        status: state.finalResponse?.status ?? 'completed',
+        usage:  state.finalResponse?.usage,
       };
     }
-
-    // Genuine empty — caller's parseResponse() throws the existing
-    // "no output items" error. Honest framing: if we got here with
-    // terminalEvent='incomplete', surface that.
-    if (terminalEvent === 'incomplete') {
-      result.status = result.status ?? 'incomplete';
-    }
-    return result;
   }
 
-  private async fetchWithTimeout(
-    url: string,
-    headers: Record<string, string>,
-    body: Record<string, unknown>,
-  ): Promise<Response> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    try {
-      return await fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(body),
-        signal: controller.signal,
-      });
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') {
-        throw new ProviderTimeoutError(this.providerName, this.timeoutMs);
+  // Nothing recoverable — return whatever the final response gave us
+  // (empty output → caller sees content='', finishReason='stop' or
+  // 'length' depending on status).
+  return state.finalResponse ?? { output: [] };
+}
+
+function handleSseEvent(
+  event: any,
+  state: AggregationState,
+  debug: boolean,
+): void {
+  const type = String(event?.type ?? '');
+  switch (type) {
+    case 'response.created':
+    case 'response.in_progress':
+      // Capture incrementally; the `completed` event will overwrite.
+      if (event.response) state.finalResponse = event.response;
+      return;
+
+    case 'response.output_item.added':
+      // We don't need to track the open item — `output_item.done` carries
+      // the final state. But if the added item has an id and is a
+      // message, the text buffer keys align with it.
+      return;
+
+    case 'response.output_item.done': {
+      const item = event.item;
+      if (item && typeof item === 'object') {
+        state.collectedItems.push(item as WireOutputItem);
       }
-      throw err;
-    } finally {
-      clearTimeout(timer);
+      return;
+    }
+
+    case 'response.output_text.delta': {
+      const itemId = typeof event.item_id === 'string' ? event.item_id : '';
+      const delta  = typeof event.delta   === 'string' ? event.delta   : '';
+      if (delta.length === 0) return;
+      const prev = state.textBuffers.get(itemId) ?? '';
+      state.textBuffers.set(itemId, prev + delta);
+      return;
+    }
+
+    case 'response.function_call_arguments.delta': {
+      const itemId = typeof event.item_id === 'string' ? event.item_id : '';
+      const delta  = typeof event.delta   === 'string' ? event.delta   : '';
+      if (delta.length === 0) return;
+      const prev = state.argsBuffers.get(itemId) ?? '';
+      state.argsBuffers.set(itemId, prev + delta);
+      return;
+    }
+
+    case 'response.completed':
+      if (event.response) state.finalResponse = event.response;
+      return;
+
+    case 'response.incomplete':
+      // Recoverable terminal — caller still gets whatever items collected.
+      if (event.response) state.finalResponse = event.response;
+      return;
+
+    case 'response.failed':
+    case 'response.error': {
+      const msg =
+        (event.error && typeof event.error.message === 'string' && event.error.message)
+        || (event.response && typeof event.response.status === 'string' && event.response.status)
+        || 'unknown';
+      state.failed = String(msg);
+      return;
+    }
+
+    default:
+      if (debug) {
+        // eslint-disable-next-line no-console
+        console.warn(`[codexResponsesAdapter] unknown SSE event: ${type}`);
+      }
+  }
+}
+
+/**
+ * Fill in empty `message` content using accumulated text buffers. Items
+ * whose `content` already has text parts are left alone — the streamed
+ * `output_item.done` may have arrived with everything baked in.
+ */
+function applyTextBuffers(
+  items:    WireOutputItem[],
+  buffers:  Map<string, string>,
+): void {
+  for (const item of items) {
+    if (item.type !== 'message') continue;
+    const msg   = item as WireOutputMessage;
+    const id    = typeof msg.id === 'string' ? msg.id : '';
+    const buf   = buffers.get(id);
+    if (!buf) continue;
+    const arr   = Array.isArray(msg.content) ? msg.content : (msg.content = []);
+    const hasText = arr.some(
+      (p) => (p.type === 'output_text' || p.type === 'text')
+             && typeof p.text === 'string'
+             && p.text.length > 0,
+    );
+    if (!hasText) {
+      arr.push({ type: 'output_text', text: buf });
     }
   }
+}
 
-  private async safeReadText(response: Response): Promise<string> {
-    try {
-      return await response.text();
-    } catch {
-      return '';
+// ── SSE line reader (private, tighter than chatCompletions's parser) ────
+
+async function* readSseDataLines(
+  body: ReadableStream<Uint8Array>,
+): AsyncGenerator<string, void, void> {
+  const reader  = body.getReader();
+  const decoder = new TextDecoder('utf-8');
+  let buffer    = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (value) buffer += decoder.decode(value, { stream: true });
+      if (done) {
+        buffer += decoder.decode();
+        if (buffer.length > 0) {
+          for (const payload of extractDataLines(buffer + '\n')) yield payload;
+        }
+        return;
+      }
+      const lastNewline = buffer.lastIndexOf('\n');
+      if (lastNewline === -1) continue;
+      const ready = buffer.slice(0, lastNewline + 1);
+      buffer      = buffer.slice(lastNewline + 1);
+      for (const payload of extractDataLines(ready)) yield payload;
+    }
+  } finally {
+    try { reader.releaseLock(); } catch { /* may already be released */ }
+  }
+}
+
+function* extractDataLines(block: string): Generator<string, void, void> {
+  for (const rawLine of block.split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    if (line.length === 0)            continue;
+    if (line.startsWith(':'))         continue;   // SSE comment
+    if (line.startsWith('data:')) {
+      yield line.slice(5).replace(/^ /, '');
     }
   }
+}
 
-  private backoffMs(attempt: number): number {
-    return 1000 * attempt;
+// ── Misc helpers ────────────────────────────────────────────────────────
+
+async function readJsonBody(
+  reply:        Response,
+  providerName: string,
+): Promise<WireResponseShape> {
+  const text = await reply.text();
+  try {
+    return JSON.parse(text) as WireResponseShape;
+  } catch {
+    throw new ProviderError(
+      `Provider ${providerName} returned non-JSON body`,
+      providerName,
+      reply.status,
+      text,
+      false,
+    );
   }
+}
 
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+function backoffMs(attempt: number): number {
+  const base   = BACKOFF_BASE_MS * 2 ** attempt;
+  const jitter = Math.floor(Math.random() * Math.min(BACKOFF_BASE_MS, base / 4));
+  return base + jitter;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function safeReadBody(r: Response): Promise<unknown> {
+  try {
+    const text = await r.text();
+    try { return JSON.parse(text); } catch { return text; }
+  } catch {
+    return null;
   }
 }
