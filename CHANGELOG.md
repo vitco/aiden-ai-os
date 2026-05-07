@@ -1,3 +1,107 @@
+## v4.0.0 — 2026-05-07 · "REWRITE"
+
+A from-scratch rewrite of Aiden's core. Every provider adapter, prompt
+builder, OAuth flow, and agent loop has been rewritten under full
+Aiden copyright (no dual attribution). Visual polish lands as a
+sectioned, neofetch-style boot card.
+
+### Core rewrite
+
+- 🧠 **Single-loop agent** (`core/v4/aidenAgent.ts`) — sequential tool
+  dispatch, 90-turn cap with caution at 70 % and warning at 90 %,
+  empty-response retry guard (cap 1), skill-enforcement tracker
+  (cap 2), URL-provenance tracker (cap 2), memory dirty-bit
+  invalidation, post-loop honesty enforcement, SkillTeacher tier-3
+  propose / tier-4 auto.
+- 🔌 **Provider rewrite** — `providers/v4/` adapters for Anthropic
+  (`/v1/messages`), OpenAI Chat Completions, OpenAI Responses (Codex
+  backend), and Ollama prompt-tools, all clean-room with full Aiden
+  copyright. Wire-format parity with the upstream APIs (system block
+  arrays, `mcp_` tool prefix on OAuth, identity sanitisation,
+  three-stage SSE recovery, `claude-cli` user agent).
+- 🛡 **Provider fallback** — 6-slot self-healing chain
+  (`together → together-fallback → groq × 4`) with cooldown +
+  least-used selection. Sub-second slot advancement on rate-limit.
+- 🔒 **OAuth subscriptions** — Claude Pro PKCE copy-paste flow and
+  ChatGPT Plus device-code flow route to subscription quota instead
+  of pay-as-you-go. Per-provider tokens stored at
+  `<aiden-home>/auth/<provider>.json`.
+- 🧱 **Prompt builder rewrite** — 8-slot fixed composition (SOUL.md →
+  personality → memory → user → skills → llama-hint → budget →
+  environment) with consistent rule glyphs and frame-deduped
+  identity blocks.
+
+### New features
+
+- 🕒 **Cron scheduler** — `/cron add|list|pause|resume|delete|run`
+  with the `croner` engine, atomic state writes, output capture, and
+  5/6-field cron + `@daily`/`@hourly` shortcodes.
+- 🤖 **Inline JSON tool-call recovery** — open-source models (Llama,
+  NVIDIA-Llama, Qwen) sometimes emit raw JSON in answer text instead
+  of using the tool slot. The chat-completions adapter detects these,
+  validates the name against the request's tool list, and dispatches
+  as a proper tool call. Code-fenced examples are left alone.
+- 🎨 **Neofetch boot card** — banner + tagline + four status pills
+  (core / mode / model / memory) + Environment + Capabilities
+  two-column block + parchment credits footer + bottom prompt hint.
+  Auto-detects OS (Windows 11 / macOS Sonoma / Linux distro) and
+  shell (`PowerShell + WSL2` / `bash` / `zsh` / …).
+- 🎙 **Spinner phrases** — 20-entry rotating pool (Thinking · Brewing
+  · Cogitating · Brain yakka · Conjuring · …) sampled once per turn.
+- 🪶 **Env-gated polish** — `AIDEN_UI_ICONS=1` for emoji tool-row
+  icons, `AIDEN_UI_TIMESTAMPS=1` for HH:MM:SS line prefix.
+- 📋 **Per-turn rule separator** — single muted rule between turns,
+  `▲` user prompt prefix, `┃ Aiden` single-line assistant header
+  (parity between streaming and non-streaming).
+
+### Tools and skills
+
+- 🧰 **42 built-in tools across 11 categories** — web (6), files (7),
+  browser via Playwright (10), sessions (2), skills (4), memory (3),
+  process (5), system (3), terminal (1), code (1), MCP (1).
+- 📚 **68 bundled skills** — clean SKILL.md format, manifest-driven
+  restore, security pre-write scan, opt-in skill-teacher proposals.
+
+### Channel adapters
+
+- 📡 **8 channels working**: Discord, Slack, WhatsApp, Email
+  (IMAP+SMTP), Webhook, Twilio SMS, iMessage (macOS), Signal. Single
+  agent loop, multiple front doors.
+
+### Plugins
+
+- 🔌 **3 bundled plugins**: Chrome DevTools Protocol bridge
+  (`aiden-plugin-cdp-browser`), Claude Pro OAuth, ChatGPT Plus
+  OAuth. Plugin loader with permission-state machine.
+
+### Security moat (10 modules)
+
+- ✅ Tiered approval engine (safe / caution / dangerous)
+- ✅ Dangerous-command pattern classifier
+- ✅ Honesty enforcement (post-loop scan + rewrite)
+- ✅ Memory guard (rejects unverified writes)
+- ✅ Planner-guard tool narrowing
+- ✅ SSRF-safe URL fetcher
+- ✅ Tirith pre-write secret/PII scanner
+- ✅ Skill-teacher tier-3 propose / tier-4 auto
+- ✅ Pro-license gate
+- ✅ Provider-chain glue
+
+### Breaking changes from v3.x
+
+- `aiden-os` npm package renamed to `aiden-runtime`. Existing global
+  installs need `npm uninstall -g aiden-os && npm install -g aiden-runtime`.
+- Slash commands consolidated. v3 commands like `/switch`, `/budget`,
+  `/memory`, `/profile`, `/permissions` are gone — use `/model`,
+  `/usage`, `/identity` respectively. See `/help` for the v4 list.
+- Subagent fanout removed (was a parallel-fanout branch in v3). v4
+  is single-loop only; subagent support deferred.
+- Skill registry install changed — auto-fetch from external repos
+  held pending license review. Skills install via `/skills install
+  <local-path-or-url>` only at v4.0.
+
+---
+
 ## v3.13.0 — 2026-04-27
 
 **Community & Ecosystem**
@@ -347,7 +451,7 @@ bridge — delegate sub-tasks to other coding agents
 - `fix(chat)` — status fast-path bypasses agent loop for session/system status queries
 - `fix(tools)` — introspection category + classifier routes self-queries to slash-mirror tools
 - `fix(fastpath)` — greeting preamble wired; bypasses planner for instant response
-- `fix(help)` — rename Hermes→Core in help panels; tag unimplemented commands
+- `fix(help)` — rename agent-pane label in help panels; tag unimplemented commands
 - `fix(skills)` — `/skills recommend` works with no args, infers from history
 - `fix(skills)` — Source column shows origin (aiden/community/local), not approval state
 - `fix(rewind)` — `/rewind` alone undoes last exchange, no mark required
