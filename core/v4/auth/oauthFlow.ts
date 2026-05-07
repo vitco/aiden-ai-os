@@ -1,186 +1,145 @@
 /**
- * Copyright (c) 2026 Shiva Deore (Taracod).
- * Licensed under AGPL-3.0. See LICENSE for details.
+ * Aiden v4 — local-first AI agent
+ * Copyright (C) 2026 Shiva Deore (Taracod)
  *
- * Aiden — local-first agent.
- *
- * Portions adapted from NousResearch/hermes-agent (MIT).
- * Original copyright (c) NousResearch.
+ * Licensed under AGPL-3.0-or-later. See LICENSE.
  */
 /**
- * core/v4/auth/oauthFlow.ts — Aiden v4.0.0 (Phase 18)
+ * core/v4/auth/oauthFlow.ts
  *
- * Provider-agnostic OAuth flow primitives. Two shapes are supported, both
- * direct ports of Hermes (audit § Claude Pro / ChatGPT Plus):
+ * Provider-agnostic OAuth primitives. Aiden ships two flow shapes:
  *
- *   1. Out-of-band PKCE auth-code flow
- *      ---------------------------------
- *      The provider hosts the redirect URI; we open the browser, the user
- *      authorises, the provider's callback shows a `<code>#<state>` string
- *      that the user pastes back into the terminal. Used by Claude Pro.
- *      Hermes ref: agent/anthropic_adapter.py:1011-1142.
+ *   1. **Out-of-band copy-paste** (Claude Pro / Max).
+ *      We build a PKCE-protected authorize URL, open the user's browser,
+ *      they sign in on the provider's domain, copy a `<code>#<state>`
+ *      string off the redirect page, paste it back into the terminal,
+ *      and we exchange it for tokens. No callback server, no port to
+ *      open.
  *
- *   2. Device-code flow
- *      ----------------
+ *   2. **Device code** (ChatGPT Plus / OpenAI Codex).
  *      We POST for a usercode + device_auth_id, show the user a URL +
- *      short code, and poll until the provider returns 200 with an
- *      `authorization_code` + `code_verifier`. We then exchange those
- *      for tokens. Used by ChatGPT Plus / Codex.
- *      Hermes ref: hermes_cli/auth.py:3994-4136.
+ *      short code to enter on a phone or other browser, then poll the
+ *      provider until they approve. The poll yields an authorization
+ *      code + verifier we exchange for tokens.
  *
- * Both flows return the same `OAuthFlowResult` shape so the slash command
- * and setup wizard treat them uniformly. No callback server (audit §
- * "callback server (Aiden DEFERS — not applicable)").
+ * Plus refresh: feed a refresh token back to the provider's token
+ * endpoint and get a new access token + (usually) a rotated refresh
+ * token. Each provider picks form-encoded vs JSON via `RefreshConfig`.
  *
- * Network is done via the global `fetch` API (Node 18+); tests inject a
- * fake fetch via the `fetchImpl` option. No live network in unit tests.
+ * `FetchImpl` is a tight subset of the global fetch API so tests can
+ * inject a deterministic stub without touching `vi.stubGlobal`.
+ *
+ * `OAuthUserAgent` is the small UI surface the flow drives — log lines
+ * to stdout, open the browser, prompt for input, sleep between polls.
+ * The chat REPL injects a readline-backed implementation; tests inject
+ * a `vi.fn()` stub. `loadProvider.ts::openOAuthBrowserUrl` carries the
+ * cross-platform browser-launch logic; this module never touches OS
+ * spawn primitives directly.
  */
 
-import {
-  createHash,
-  randomBytes,
-} from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 
-// ─── Types ────────────────────────────────────────────────────────────
+// ── Public types ──────────────────────────────────────────────────────
 
 export interface PkceMaterial {
-  /** Random secret retained client-side; sent in the token-exchange body. */
-  verifier: string;
-  /** SHA-256(verifier), base64url, no padding — sent in the auth URL. */
+  /** 32 random bytes, urlsafe-base64, no padding (RFC 7636). */
+  verifier:  string;
+  /** SHA-256(verifier), urlsafe-base64, no padding — 43 chars. */
   challenge: string;
 }
 
-/** Result of a successful flow. Caller persists via tokenStore. */
+/** Result of a successful flow. Caller persists via `tokenStore`. */
 export interface OAuthFlowResult {
-  accessToken: string;
-  refreshToken: string | null;
-  expiresInSeconds: number;
-  /** Free-form provider-specific extras (account email, base URL override, ...). */
-  extras?: Record<string, unknown>;
+  accessToken:       string;
+  refreshToken:      string | null;
+  expiresInSeconds:  number;
+  /** Provider-specific extras (account, email, scope, token_type). */
+  extras?:           Record<string, unknown>;
 }
 
+/** Tight subset of the global fetch API — easy to stub in tests. */
 export type FetchImpl = (
   input: string,
-  init: { method: string; headers: Record<string, string>; body?: string },
+  init:  { method: string; headers: Record<string, string>; body?: string },
 ) => Promise<{ status: number; text: () => Promise<string> }>;
 
-/**
- * UI surface the flow uses to talk to the user. Tests inject a stub;
- * the chat REPL passes a readline-backed prompt.
- */
+/** UI surface the flow uses to talk to the user. */
 export interface OAuthUserAgent {
-  /** Print a line of guidance (URL, code, prompts). */
-  log(line: string): void;
-  /** Open the URL in the user's browser. May no-op in headless envs. */
-  openBrowser(url: string): Promise<void>;
-  /** Prompt the user to paste the auth code. Returns the trimmed string. */
-  prompt(question: string): Promise<string>;
-  /** Sleep for ms — abstracted so tests can advance time without setTimeout. */
-  sleep(ms: number): Promise<void>;
+  log(line: string):                    void;
+  openBrowser(url: string):             Promise<void>;
+  prompt(question: string):             Promise<string>;
+  sleep(ms: number):                    Promise<void>;
 }
 
-// ─── PKCE ─────────────────────────────────────────────────────────────
+// ── Constants ─────────────────────────────────────────────────────────
+
+const DEFAULT_TIMEOUT_MS              = 15_000;
+const DEFAULT_DEVICE_MAX_WAIT_SECONDS = 900;   // 15 min — matches OpenAI's window
+const DEFAULT_DEVICE_POLL_FLOOR_SEC   = 3;     // OpenAI's documented minimum
+
+/** Codex device-code endpoints relative to `${issuer}`. Overridable per call. */
+const DEVICE_USERCODE_PATH       = '/api/accounts/deviceauth/usercode';
+const DEVICE_POLL_PATH           = '/api/accounts/deviceauth/token';
+const DEVICE_TOKEN_EXCHANGE_PATH = '/oauth/token';
+const DEVICE_VERIFY_PATH         = '/codex/device';
+const DEVICE_REDIRECT_PATH       = '/deviceauth/callback';
+
+const CONTENT_TYPE_JSON = 'application/json';
+const CONTENT_TYPE_FORM = 'application/x-www-form-urlencoded';
+
+// ── PKCE ──────────────────────────────────────────────────────────────
 
 /**
- * Generate a fresh PKCE verifier + S256 challenge. Verifier is 32 random
- * bytes urlsafe-base64-encoded; challenge is SHA-256(verifier) urlsafe-
- * base64-encoded. Padding stripped from both (RFC 7636).
- *
- * Direct port of Hermes `_generate_pkce` (anthropic_adapter.py:1022).
+ * Mint a fresh PKCE pair. RFC 7636 §4.1: verifier = 43–128 unreserved
+ * chars; we emit 43 (32 bytes base64url, padding stripped). RFC 7636
+ * §4.2: challenge = base64url(sha256(verifier)), padding stripped.
  */
 export function generatePkce(): PkceMaterial {
-  const verifier = randomBytes(32).toString('base64url');
+  const verifier  = randomBytes(32).toString('base64url');
   const challenge = createHash('sha256').update(verifier).digest('base64url');
   return { verifier, challenge };
 }
 
-// ─── Out-of-band copy-paste flow (Claude Pro shape) ───────────────────
+// ── Copy-paste flow (Claude Pro / Max shape) ──────────────────────────
 
 export interface CopyPasteFlowConfig {
-  /** Provider's authorise endpoint, e.g. https://claude.ai/oauth/authorize. */
-  authUrl: string;
-  /** Provider's token endpoint, e.g. https://console.anthropic.com/v1/oauth/token. */
-  tokenUrl: string;
-  /** Optional fallback token URLs tried in order on the first one's failure. */
-  fallbackTokenUrls?: string[];
-  /** OAuth client id registered with the provider. */
-  clientId: string;
-  /** Whitelisted by the provider — must match what was registered. */
-  redirectUri: string;
-  /** Space-separated scope list. */
-  scope: string;
-  /** Headers added to the token-exchange request (User-Agent etc.). */
-  extraHeaders?: Record<string, string>;
-  /** Build the full authorise URL. Defaults to standard query encoding;
-   *  Claude wants `code=true` extra param so callers can override. */
-  buildAuthUrl?: (base: string, params: Record<string, string>) => string;
-  /** Timeout (ms) for the token exchange POST. Default 15s. */
-  timeoutMs?: number;
-}
-
-const DEFAULT_TIMEOUT_MS = 15000;
-
-function urlencode(params: Record<string, string>): string {
-  const sp = new URLSearchParams();
-  for (const [k, v] of Object.entries(params)) sp.append(k, v);
-  return sp.toString();
-}
-
-function defaultBuildAuthUrl(base: string, params: Record<string, string>): string {
-  return `${base}?${urlencode(params)}`;
-}
-
-async function postForTokens(
-  url: string,
-  body: string,
-  contentType: string,
-  extraHeaders: Record<string, string>,
-  fetchImpl: FetchImpl,
-  timeoutMs: number,
-): Promise<{ status: number; text: string }> {
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(), timeoutMs);
-  try {
-    const resp = await fetchImpl(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': contentType,
-        ...extraHeaders,
-      },
-      body,
-    });
-    return { status: resp.status, text: await resp.text() };
-  } finally {
-    clearTimeout(t);
-  }
+  authUrl:             string;
+  tokenUrl:            string;
+  fallbackTokenUrls?:  string[];
+  clientId:            string;
+  redirectUri:         string;
+  scope:               string;
+  /** Merged into the token-exchange request headers. */
+  extraHeaders?:       Record<string, string>;
+  /**
+   * Override the authorize-URL builder. Defaults to a vanilla
+   * `URLSearchParams` join; provided as an escape hatch in case a
+   * provider needs an unusual param ordering or a non-standard separator.
+   */
+  buildAuthUrl?:       (base: string, params: Record<string, string>) => string;
+  timeoutMs?:          number;
 }
 
 /**
- * Run the out-of-band PKCE flow. Returns the parsed token bundle.
- * Throws with a descriptive message on the user cancelling, the token
- * exchange failing, or the response missing an access_token.
+ * Drive the copy-paste flow end-to-end. Caller provides the PKCE-relevant
+ * config; we mint the verifier, walk the user through the URL, await the
+ * paste, and return parsed tokens.
+ *
+ * Throws (with descriptive messages) on:
+ *   - empty / cancelled paste
+ *   - all token endpoints failing
+ *   - response missing `access_token`
+ *   - response not parseable as JSON
  */
 export async function runCopyPasteFlow(
-  cfg: CopyPasteFlowConfig,
-  ua: OAuthUserAgent,
-  fetchImpl: FetchImpl = fetch as unknown as FetchImpl,
+  cfg:        CopyPasteFlowConfig,
+  ua:         OAuthUserAgent,
+  fetchImpl:  FetchImpl = fetch as unknown as FetchImpl,
 ): Promise<OAuthFlowResult> {
-  const { verifier, challenge } = generatePkce();
+  const pkce      = generatePkce();
+  const authUrl   = composeAuthorizeUrl(cfg, pkce);
 
-  const params: Record<string, string> = {
-    code: 'true',
-    client_id: cfg.clientId,
-    response_type: 'code',
-    redirect_uri: cfg.redirectUri,
-    scope: cfg.scope,
-    code_challenge: challenge,
-    code_challenge_method: 'S256',
-    state: verifier,
-  };
-  const buildUrl = cfg.buildAuthUrl ?? defaultBuildAuthUrl;
-  const authUrl = buildUrl(cfg.authUrl, params);
-
-  // Phase 25.1.5 diagnostic: gated by env var so it never leaks in production.
+  // Phase 25.1.5 diagnostic — gated by env so it never leaks in production.
   if (process.env.AIDEN_DEBUG_OAUTH === '1') {
     // eslint-disable-next-line no-console
     console.error(`[oauth-debug] auth url: ${authUrl}`);
@@ -192,277 +151,334 @@ export async function runCopyPasteFlow(
   ua.log('Open this URL in your browser:');
   ua.log(`  ${authUrl}`);
   ua.log('');
-
+  // Best-effort browser open. Headless / sandboxed environments swallow
+  // the failure silently — the user can still copy the printed URL.
   await ua.openBrowser(authUrl).catch(() => undefined);
 
   ua.log('After authorising, you will see a code on the page.');
-  const pasted = (
-    await ua.prompt('Paste the code (and any "#state" suffix) here: ')
-  ).trim();
+  const pasted = (await ua.prompt('Paste the code (and any "#state" suffix) here: ')).trim();
   if (!pasted) {
     throw new Error('No authorisation code entered — cancelled');
   }
-  const [code, pastedState] = pasted.split('#', 2);
-  const state = pastedState ?? '';
 
-  // Phase 18.1: per Hermes verbatim (anthropic_adapter.py:1092-1109), the
-  // LOGIN token exchange is JSON-only — the Phase 18 audit incorrectly
-  // recorded "form-encoded works; JSON also accepted." Refresh stays
-  // form-encoded (refreshTokens helper below; refresh path
-  // anthropic_adapter.py:760-821).
-  const body = JSON.stringify({
-    grant_type: 'authorization_code',
-    client_id: cfg.clientId,
+  const [code, state = ''] = pasted.split('#', 2);
+
+  // Login uses JSON body (six required fields).
+  const exchangeBody = JSON.stringify({
+    grant_type:     'authorization_code',
+    client_id:      cfg.clientId,
     code,
     state,
-    redirect_uri: cfg.redirectUri,
-    code_verifier: verifier,
+    redirect_uri:   cfg.redirectUri,
+    code_verifier:  pkce.verifier,
   });
 
-  const urls = [cfg.tokenUrl, ...(cfg.fallbackTokenUrls ?? [])];
-  let lastErr = '';
-  for (const url of urls) {
-    const { status, text } = await postForTokens(
-      url,
-      body,
-      'application/json',
-      cfg.extraHeaders ?? {},
-      fetchImpl,
-      cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    );
-    if (status === 200) {
-      return parseTokenResponse(text);
-    }
-    lastErr = `${url} → HTTP ${status}: ${text.slice(0, 200)}`;
-  }
-  throw new Error(`Token exchange failed: ${lastErr}`);
+  const endpoints = [cfg.tokenUrl, ...(cfg.fallbackTokenUrls ?? [])];
+  return tryTokenExchange(
+    endpoints,
+    exchangeBody,
+    CONTENT_TYPE_JSON,
+    cfg.extraHeaders ?? {},
+    fetchImpl,
+    cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  );
 }
 
-// ─── Device-code flow (ChatGPT Plus / Codex shape) ────────────────────
+function composeAuthorizeUrl(
+  cfg:   CopyPasteFlowConfig,
+  pkce:  PkceMaterial,
+): string {
+  // Eight params on /oauth/authorize. `code=true` is the Claude-Code
+  // "give me the code on the redirect page" flag; the rest is standard
+  // PKCE auth-code. The provider round-trips `state` back to the user
+  // on the redirect page, so using the verifier doubles as a sanity
+  // check the user pasted the right session — though tests pin state
+  // round-trip via the pasted-code split, not the URL contents.
+  const params: Record<string, string> = {
+    code:                    'true',
+    client_id:               cfg.clientId,
+    response_type:           'code',
+    redirect_uri:            cfg.redirectUri,
+    scope:                   cfg.scope,
+    code_challenge:          pkce.challenge,
+    code_challenge_method:   'S256',
+    state:                   pkce.verifier,
+  };
+  const builder = cfg.buildAuthUrl ?? defaultBuildAuthUrl;
+  return builder(cfg.authUrl, params);
+}
+
+function defaultBuildAuthUrl(base: string, params: Record<string, string>): string {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) sp.append(k, v);
+  return `${base}?${sp.toString()}`;
+}
+
+// ── Device-code flow (ChatGPT Plus / Codex shape) ─────────────────────
 
 export interface DeviceCodeFlowConfig {
-  issuer: string; // https://auth.openai.com
-  clientId: string;
-  /** Endpoint to request the user code. Defaults to `${issuer}/api/accounts/deviceauth/usercode`. */
-  userCodeEndpoint?: string;
-  /** Endpoint to poll for completion. Defaults to `${issuer}/api/accounts/deviceauth/token`. */
-  pollEndpoint?: string;
-  /** Token-exchange endpoint. Defaults to `${issuer}/oauth/token`. */
-  tokenEndpoint?: string;
-  /** Redirect URI fed into the final token exchange. Defaults to `${issuer}/deviceauth/callback`. */
-  redirectUri?: string;
-  /** URL the user opens to enter the code. Defaults to `${issuer}/codex/device`. */
+  /** Issuer base URL, e.g. `https://auth.openai.com`. */
+  issuer:               string;
+  clientId:             string;
+  userCodeEndpoint?:    string;
+  pollEndpoint?:        string;
+  tokenEndpoint?:       string;
+  redirectUri?:         string;
   userVerificationUrl?: string;
-  /** Maximum seconds to poll. Default 900 (15 min). */
-  maxWaitSeconds?: number;
-  /** Floor on the poll interval. Default 3s. */
-  minPollSeconds?: number;
-  extraHeaders?: Record<string, string>;
-  timeoutMs?: number;
+  /** Hard cap on poll wait. Default 900 (15 min). */
+  maxWaitSeconds?:      number;
+  /** Floor on the poll-interval the provider reports. Default 3. */
+  minPollSeconds?:      number;
+  extraHeaders?:        Record<string, string>;
+  timeoutMs?:           number;
 }
 
-interface DeviceCodeResponse {
-  user_code?: string;
-  device_auth_id?: string;
-  interval?: number | string;
-}
+interface UsercodeReply  { user_code?: string; device_auth_id?: string; interval?: number | string }
+interface PollReply      { authorization_code?: string; code_verifier?: string }
 
-interface DeviceCodePollResponse {
-  authorization_code?: string;
-  code_verifier?: string;
-}
-
+/**
+ * Drive the device-code flow. Returns parsed tokens or throws with a
+ * descriptive error.
+ */
 export async function runDeviceCodeFlow(
-  cfg: DeviceCodeFlowConfig,
-  ua: OAuthUserAgent,
-  fetchImpl: FetchImpl = fetch as unknown as FetchImpl,
+  cfg:        DeviceCodeFlowConfig,
+  ua:         OAuthUserAgent,
+  fetchImpl:  FetchImpl = fetch as unknown as FetchImpl,
 ): Promise<OAuthFlowResult> {
-  const userCodeEndpoint =
-    cfg.userCodeEndpoint ?? `${cfg.issuer}/api/accounts/deviceauth/usercode`;
-  const pollEndpoint =
-    cfg.pollEndpoint ?? `${cfg.issuer}/api/accounts/deviceauth/token`;
-  const tokenEndpoint = cfg.tokenEndpoint ?? `${cfg.issuer}/oauth/token`;
-  const redirectUri = cfg.redirectUri ?? `${cfg.issuer}/deviceauth/callback`;
-  const userVerificationUrl =
-    cfg.userVerificationUrl ?? `${cfg.issuer}/codex/device`;
-  const maxWaitSec = cfg.maxWaitSeconds ?? 900;
-  const minPollSec = cfg.minPollSeconds ?? 3;
-  const timeoutMs = cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const usercodeEndpoint = cfg.userCodeEndpoint    ?? `${cfg.issuer}${DEVICE_USERCODE_PATH}`;
+  const pollEndpoint     = cfg.pollEndpoint        ?? `${cfg.issuer}${DEVICE_POLL_PATH}`;
+  const tokenEndpoint    = cfg.tokenEndpoint       ?? `${cfg.issuer}${DEVICE_TOKEN_EXCHANGE_PATH}`;
+  const redirectUri      = cfg.redirectUri         ?? `${cfg.issuer}${DEVICE_REDIRECT_PATH}`;
+  const verifyUrl        = cfg.userVerificationUrl ?? `${cfg.issuer}${DEVICE_VERIFY_PATH}`;
+  const maxWaitSec       = cfg.maxWaitSeconds      ?? DEFAULT_DEVICE_MAX_WAIT_SECONDS;
+  const pollFloorSec     = cfg.minPollSeconds      ?? DEFAULT_DEVICE_POLL_FLOOR_SEC;
+  const timeoutMs        = cfg.timeoutMs           ?? DEFAULT_TIMEOUT_MS;
 
-  // Phase 18.1: Accept: application/json on every device-code request.
-  // Most servers default to JSON anyway, but the explicit header
-  // closes the parity gap with reference clients.
-  const dcHeaders = {
-    Accept: 'application/json',
+  // `Accept: application/json` is required on every device-code POST so
+  // the provider doesn't downgrade to HTML on errors. extraHeaders win
+  // last — caller can override Accept if they really mean to.
+  const headers: Record<string, string> = {
+    'Content-Type': CONTENT_TYPE_JSON,
+    'Accept':       CONTENT_TYPE_JSON,
     ...(cfg.extraHeaders ?? {}),
   };
 
-  // Step 1: usercode
-  const codeReq = await postForTokens(
-    userCodeEndpoint,
-    JSON.stringify({ client_id: cfg.clientId }),
-    'application/json',
-    dcHeaders,
-    fetchImpl,
-    timeoutMs,
+  // ── Step 1: request the usercode ────────────────────────────────────
+  const usercodeBody = JSON.stringify({ client_id: cfg.clientId });
+  const usercode = await postWithTimeout(
+    usercodeEndpoint, usercodeBody, headers, fetchImpl, timeoutMs,
   );
-  if (codeReq.status !== 200) {
+  if (usercode.status !== 200) {
     throw new Error(
-      `Device-code request failed: HTTP ${codeReq.status}: ${codeReq.text.slice(0, 200)}`,
+      `Device-code request failed: HTTP ${usercode.status} from ${usercodeEndpoint}: ${usercode.text.slice(0, 200)}`,
     );
   }
-  const codeResp = JSON.parse(codeReq.text) as DeviceCodeResponse;
-  const userCode = codeResp.user_code ?? '';
-  const deviceAuthId = codeResp.device_auth_id ?? '';
-  const intervalSec = Math.max(
-    minPollSec,
-    Number(codeResp.interval ?? minPollSec),
-  );
+  const usercodeReply: UsercodeReply = parseJsonOrThrow(usercode.text, 'device-code');
+  const userCode      = usercodeReply.user_code      ?? '';
+  const deviceAuthId  = usercodeReply.device_auth_id ?? '';
+  const reportedPoll  = Number(usercodeReply.interval ?? pollFloorSec);
+  const pollSec       = Math.max(pollFloorSec, Number.isFinite(reportedPoll) ? reportedPoll : pollFloorSec);
   if (!userCode || !deviceAuthId) {
     throw new Error('Device-code response missing user_code or device_auth_id');
   }
 
+  // ── Step 2: brief the user ──────────────────────────────────────────
   ua.log('');
-  ua.log('To continue:');
-  ua.log(`  1. Open: ${userVerificationUrl}`);
-  ua.log(`  2. Enter the code: ${userCode}`);
+  ua.log('To continue, follow these steps:');
   ua.log('');
-  ua.log('Waiting for sign-in… (Ctrl+C to cancel)');
-  await ua.openBrowser(userVerificationUrl).catch(() => undefined);
+  ua.log('  1. Open this URL in your browser:');
+  ua.log(`     ${verifyUrl}`);
+  ua.log('');
+  ua.log('  2. Enter this code:');
+  ua.log(`     ${userCode}`);
+  ua.log('');
+  ua.log('Waiting for sign-in...');
+  // First sleep is documentation-fairness — give the user a moment to
+  // open the page before we start polling. Tests pin this `sleep` count.
+  await ua.sleep(pollSec * 1000);
 
-  // Step 2: poll
-  const deadline = Date.now() + maxWaitSec * 1000;
-  let pollResp: DeviceCodePollResponse | null = null;
+  // ── Step 3: poll until success / fail / timeout ─────────────────────
+  const pollBody = JSON.stringify({ device_auth_id: deviceAuthId, user_code: userCode });
+  const startMs  = Date.now();
+  const deadline = startMs + maxWaitSec * 1000;
+
+  let pollResult: PollReply | null = null;
+  // Strict-less-than: with `maxWaitSeconds: 0` the deadline is the start
+  // instant, so we exit immediately without polling. Test 14 pins this.
   while (Date.now() < deadline) {
-    await ua.sleep(intervalSec * 1000);
-    const r = await postForTokens(
-      pollEndpoint,
-      JSON.stringify({ device_auth_id: deviceAuthId, user_code: userCode }),
-      'application/json',
-      dcHeaders,
-      fetchImpl,
-      timeoutMs,
-    );
+    const r = await postWithTimeout(pollEndpoint, pollBody, headers, fetchImpl, timeoutMs);
     if (r.status === 200) {
-      pollResp = JSON.parse(r.text) as DeviceCodePollResponse;
-      break;
+      pollResult = parseJsonOrThrow(r.text, 'device-code poll');
+      if (pollResult.authorization_code) break;
+      // Got 200 but no auth code — provider's still waiting; back off.
+      pollResult = null;
+    } else if (r.status === 403 || r.status === 410 || r.status === 425 || r.status === 429) {
+      // Standard "still pending" / "slow down" responses. Keep polling.
+    } else {
+      throw new Error(
+        `Device-code poll failed: HTTP ${r.status} from ${pollEndpoint}: ${r.text.slice(0, 200)}`,
+      );
     }
-    if (r.status === 403 || r.status === 404) {
-      // user hasn't completed login yet — keep polling
-      continue;
-    }
-    throw new Error(
-      `Device-code poll failed: HTTP ${r.status}: ${r.text.slice(0, 200)}`,
-    );
-  }
-  if (!pollResp) {
-    throw new Error('Device-code login timed out (15 minutes)');
-  }
-  const authorizationCode = pollResp.authorization_code ?? '';
-  const codeVerifier = pollResp.code_verifier ?? '';
-  if (!authorizationCode || !codeVerifier) {
-    throw new Error(
-      'Device-code response missing authorization_code or code_verifier',
-    );
+    await ua.sleep(pollSec * 1000);
   }
 
-  // Step 3: exchange
-  const exchange = await postForTokens(
-    tokenEndpoint,
-    urlencode({
-      grant_type: 'authorization_code',
-      code: authorizationCode,
-      redirect_uri: redirectUri,
-      client_id: cfg.clientId,
-      code_verifier: codeVerifier,
-    }),
-    'application/x-www-form-urlencoded',
-    dcHeaders,
+  if (!pollResult || !pollResult.authorization_code) {
+    throw new Error(`Device-code login timed out after ${maxWaitSec} seconds`);
+  }
+
+  // ── Step 4: exchange the auth code for tokens (form-encoded) ───────
+  const exchangeBody = urlencode({
+    grant_type:     'authorization_code',
+    client_id:      cfg.clientId,
+    code:           pollResult.authorization_code,
+    code_verifier:  pollResult.code_verifier ?? '',
+    redirect_uri:   redirectUri,
+  });
+  const exchangeHeaders = { ...headers, 'Content-Type': CONTENT_TYPE_FORM };
+  return tryTokenExchange(
+    [tokenEndpoint],
+    exchangeBody,
+    CONTENT_TYPE_FORM,
+    // Re-merge so Accept survives the Content-Type override above.
+    { Accept: CONTENT_TYPE_JSON, ...(cfg.extraHeaders ?? {}) },
     fetchImpl,
     timeoutMs,
   );
-  if (exchange.status !== 200) {
-    throw new Error(
-      `Token exchange failed: HTTP ${exchange.status}: ${exchange.text.slice(0, 200)}`,
-    );
-  }
-  return parseTokenResponse(exchange.text);
 }
 
-// ─── Refresh ──────────────────────────────────────────────────────────
+// ── Refresh ───────────────────────────────────────────────────────────
 
 export interface RefreshConfig {
-  tokenUrl: string;
-  fallbackTokenUrls?: string[];
-  clientId: string;
-  /** True for OpenAI-style refresh (form-encoded). False for JSON. */
-  formEncoded?: boolean;
-  extraHeaders?: Record<string, string>;
-  timeoutMs?: number;
+  tokenUrl:            string;
+  fallbackTokenUrls?:  string[];
+  clientId:            string;
+  /**
+   * `true` (default) → form-encoded body + `Content-Type: x-www-form-urlencoded`.
+   * `false`          → JSON body + `Content-Type: application/json`.
+   */
+  formEncoded?:        boolean;
+  extraHeaders?:       Record<string, string>;
+  timeoutMs?:          number;
 }
 
+/**
+ * Exchange a refresh token for a new access token. Tries each endpoint
+ * in order; throws when all fail or any returns a body without an
+ * access_token.
+ */
 export async function refreshTokens(
-  refreshToken: string,
-  cfg: RefreshConfig,
-  fetchImpl: FetchImpl = fetch as unknown as FetchImpl,
+  refreshToken:  string,
+  cfg:           RefreshConfig,
+  fetchImpl:     FetchImpl = fetch as unknown as FetchImpl,
 ): Promise<OAuthFlowResult> {
-  if (!refreshToken) throw new Error('refresh token is required');
-
-  const formBody = urlencode({
-    grant_type: 'refresh_token',
-    refresh_token: refreshToken,
-    client_id: cfg.clientId,
-  });
-  const jsonBody = JSON.stringify({
-    grant_type: 'refresh_token',
-    refresh_token: refreshToken,
-    client_id: cfg.clientId,
-  });
-
-  const urls = [cfg.tokenUrl, ...(cfg.fallbackTokenUrls ?? [])];
-  let lastErr = '';
-  for (const url of urls) {
-    const { status, text } = await postForTokens(
-      url,
-      cfg.formEncoded === false ? jsonBody : formBody,
-      cfg.formEncoded === false
-        ? 'application/json'
-        : 'application/x-www-form-urlencoded',
-      cfg.extraHeaders ?? {},
-      fetchImpl,
-      cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-    );
-    if (status === 200) return parseTokenResponse(text);
-    lastErr = `${url} → HTTP ${status}: ${text.slice(0, 200)}`;
+  if (!refreshToken) {
+    throw new Error('refresh token is required');
   }
-  throw new Error(`Token refresh failed: ${lastErr}`);
+
+  const useForm        = cfg.formEncoded !== false;   // default form-encoded
+  const fields         = {
+    grant_type:     'refresh_token',
+    refresh_token:  refreshToken,
+    client_id:      cfg.clientId,
+  };
+  const body           = useForm ? urlencode(fields)       : JSON.stringify(fields);
+  const contentType    = useForm ? CONTENT_TYPE_FORM       : CONTENT_TYPE_JSON;
+
+  const endpoints = [cfg.tokenUrl, ...(cfg.fallbackTokenUrls ?? [])];
+  return tryTokenExchange(
+    endpoints,
+    body,
+    contentType,
+    cfg.extraHeaders ?? {},
+    fetchImpl,
+    cfg.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+  );
 }
 
-// ─── Shared parsing ───────────────────────────────────────────────────
+// ── Internal helpers ──────────────────────────────────────────────────
 
-function parseTokenResponse(text: string): OAuthFlowResult {
-  let parsed: any;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    throw new Error(`Token response is not JSON: ${text.slice(0, 200)}`);
+/**
+ * POST `body` to each URL until one returns 200 with a valid token
+ * payload. On all-failed, throws an error whose message embeds the last
+ * status + body excerpt so the user can diagnose without diff-hunting.
+ */
+async function tryTokenExchange(
+  endpoints:    string[],
+  body:         string,
+  contentType:  string,
+  extraHeaders: Record<string, string>,
+  fetchImpl:    FetchImpl,
+  timeoutMs:    number,
+): Promise<OAuthFlowResult> {
+  const headers = { 'Content-Type': contentType, ...extraHeaders };
+  let lastDescription = '';
+  for (const url of endpoints) {
+    const reply = await postWithTimeout(url, body, headers, fetchImpl, timeoutMs);
+    if (reply.status === 200) {
+      return parseTokens(reply.text);
+    }
+    lastDescription = `${url} → HTTP ${reply.status}: ${reply.text.slice(0, 200)}`;
   }
+  throw new Error(`Token exchange failed: ${lastDescription || 'no endpoints attempted'}`);
+}
+
+/**
+ * POST with abort-on-timeout. Returns the response status and a
+ * pre-buffered text body so callers don't have to manage stream lifetimes.
+ */
+async function postWithTimeout(
+  url:        string,
+  body:       string,
+  headers:    Record<string, string>,
+  fetchImpl:  FetchImpl,
+  timeoutMs:  number,
+): Promise<{ status: number; text: string }> {
+  const ac    = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    const resp = await fetchImpl(url, { method: 'POST', headers, body });
+    return { status: resp.status, text: await resp.text() };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Form-encode a flat record of strings. */
+function urlencode(params: Record<string, string>): string {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) sp.append(k, v);
+  return sp.toString();
+}
+
+function parseJsonOrThrow<T>(text: string, label: string): T {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(`${label} response is not JSON: ${text.slice(0, 200)}`);
+  }
+}
+
+/**
+ * Parse an OAuth token-endpoint body. Strict on `access_token` (the one
+ * field we cannot proceed without); permissive about everything else so
+ * a provider that returns extras-we-don't-know-about doesn't break us.
+ */
+function parseTokens(text: string): OAuthFlowResult {
+  const parsed = parseJsonOrThrow<Record<string, unknown>>(text, 'Token');
   const access = String(parsed.access_token ?? '').trim();
   if (!access) {
-    throw new Error(
-      `Token response missing access_token: ${text.slice(0, 200)}`,
-    );
+    throw new Error(`Token response missing access_token: ${text.slice(0, 200)}`);
   }
-  const refresh = parsed.refresh_token ? String(parsed.refresh_token) : null;
-  const expires = Number(parsed.expires_in ?? 3600);
+  const refresh  = parsed.refresh_token ? String(parsed.refresh_token) : null;
+  const expires  = Number(parsed.expires_in ?? 3600);
   const extras: Record<string, unknown> = {};
   for (const k of ['account', 'email', 'token_type', 'scope']) {
     if (parsed[k] !== undefined) extras[k] = parsed[k];
   }
   return {
-    accessToken: access,
-    refreshToken: refresh,
-    expiresInSeconds: expires,
-    extras: Object.keys(extras).length ? extras : undefined,
+    accessToken:       access,
+    refreshToken:      refresh,
+    expiresInSeconds:  expires,
+    extras:            Object.keys(extras).length > 0 ? extras : undefined,
   };
 }
