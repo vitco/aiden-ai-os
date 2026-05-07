@@ -1,45 +1,52 @@
 /**
- * Copyright (c) 2026 Shiva Deore (Taracod).
- * Licensed under AGPL-3.0. See LICENSE for details.
+ * Aiden v4 — local-first AI agent
+ * Copyright (C) 2026 Shiva Deore (Taracod)
  *
- * Aiden — local-first agent.
- *
- * Portions adapted from NousResearch/hermes-agent (MIT).
- * Original copyright (c) NousResearch.
+ * Licensed under AGPL-3.0-or-later. See LICENSE.
  */
 /**
- * core/v4/aidenAgent.ts — Aiden v4.0.0
+ * core/v4/aidenAgent.ts
  *
- * THE single tool-calling loop. Replaces planner+responder.
+ * The single tool-calling loop. Every chat session in Aiden runs through
+ * `AidenAgent.runConversation`. The architecture:
  *
- * Status: PHASE 2 — loop core implementation. Provider adapters land in Phase 3,
- *   tool execution in Phase 6+, prompt builder in Phase 12.
+ *   user message → provider → if tool_use:
+ *                                dispatch each tool sequentially
+ *                                append tool results to history
+ *                                provider gets called again with the full
+ *                                history including those results
+ *                              else: stop, return assistant text
  *
- * Upstream provenance (run_agent.py line refs):
- *   - AIAgent class                                L873
- *   - AIAgent.run_conversation()                   L10382
- *   - AIAgent._execute_tool_calls_sequential()     L9779
- *   - AIAgent._execute_tool_calls_concurrent()     L9400 (deferred to v4.1)
- *   - AIAgent._handle_max_iterations()             L10191
- *   - IterationBudget class                        L271
- *   - Fallback chain wiring                        L1558+
+ * The same LLM that requests tools sees the tool outputs in its own
+ * context window before writing the final reply — that's the v4 fix for
+ * v3's planner/responder split (where the responder hallucinated tool
+ * outputs because it never saw them).
  *
- * Why this file is the architectural fix for fabrication:
- *   v3 split intent→plan→execute→respond across two LLMs. The responder
- *   never saw raw tool outputs and routinely hallucinated them. Here, ONE
- *   LLM drives the loop: tool results are appended to its own message
- *   history before its next call, so the LLM that writes the final response
- *   literally has the tool outputs in its context window.
+ * Around that core loop, the agent integrates a stack of optional layers
+ * any of which can be omitted in tests:
+ *
+ *   - PromptBuilder + PromptCaching + ContextCompressor + AuxiliaryClient
+ *   - PlannerGuard (narrow tools), HonestyEnforcement (post-loop scan),
+ *     SkillTeacher (propose + create skills)
+ *   - SkillEnforcementTracker (skill_view / pre-arm + retry)
+ *   - UrlProvenanceTracker (YouTube ledger + retry)
+ *   - Empty-response retry (Codex-backend defensive)
+ *   - Iteration-budget snippet (warn the model when running out of turns)
+ *   - Fallback adapter (single-shot at-most-once)
+ *   - Memory dirty-bit (refresh prompt after MEMORY.md/USER.md mutation)
+ *
+ * Helpers extracted to `core/v4/agent/`: `skillEnforcement.ts`,
+ * `urlProvenance.ts`, `intentPreArm.ts`. Those modules predate this rewrite
+ * and stay as-is.
  */
 
-import {
+import type {
   Message,
   ToolSchema,
   ToolCallRequest,
   ToolCallResult,
   ProviderAdapter,
   ProviderCallOutput,
-  StreamEvent,
 } from '../../providers/v4/types';
 import type {
   PlannerGuard,
@@ -53,7 +60,6 @@ import type {
 import type {
   SkillTeacher,
   SkillProposalCallbacks,
-  SkillTeacherTraceEntry,
 } from '../../moat/skillTeacher';
 import type { PromptBuilder, PromptBuilderOptions } from './promptBuilder';
 import type { ContextCompressor, CompressionResult } from './contextCompressor';
@@ -71,333 +77,237 @@ import {
 } from './agent/urlProvenance';
 import { preArmIntent } from './agent/intentPreArm';
 
+// ── Public types ──────────────────────────────────────────────────────────
+
 /**
- * Tool executor — runs a single tool call and returns the result.
- *
- * Implementation lives in the tool registry (Phase 6+). For Phase 2 tests,
- * this is mocked. The executor MUST NOT throw for tool-level errors; instead
- * return a `ToolCallResult` with `error` populated. The loop catches throws
- * defensively and converts them to error results so the model can recover.
+ * Run one tool call, return its result. The implementation lives in the
+ * tool registry; tests pass mocks. The executor MUST NOT throw for
+ * tool-level errors — return a `ToolCallResult` with `error` set instead.
+ * The loop catches throws defensively so a buggy executor still keeps
+ * the conversation alive.
  */
 export type ToolExecutor = (call: ToolCallRequest) => Promise<ToolCallResult>;
 
 /**
- * One-shot fallback strategy. Called once per conversation when the primary
- * provider throws. Returning a new adapter swaps it in for the rest of the
- * turn; returning null propagates the error. v4 Phase 2 supports one
- * activation per `runConversation`. Multi-step chains land in a later phase.
+ * One-shot fallback. Activated at most once per `runConversation` when
+ * the primary provider throws. Returning a new adapter swaps it in for
+ * the rest of the turn; returning null re-throws.
  */
 export interface FallbackStrategy {
   activate(error: Error, attempt: number): Promise<ProviderAdapter | null>;
 }
 
 export interface AidenAgentOptions {
-  provider: ProviderAdapter;
-  toolExecutor: ToolExecutor;
-  tools: ToolSchema[];
-  /** Hard cap on assistant turns. Default is 90. */
-  maxTurns?: number;
-  fallback?: FallbackStrategy;
-  /** Observability hook — invoked before and after each tool call. */
+  provider:                ProviderAdapter;
+  toolExecutor:            ToolExecutor;
+  tools:                   ToolSchema[];
+  /** Hard cap on iterations through the loop. Default 90. */
+  maxTurns?:               number;
+  fallback?:               FallbackStrategy;
+  /** Observability — fired before and after each tool call. */
   onToolCall?: (
-    call: ToolCallRequest,
-    phase: 'before' | 'after',
+    call:    ToolCallRequest,
+    phase:   'before' | 'after',
     result?: ToolCallResult,
   ) => void;
-  /** Fired once when crossing 70% of budget (caution) and once at 90% (warning). */
+  /** Fires once when crossing 70% (caution) and once at 90% (warning). */
   onBudgetWarning?: (
     level: 'caution' | 'warning',
-    turn: number,
-    max: number,
+    turn:  number,
+    max:   number,
   ) => void;
-  /** Phase 12: pre-loop tool subset classifier (Aiden moat). */
-  plannerGuard?: PlannerGuard;
-  /** Phase 12: fired with the PlannerGuard decision before the loop runs. */
+  // ── Moat ─────────────────────────────────────────────────────────────
+  plannerGuard?:           PlannerGuard;
   onPlannerGuardDecision?: (decision: PlannerGuardDecision) => void;
-  /** Phase 12: post-loop trace verifier (Aiden moat). */
-  honestyEnforcement?: HonestyEnforcement;
-  /** Phase 12: skill workflow proposer (Aiden moat). */
-  skillTeacher?: SkillTeacher;
-  /** Phase 12: callbacks the SkillTeacher uses when proposing. */
-  skillTeacherCallbacks?: SkillProposalCallbacks;
-  /** Phase 12: per-tool verification flag lookup. Allows the loop to feed
-   *  Honesty's verified-flag check (memory tools) without coupling the
-   *  registry to Honesty. The function receives the just-completed tool
-   *  call's result and returns true/false/undefined. */
-  resolveVerifiedFlag?: (result: ToolCallResult) => boolean | undefined;
-  /** Phase 12: lookup function for tool→toolset mapping (used by
-   *  SkillTeacher to compute toolset diversity for proposals). */
-  resolveToolset?: (toolName: string) => string | undefined;
-  // ── Phase 13: Context layers ───────────────────────────────────────
-  /** Phase 13: assembles slot-ordered system prompt at session start. */
-  promptBuilder?: PromptBuilder;
-  /** Phase 13: options passed to PromptBuilder.build() — frozen for the session. */
-  promptBuilderOptions?: PromptBuilderOptions;
-  /** Phase 13: auto-summarises conversation when context utilisation crosses threshold. */
-  contextCompressor?: ContextCompressor;
-  /** Phase 13: cheap-LLM router. Surfaced on the result for /usage diagnostics. */
-  auxiliaryClient?: AuxiliaryClient;
-  /** Phase 13: anthropic prefix-cache marker manager. */
-  promptCaching?: PromptCaching;
-  /** Phase 13: providerId for compression + caching lookups. Defaults to ''. */
-  providerId?: string;
-  /** Phase 13: modelId for compression lookup. Defaults to ''. */
-  modelId?: string;
-  /** Phase 13: append "you have N turns remaining" snippet to last tool result when remaining ≤ 30%. Default true. */
+  honestyEnforcement?:     HonestyEnforcement;
+  skillTeacher?:           SkillTeacher;
+  skillTeacherCallbacks?:  SkillProposalCallbacks;
+  /** Resolves the verified flag from a tool result, used by Honesty. */
+  resolveVerifiedFlag?:    (result: ToolCallResult) => boolean | undefined;
+  /** Resolves a tool name to its toolset, used by SkillTeacher. */
+  resolveToolset?:         (toolName: string) => string | undefined;
+  // ── Context layers ───────────────────────────────────────────────────
+  promptBuilder?:          PromptBuilder;
+  promptBuilderOptions?:   PromptBuilderOptions;
+  contextCompressor?:      ContextCompressor;
+  auxiliaryClient?:        AuxiliaryClient;
+  promptCaching?:          PromptCaching;
+  providerId?:             string;
+  modelId?:                string;
+  /** Append "you have N turns remaining" to the last tool result when
+   *  remaining ≤ 30%. Default true. */
   iterationBudgetInjection?: boolean;
-  /** Phase 13: fired each time the compressor runs successfully. */
-  onCompression?: (event: CompressionResult) => void;
-  /**
-   * Phase 16d: callback that returns a fresh `MemorySnapshot` when the
-   * cached system prompt has been invalidated by `markMemoryDirty()`.
-   * Wired by `aidenCLI.ts` to `memoryManager.loadSnapshot()`. When unset,
-   * the agent keeps the original frozen snapshot semantics — the dirty
-   * bit is ignored.
-   *
-   * Strategy: only the turn after a memory write pays the rebuild cost;
-   * every other turn still hits the prefix cache cleanly.
-   */
-  refreshMemorySnapshot?: () => Promise<MemorySnapshot>;
-  /**
-   * Phase 16d: fired when the agent rebuilds the cached system prompt
-   * after a memory mutation. Lets the display layer show "memory refreshed"
-   * diagnostics without coupling to the underlying mutation event.
-   */
-  onMemoryRefresh?: (file: 'memory' | 'user' | 'both') => void;
-  /**
-   * Phase 23.4b — Stage-0 intent pre-arm hook.  When the user's message
-   * matches an imperative intent regex (intentPreArm.ts), the agent
-   * loop calls this to fetch the skill's `required_tools` from its
-   * SKILL.md frontmatter before soft-arming the enforcement tracker.
-   *
-   * Implementation lives in `aidenCLI.ts:buildAgentRuntime` and reads
-   * via the SkillLoader.  Returns `null` when the skill is unknown,
-   * unloaded, or has no `required_tools` — the loop treats that as a
-   * no-op-arm (counters bump but tracker stays disarmed).
-   *
-   * Async to keep parity with the SkillLoader API; the agent awaits it
-   * once per matched user turn.  Test paths can omit this option and
-   * pre-arming silently no-ops.
-   */
+  onCompression?:          (event: CompressionResult) => void;
+  /** Returns a fresh memory snapshot when the dirty bit triggers a refresh. */
+  refreshMemorySnapshot?:  () => Promise<MemorySnapshot>;
+  /** Diagnostic hook for the display layer when the prompt gets rebuilt. */
+  onMemoryRefresh?:        (file: 'memory' | 'user' | 'both') => void;
+  /** Stage-0 intent pre-arm: look up a skill's `required_tools`. */
   lookupSkillRequiredTools?: (skillName: string) => Promise<string[] | null>;
 }
 
 export interface AidenAgentResult {
-  finalContent: string;
-  /** Full conversation including assistant tool_calls and tool results. */
-  messages: Message[];
-  turnCount: number;
-  toolCallCount: number;
-  fallbackActivated: boolean;
-  finishReason: 'stop' | 'budget_exhausted' | 'error';
-  totalUsage: {
-    inputTokens: number;
-    outputTokens: number;
-  };
-  /** Phase 12: every tool call this turn, in order, with verified flag
-   *  filled by `resolveVerifiedFlag` (when wired). Always present, even
-   *  if the moat layers are not configured. */
-  toolCallTrace: HonestyTraceEntry[];
-  /** Phase 12: populated when HonestyEnforcement detected failed claims. */
-  honestyFindings?: HonestyFinding[];
-  /** Phase 12: name of the skill SkillTeacher created this turn (if any). */
-  skillCreated?: string;
-  /** Phase 13: number of times ContextCompressor fired during this conversation. */
-  compressionEvents: number;
-  /** Phase 13: AuxiliaryClient.getUsage() snapshot at end of run. */
-  auxiliaryUsage: Record<string, { inputTokens: number; outputTokens: number; calls: number }>;
-  /**
-   * Phase 23.1: cumulative skill-enforcement counters across the agent's
-   * lifetime (process-scoped). `recovered` = corrective retry produced
-   * the missing tool call; `failed` = retry cap exceeded and the turn
-   * ended with honest failure; `armed` = skills_view OR pre-arm armed
-   * the tracker at least once.  `preArmed` (Phase 23.4b) = Stage-0
-   * intent regex fired regardless of redundancy with skill_view.
-   * Always present, all zeroes when no required-tool skill ever fired.
-   */
-  skillEnforcement: {
-    recovered: number;
-    failed: number;
-    armed: number;
-    preArmed: number;
-  };
-  /**
-   * Phase 23.4a: cumulative URL-provenance counters across the agent's
-   * lifetime (process-scoped). `blocked` = a YouTube watch URL was
-   * rejected because its id wasn't in the turn's youtube_search
-   * ledger; `recovered` = a corrective retry produced a now-passing
-   * open_url call; `failed` = retry cap exceeded and the turn ended
-   * with an honest-failure assistant message. Always present.
-   */
-  urlProvenance: { recovered: number; failed: number; blocked: number };
-  /**
-   * Phase 23.4a-fix2: cumulative empty-response counters.
-   * `detected` = Codex-backend completion with text.len=0 and no
-   * tool calls was observed; `retried` = a corrective system
-   * message was injected and the loop continued (cap=1 per turn);
-   * `recovered` = the retry produced non-empty content. Always
-   * present.
-   */
-  emptyResponse: { detected: number; retried: number; recovered: number };
+  finalContent:        string;
+  messages:            Message[];
+  turnCount:           number;
+  toolCallCount:       number;
+  fallbackActivated:   boolean;
+  finishReason:        'stop' | 'budget_exhausted' | 'error';
+  totalUsage:          { inputTokens: number; outputTokens: number };
+  toolCallTrace:       HonestyTraceEntry[];
+  honestyFindings?:    HonestyFinding[];
+  skillCreated?:       string;
+  compressionEvents:   number;
+  auxiliaryUsage:      Record<string, { inputTokens: number; outputTokens: number; calls: number }>;
+  skillEnforcement:    { recovered: number; failed: number; armed: number; preArmed: number };
+  urlProvenance:       { recovered: number; failed: number; blocked: number };
+  emptyResponse:       { detected: number; retried: number; recovered: number };
 }
 
-/**
- * Phase 16c: per-call options for `runConversation`. All fields are
- * optional — callers that don't pass anything get the existing
- * non-streaming behaviour. When `stream:true` and the active provider
- * adapter implements `callStream`, deltas flow through `onDelta` /
- * `onFirstDelta` / `onToolCallStart` as the SSE arrives. If the adapter
- * lacks `callStream` we silently fall back to the non-streaming path —
- * tool-call interleaving and trace structure remain identical.
- */
 export interface RunConversationOptions {
-  stream?: boolean;
-  /** Fired once per delta event from the adapter. */
-  onDelta?: (text: string) => void;
-  /** Fired exactly once on the first delta of any turn. */
-  onFirstDelta?: () => void;
-  /**
-   * Fired when the model first surfaces a tool call's name during a
-   * streaming turn. The `arguments` object will be empty — use the
-   * post-loop `toolCallTrace` for the parsed values.
-   */
-  onToolCallStart?: (call: ToolCallRequest) => void;
+  stream?:           boolean;
+  onDelta?:          (text: string) => void;
+  onFirstDelta?:     () => void;
+  onToolCallStart?:  (call: ToolCallRequest) => void;
 }
 
-const DEFAULT_MAX_TURNS = 90;
-const CAUTION_FRACTION = 0.7;
-const WARNING_FRACTION = 0.9;
+interface EmptyResponseMetrics {
+  detected:   number;
+  retried:    number;
+  recovered:  number;
+}
+
+// ── Constants ─────────────────────────────────────────────────────────────
+
+const DEFAULT_MAX_TURNS    = 90;
+const CAUTION_FRACTION     = 0.7;
+const WARNING_FRACTION     = 0.9;
+const BUDGET_INJECT_FRAC   = 0.3;
+const EMPTY_RETRY_CAP      = 1;
+const EMPTY_RETRY_NOTE =
+  '[System note: your previous turn returned empty content with no tool calls. ' +
+  'Either call a tool or write a real reply — silent turns are not acceptable.]';
+
+// ── Class ────────────────────────────────────────────────────────────────
 
 export class AidenAgent {
   private provider: ProviderAdapter;
-  private readonly toolExecutor: ToolExecutor;
-  private readonly tools: ToolSchema[];
-  private readonly maxTurns: number;
-  private readonly fallback?: FallbackStrategy;
-  private readonly onToolCall?: AidenAgentOptions['onToolCall'];
-  private readonly onBudgetWarning?: AidenAgentOptions['onBudgetWarning'];
-  private readonly plannerGuard?: PlannerGuard;
-  private readonly onPlannerGuardDecision?: AidenAgentOptions['onPlannerGuardDecision'];
-  private readonly honestyEnforcement?: HonestyEnforcement;
-  private readonly skillTeacher?: SkillTeacher;
-  private readonly skillTeacherCallbacks?: SkillProposalCallbacks;
-  private readonly resolveVerifiedFlag?: AidenAgentOptions['resolveVerifiedFlag'];
-  private readonly resolveToolset?: AidenAgentOptions['resolveToolset'];
-  // Phase 13
-  private readonly promptBuilder?: PromptBuilder;
-  private readonly promptBuilderOptions?: PromptBuilderOptions;
-  private readonly contextCompressor?: ContextCompressor;
-  private readonly auxiliaryClient?: AuxiliaryClient;
-  private readonly promptCaching?: PromptCaching;
-  private readonly providerId: string;
-  private readonly modelId: string;
-  private readonly iterationBudgetInjection: boolean;
-  private readonly onCompression?: AidenAgentOptions['onCompression'];
-  private readonly refreshMemorySnapshot?: AidenAgentOptions['refreshMemorySnapshot'];
-  private readonly onMemoryRefresh?: AidenAgentOptions['onMemoryRefresh'];
-  // Phase 23.4b — Stage-0 intent pre-arm: SkillLoader-backed lookup.
-  private readonly lookupSkillRequiredTools?: AidenAgentOptions['lookupSkillRequiredTools'];
-  /** Cached system prompt — frozen after first build for session-long prefix cache. */
-  private cachedSystemPrompt: string | null = null;
-  private compressionEvents = 0;
-  /**
-   * Phase 23.1: process-scoped enforcement counters. Lives on the agent
-   * (one per session) because they read from /doctor and would
-   * vanish if scoped to a single user turn. Per-turn state lives on
-   * the SkillEnforcementTracker constructed inside runConversation.
-   */
-  private readonly skillEnforcementMetrics: SkillEnforcementMetrics = {
-    recovered: 0,
-    failed: 0,
-    armed: 0,
-    // Phase 23.4b: count of Stage-0 intent pre-arms fired this session.
-    preArmed: 0,
-  };
-  /**
-   * Phase 23.4a: process-scoped url-provenance counters. Same
-   * lifecycle as skillEnforcementMetrics — agent-instance scope so
-   * /doctor sees cumulative counts across user turns within a
-   * session, but the per-turn ledger lives on the tracker
-   * constructed inside runConversation.
-   */
-  private readonly urlProvenanceMetrics: UrlProvenanceMetrics = {
-    recovered: 0,
-    failed: 0,
-    blocked: 0,
-  };
-  /**
-   * Phase 23.4a-fix2: empty-response counters. Bug Z2: Codex
-   * backend occasionally returns terminal=completed with
-   * text.len=0 and no tool calls — model said nothing, agent
-   * loop's existing message-final exit treats it as a clean stop
-   * and returns an empty reply to the user. This counter tracks:
-   *   detected — empty completion was observed
-   *   retried  — corrective system message was injected and the
-   *              loop continued (once per turn, cap=1)
-   *   recovered — the retry produced a non-empty reply
-   * Cumulative across the agent instance (same lifecycle as the
-   * other Phase 23 metric blocks).
-   */
-  private readonly emptyResponseMetrics: {
-    detected: number;
-    retried: number;
-    recovered: number;
-  } = {
-    detected: 0,
-    retried: 0,
-    recovered: 0,
-  };
-  /**
-   * Phase 16d: dirty bit set by `markMemoryDirty()`. The next
-   * `runConversation` turn loads a fresh `MemorySnapshot` via
-   * `refreshMemorySnapshot`, mutates `promptBuilderOptions.memorySnapshot`,
-   * drops `cachedSystemPrompt`, and clears the bit. We track which file
-   * (memory / user / both) so the rebuild diagnostic reflects what changed.
-   */
-  private memoryDirty: 'memory' | 'user' | 'both' | null = null;
 
-  constructor(options: AidenAgentOptions) {
-    this.provider = options.provider;
-    this.toolExecutor = options.toolExecutor;
-    this.tools = options.tools;
-    this.maxTurns = options.maxTurns ?? DEFAULT_MAX_TURNS;
-    this.fallback = options.fallback;
-    this.onToolCall = options.onToolCall;
-    this.onBudgetWarning = options.onBudgetWarning;
-    this.plannerGuard = options.plannerGuard;
-    this.onPlannerGuardDecision = options.onPlannerGuardDecision;
-    this.honestyEnforcement = options.honestyEnforcement;
-    this.skillTeacher = options.skillTeacher;
-    this.skillTeacherCallbacks = options.skillTeacherCallbacks;
-    this.resolveVerifiedFlag = options.resolveVerifiedFlag;
-    this.resolveToolset = options.resolveToolset;
-    // Phase 13
-    this.promptBuilder = options.promptBuilder;
-    this.promptBuilderOptions = options.promptBuilderOptions;
-    this.contextCompressor = options.contextCompressor;
-    this.auxiliaryClient = options.auxiliaryClient;
-    this.promptCaching = options.promptCaching;
-    this.providerId = options.providerId ?? '';
-    this.modelId = options.modelId ?? '';
-    this.iterationBudgetInjection = options.iterationBudgetInjection ?? true;
-    this.onCompression = options.onCompression;
-    this.refreshMemorySnapshot = options.refreshMemorySnapshot;
-    this.onMemoryRefresh = options.onMemoryRefresh;
-    this.lookupSkillRequiredTools = options.lookupSkillRequiredTools;
+  private readonly toolExecutor:                ToolExecutor;
+  private readonly tools:                       ToolSchema[];
+  private readonly maxTurns:                    number;
+  private readonly fallback?:                   FallbackStrategy;
+  private readonly onToolCall?:                 AidenAgentOptions['onToolCall'];
+  private readonly onBudgetWarning?:            AidenAgentOptions['onBudgetWarning'];
+  private readonly plannerGuard?:               PlannerGuard;
+  private readonly onPlannerGuardDecision?:     AidenAgentOptions['onPlannerGuardDecision'];
+  private readonly honestyEnforcement?:         HonestyEnforcement;
+  private readonly skillTeacher?:               SkillTeacher;
+  private readonly skillTeacherCallbacks?:      SkillProposalCallbacks;
+  private readonly resolveVerifiedFlag?:        AidenAgentOptions['resolveVerifiedFlag'];
+  private readonly resolveToolset?:             AidenAgentOptions['resolveToolset'];
+  private readonly promptBuilder?:              PromptBuilder;
+  private          promptBuilderOptions?:       PromptBuilderOptions;
+  private readonly contextCompressor?:          ContextCompressor;
+  private readonly auxiliaryClient?:            AuxiliaryClient;
+  private readonly promptCaching?:              PromptCaching;
+  private readonly providerId:                  string;
+  private readonly modelId:                     string;
+  private readonly iterationBudgetInjection:    boolean;
+  private readonly onCompression?:              AidenAgentOptions['onCompression'];
+  private readonly refreshMemorySnapshot?:      AidenAgentOptions['refreshMemorySnapshot'];
+  private readonly onMemoryRefresh?:            AidenAgentOptions['onMemoryRefresh'];
+  private readonly lookupSkillRequiredTools?:   AidenAgentOptions['lookupSkillRequiredTools'];
+
+  // ── Cross-call state ─────────────────────────────────────────────────
+  /** Cached system prompt — invalidated by setPersonalityOverlay/markMemoryDirty/explicit. */
+  private cachedSystemPrompt:  string | null = null;
+  private compressionEvents:    number        = 0;
+  private memoryDirty:          'memory' | 'user' | 'both' | null = null;
+
+  /** Process-scoped tracker metrics for `/doctor`. */
+  private readonly skillEnforcementMetrics: SkillEnforcementMetrics = {
+    recovered: 0, failed: 0, armed: 0, preArmed: 0,
+  };
+  private readonly urlProvenanceMetrics: UrlProvenanceMetrics = {
+    recovered: 0, failed: 0, blocked: 0,
+  };
+  private readonly emptyResponseMetrics: EmptyResponseMetrics = {
+    detected: 0, retried: 0, recovered: 0,
+  };
+
+  constructor(opts: AidenAgentOptions) {
+    this.provider                 = opts.provider;
+    this.toolExecutor             = opts.toolExecutor;
+    this.tools                    = opts.tools;
+    this.maxTurns                 = opts.maxTurns ?? DEFAULT_MAX_TURNS;
+    this.fallback                 = opts.fallback;
+    this.onToolCall               = opts.onToolCall;
+    this.onBudgetWarning          = opts.onBudgetWarning;
+    this.plannerGuard             = opts.plannerGuard;
+    this.onPlannerGuardDecision   = opts.onPlannerGuardDecision;
+    this.honestyEnforcement       = opts.honestyEnforcement;
+    this.skillTeacher             = opts.skillTeacher;
+    this.skillTeacherCallbacks    = opts.skillTeacherCallbacks;
+    this.resolveVerifiedFlag      = opts.resolveVerifiedFlag;
+    this.resolveToolset           = opts.resolveToolset;
+    this.promptBuilder            = opts.promptBuilder;
+    this.promptBuilderOptions     = opts.promptBuilderOptions;
+    this.contextCompressor        = opts.contextCompressor;
+    this.auxiliaryClient          = opts.auxiliaryClient;
+    this.promptCaching            = opts.promptCaching;
+    this.providerId               = opts.providerId ?? '';
+    this.modelId                  = opts.modelId    ?? '';
+    this.iterationBudgetInjection = opts.iterationBudgetInjection !== false;
+    this.onCompression            = opts.onCompression;
+    this.refreshMemorySnapshot    = opts.refreshMemorySnapshot;
+    this.onMemoryRefresh          = opts.onMemoryRefresh;
+    this.lookupSkillRequiredTools = opts.lookupSkillRequiredTools;
+  }
+
+  // ── Public method surface ────────────────────────────────────────────
+
+  setProvider(adapter: ProviderAdapter): void {
+    this.provider = adapter;
+  }
+
+  /** Drop the cached system prompt so the next runConversation rebuilds it. */
+  invalidateSystemPromptCache(): void {
+    this.cachedSystemPrompt = null;
   }
 
   /**
-   * Phase 16d: mark the cached memory snapshot dirty so the next
-   * `runConversation` turn rebuilds the system prompt against fresh
-   * MEMORY.md / USER.md content. Idempotent — subsequent calls escalate
-   * single-file dirtiness to "both" but never clear the bit (only the
-   * runConversation rebuild path resets it).
-   *
-   * Wired in `aidenCLI.ts`:
-   *   memoryManager.onMutation((file) => agent.markMemoryDirty(file));
-   *
-   * No-op when `refreshMemorySnapshot` is not configured (Phase 12 callers
-   * that don't pass a memory manager keep the frozen-snapshot semantics).
+   * Replace the personality overlay slot. Returns `true` when the value
+   * actually changed (and the cache was invalidated), `false` otherwise.
+   */
+  setPersonalityOverlay(overlay: string | undefined): boolean {
+    const current = this.promptBuilderOptions?.personalityOverlay;
+    if (current === overlay) return false;
+    this.promptBuilderOptions = {
+      ...(this.promptBuilderOptions ?? ({} as PromptBuilderOptions)),
+      personalityOverlay: overlay,
+    };
+    this.cachedSystemPrompt = null;
+    return true;
+  }
+
+  /**
+   * Build (or return the cached) system prompt without driving the
+   * provider. Powers the `/debug-prompt` command. Returns `null` when no
+   * `PromptBuilder` is wired.
+   */
+  async getSystemPromptForDebug(): Promise<string | null> {
+    if (!this.promptBuilder || !this.promptBuilderOptions) return null;
+    if (this.cachedSystemPrompt !== null) return this.cachedSystemPrompt;
+    this.cachedSystemPrompt = await this.promptBuilder.build(this.promptBuilderOptions);
+    return this.cachedSystemPrompt;
+  }
+
+  /**
+   * Mark MEMORY.md / USER.md as dirty. The next `runConversation` will
+   * call `refreshMemorySnapshot`, rebuild the prompt, fire
+   * `onMemoryRefresh`, and clear the bit. No-op when no refresh callback
+   * is wired (frozen-snapshot semantics retained).
    */
   markMemoryDirty(file: 'memory' | 'user'): void {
     if (!this.refreshMemorySnapshot) return;
@@ -408,607 +318,436 @@ export class AidenAgent {
     }
   }
 
-  /** Phase 16d test/inspection accessor — returns the current dirty bit. */
   getMemoryDirtyState(): 'memory' | 'user' | 'both' | null {
     return this.memoryDirty;
   }
 
-  /** Phase 14c: hot-swap the provider adapter (used by /model). */
-  setProvider(adapter: ProviderAdapter): void {
-    this.provider = adapter;
+  /** /doctor accessor for cumulative skill-enforcement counters. */
+  getSkillEnforcementMetrics(): SkillEnforcementMetrics {
+    return { ...this.skillEnforcementMetrics };
   }
 
-  /**
-   * Phase 16b.4: drop the cached system prompt so the next `runConversation`
-   * rebuilds it. Used by `/personality` when the active overlay changes —
-   * SOUL.md (slot 1) is identical, but slot 2 needs to swap. Also useful
-   * after editing SOUL.md from outside the REPL.
-   */
-  invalidateSystemPromptCache(): void {
-    this.cachedSystemPrompt = null;
+  /** /doctor accessor for cumulative URL-provenance counters. */
+  getUrlProvenanceMetrics(): UrlProvenanceMetrics {
+    return { ...this.urlProvenanceMetrics };
   }
 
-  /**
-   * Phase 16b.4: replace the personality overlay used in slot 2 of the next
-   * built prompt. Mutates `promptBuilderOptions` in place so the next
-   * `runConversation` rebuild picks up the new body. Returns whether the
-   * overlay actually changed (callers can skip cache invalidation when the
-   * value is identical).
-   */
-  setPersonalityOverlay(overlay: string | undefined): boolean {
-    if (!this.promptBuilderOptions) return false;
-    const prev = this.promptBuilderOptions.personalityOverlay ?? '';
-    const next = overlay ?? '';
-    if (prev === next) return false;
-    this.promptBuilderOptions.personalityOverlay = next;
-    this.cachedSystemPrompt = null;
-    return true;
+  /** /doctor accessor for cumulative empty-response counters. */
+  getEmptyResponseMetrics(): EmptyResponseMetrics {
+    return { ...this.emptyResponseMetrics };
   }
 
-  /**
-   * Phase 16b.4: returns the cached system prompt, building it on demand if
-   * `promptBuilder` is wired and the cache is empty. Read-only accessor used
-   * by the `/debug-prompt` slash command — does NOT trigger an LLM call.
-   * Returns `null` when no prompt builder is wired (Phase 12 callers).
-   */
-  async getSystemPromptForDebug(): Promise<string | null> {
-    if (!this.promptBuilder || !this.promptBuilderOptions) return null;
-    if (this.cachedSystemPrompt === null) {
-      this.cachedSystemPrompt = await this.promptBuilder.build(
-        this.promptBuilderOptions,
-      );
-    }
-    return this.cachedSystemPrompt;
-  }
+  // ── Main entry: runConversation ──────────────────────────────────────
 
   async runConversation(
-    initialMessages: Message[],
-    runOpts: RunConversationOptions = {},
+    history: Message[],
+    options: RunConversationOptions = {},
   ): Promise<AidenAgentResult> {
-    // ── Phase 13: Build (or reuse cached) system prompt at session start ──
-    // ── Phase 16d: if a memory mutation happened since last turn, drop the
-    //    cache and reload MEMORY.md / USER.md before rebuild. Pays one
-    //    cache-miss per memory write; idle turns still hit the prefix cache.
-    let messages: Message[] = [...initialMessages];
-    if (this.promptBuilder && this.promptBuilderOptions) {
-      if (this.memoryDirty !== null && this.refreshMemorySnapshot) {
-        try {
-          const fresh = await this.refreshMemorySnapshot();
-          this.promptBuilderOptions.memorySnapshot = fresh;
-          this.cachedSystemPrompt = null;
-          const which = this.memoryDirty;
-          this.memoryDirty = null;
-          try {
-            this.onMemoryRefresh?.(which);
-          } catch {
-            // diagnostic callback must not break the loop
-          }
-        } catch {
-          // Refresh failed (disk error?) — fall through to existing cache
-          // rather than crash the turn. Dirty bit stays set so we retry
-          // next turn. This' "tool responses always show
-          // live state" fallback: if disk read fails, the agent still has
-          // the tool result message from the mutation in its history.
-        }
-      }
-      if (this.cachedSystemPrompt === null) {
-        this.cachedSystemPrompt = await this.promptBuilder.build(
-          this.promptBuilderOptions,
-        );
-      }
-      // Prepend only if no leading system message already covers it. Tests
-      // and integrations may pass their own; we don't want to double-stuff.
-      const hasSys = messages.length > 0 && messages[0].role === 'system';
-      if (!hasSys) {
-        messages = [
-          { role: 'system', content: this.cachedSystemPrompt },
-          ...messages,
-        ];
-      }
-    }
+    // 1. Refresh memory snapshot if the dirty bit was set since last turn.
+    await this.refreshSystemPromptIfDirty();
 
-    let turnCount = 0;
-    let toolCallCount = 0;
-    let fallbackActivated = false;
-    let finishReason: 'stop' | 'budget_exhausted' | 'error' = 'stop';
-    let finalContent = '';
+    // 2. Build / reuse the cached system prompt.
+    const systemPrompt = await this.ensureSystemPrompt();
 
-    // Phase 23.1: per-user-turn enforcement state. Tracker is fresh per
-    // call to runConversation; metrics object is shared with the agent
-    // instance so /doctor sees cumulative counts.
-    const enforcement = new SkillEnforcementTracker(this.skillEnforcementMetrics);
-
-    // Phase 23.4b — Stage-0 intent pre-arm.  Run a deterministic regex
-    // on the most recent user message; on match, soft-arm the
-    // enforcement tracker before the model dispatches.  Closes the
-    // bug-Y window where vague conversational queries
-    // ("play me an obscure indie band") cause the model to skip
-    // skill_view entirely and the guard never arms.  The hard-arm
-    // path via skill_view stays as-is — pre-arm just primes.
-    const lastUserMsg = (() => {
-      for (let i = initialMessages.length - 1; i >= 0; i--) {
-        const m = initialMessages[i];
-        if (m && m.role === 'user' && typeof m.content === 'string') {
-          return m.content;
-        }
-      }
-      return '';
-    })();
-    const intent = preArmIntent(lastUserMsg);
-    if (intent && this.lookupSkillRequiredTools) {
-      try {
-        const required = await this.lookupSkillRequiredTools(intent.skill);
-        // preArm always bumps preArmed counter; arm transition only
-        // fires when required_tools is a non-empty list.  Order-safe
-        // with a later skill_view firing in the same turn.
-        enforcement.preArm(intent.skill, required ?? []);
-      } catch {
-        // Best-effort — skill lookup must never break the loop.
-        enforcement.preArm(intent.skill, []);
-      }
-    } else if (intent) {
-      // No lookup wired (test paths, minimal harnesses) — bump the
-      // counter so /doctor still surfaces the regex hit, but the
-      // tracker stays disarmed (no requiredTools to enforce).
-      enforcement.preArm(intent.skill, []);
-    }
-    // Phase 23.4a: per-user-turn URL provenance ledger. Tracks the
-    // youtube_search candidates this turn so the gate can reject any
-    // open_url call the model invents off-canon.
-    const urlProvenance = new UrlProvenanceTracker(this.urlProvenanceMetrics);
-    // Phase 23.4a-fix2: per-turn empty-response retry counter (cap=1).
-    // Bug Z2 — Codex backend can return a completed response with no
-    // content and no tool calls. We retry once with a corrective
-    // system message before falling back to honest failure.
-    let emptyResponseRetries = 0;
-    const EMPTY_RESPONSE_RETRY_CAP = 1;
-    const emptyResponseDebug =
-      typeof process !== 'undefined' &&
-      process.env?.AIDEN_DEBUG_EMPTY_RESPONSE === '1';
-    const totalUsage = { inputTokens: 0, outputTokens: 0 };
-    const toolCallTrace: HonestyTraceEntry[] = [];
-
-    // ── Phase 12 layer 1: PlannerGuard (pre-loop tool subset) ────────
-    // Phase 16f Task 5: reset PlannerGuard.activeToolsets before each
-    // user-turn decide() so a skill_view from a prior turn doesn't keep
-    // forcing browser/web tools into unrelated next turns. The agent owns
-    // the per-turn lifecycle; the planner stays stateless across turns.
-    // Skills needing persistent toolset activation should re-fire
-    // skill_view per turn (the metadata is in the system prompt).
-    let activeTools: ToolSchema[] = this.tools;
+    // 3. Reset PlannerGuard active toolsets per-conversation, then narrow.
     if (this.plannerGuard) {
       this.plannerGuard.resetActivation();
-      const lastUser = lastUserMessage(initialMessages);
-      const decision = await this.plannerGuard.decide(
-        lastUser,
-        initialMessages,
-      );
-      this.onPlannerGuardDecision?.(decision);
-      const allowed = new Set(decision.selectedTools);
-      // Only narrow if the guard actually returned something useful and
-      // we have schemas to filter against.
-      if (allowed.size > 0 && this.tools.length > 0) {
-        const narrowed = this.tools.filter((t) => allowed.has(t.name));
-        // Defensive: never strip everything (preserves the "narrow only"
-        // contract). If filter accidentally empties, keep full list.
-        if (narrowed.length > 0) activeTools = narrowed;
+    }
+    const lastUserContent = lastUserMessageContent(history);
+    const narrowedTools   = await this.narrowTools(lastUserContent, history);
+
+    // 4. Build per-call trackers, then Stage-0 intent pre-arm.
+    //    The tracker's preArm() bumps `preArmed` itself; the loop just
+    //    plumbs the SkillLoader-resolved required-tools list into it.
+    const trackers = this.makeTrackers();
+    if (lastUserContent && this.lookupSkillRequiredTools) {
+      const decision = preArmIntent(lastUserContent);
+      if (decision) {
+        const required = await this.lookupSkillRequiredTools(decision.skill);
+        if (required && required.length > 0) {
+          trackers.skill.preArm(decision.skill, required);
+        }
       }
     }
 
-    const cautionThreshold = Math.floor(this.maxTurns * CAUTION_FRACTION);
-    const warningThreshold = Math.floor(this.maxTurns * WARNING_FRACTION);
-    let cautionFired = false;
-    let warningFired = false;
+    // 5. Compose initial conversation, prepending the system prompt.
+    let messages: Message[] = systemPrompt
+      ? [{ role: 'system', content: systemPrompt }, ...history]
+      : [...history];
 
-    while (turnCount < this.maxTurns) {
-      turnCount += 1;
+    // 6. Apply prompt-caching markers (helper no-ops for non-Anthropic).
+    if (this.promptCaching) {
+      messages = this.promptCaching.applyMarkers(messages, this.providerId);
+    }
 
-      if (!cautionFired && turnCount >= cautionThreshold) {
-        cautionFired = true;
-        this.onBudgetWarning?.('caution', turnCount, this.maxTurns);
-      }
-      if (!warningFired && turnCount >= warningThreshold) {
-        warningFired = true;
-        this.onBudgetWarning?.('warning', turnCount, this.maxTurns);
-      }
-
-      // ── Phase 13: ContextCompressor pre-call check ──────────────
-      if (this.contextCompressor && this.providerId && this.modelId) {
-        const trigger = this.contextCompressor.shouldCompress(
+    // 7. Compression pass — call .compress() which itself short-circuits
+    //    when below threshold (returns refused:true, original messages).
+    if (this.contextCompressor) {
+      try {
+        const result = await this.contextCompressor.compress(
           messages,
           this.providerId,
           this.modelId,
         );
-        if (trigger.shouldCompress) {
-          const result = await this.contextCompressor.compress(
-            messages,
-            this.providerId,
-            this.modelId,
-          );
-          if (!result.refused && !result.error) {
-            messages = result.compressedMessages;
-            this.compressionEvents += 1;
-            this.onCompression?.(result);
+        if (!result.refused && !result.error) {
+          messages = result.compressedMessages;
+          this.compressionEvents += 1;
+          this.onCompression?.(result);
+        }
+      } catch {
+        /* compression failures are silent — the loop runs as if it didn't fire */
+      }
+    }
+
+    // 8. Run the tool-calling loop.
+    const loopResult = await this.runTurnLoop(
+      messages,
+      narrowedTools,
+      trackers,
+      options,
+    );
+
+    // 9. Honesty post-loop scan (only if loop ended with a normal stop).
+    let honestyFindings: HonestyFinding[] | undefined;
+    let finalContent = loopResult.finalContent;
+    if (this.honestyEnforcement && loopResult.finishReason === 'stop') {
+      try {
+        const scan = await this.honestyEnforcement.check(
+          finalContent,
+          loopResult.messages,
+          loopResult.toolCallTrace,
+        );
+        if (!scan.passed) {
+          honestyFindings = scan.findings;
+          if (scan.correctedResponse) {
+            finalContent = scan.correctedResponse;
+            // Reflect the corrected text in the message history too so
+            // /debug-prompt and /usage agree on the final string.
+            for (let i = loopResult.messages.length - 1; i >= 0; i--) {
+              const m = loopResult.messages[i];
+              if (m.role === 'assistant' && (!m.toolCalls || m.toolCalls.length === 0)) {
+                (loopResult.messages[i] as { content: string }).content = finalContent;
+                break;
+              }
+            }
           }
         }
+      } catch {
+        /* honesty failures must not break the turn */
+      }
+    }
+
+    // 10. SkillTeacher post-loop observation + proposal.
+    let skillCreated: string | undefined;
+    if (this.skillTeacher) {
+      try {
+        const traceForTeacher = loopResult.toolCallTrace.map((entry, i) => ({
+          name:    entry.name,
+          args:    loopResult.fullTrace[i]?.args ?? {},
+          result:  entry.result,
+          error:   entry.error,
+          toolset: this.resolveToolset?.(entry.name),
+        }));
+        const proposal = await this.skillTeacher.observeTurn(
+          history,
+          traceForTeacher,
+          loopResult.finishReason !== 'stop',
+        );
+        if (proposal) {
+          const result = await this.skillTeacher.handleProposal(
+            proposal,
+            this.skillTeacherCallbacks,
+          );
+          if (result.created && result.skillName) {
+            skillCreated = result.skillName;
+          }
+        }
+      } catch {
+        /* SkillTeacher failures must not break the turn */
+      }
+    }
+
+    return {
+      finalContent,
+      messages:           loopResult.messages,
+      turnCount:          loopResult.turnCount,
+      toolCallCount:      loopResult.toolCallCount,
+      fallbackActivated:  loopResult.fallbackActivated,
+      finishReason:       loopResult.finishReason,
+      totalUsage:         loopResult.totalUsage,
+      toolCallTrace:      loopResult.toolCallTrace,
+      honestyFindings,
+      skillCreated,
+      compressionEvents:  this.compressionEvents,
+      auxiliaryUsage:     this.auxiliaryClient?.getUsage() ?? {},
+      skillEnforcement:   { ...this.skillEnforcementMetrics },
+      urlProvenance:      { ...this.urlProvenanceMetrics },
+      emptyResponse:      { ...this.emptyResponseMetrics },
+    };
+  }
+
+  // ── Private helpers ──────────────────────────────────────────────────
+
+  private async refreshSystemPromptIfDirty(): Promise<void> {
+    if (this.memoryDirty === null) return;
+    if (!this.refreshMemorySnapshot || !this.promptBuilder || !this.promptBuilderOptions) {
+      this.memoryDirty = null;
+      return;
+    }
+    let snapshot: MemorySnapshot;
+    try {
+      snapshot = await this.refreshMemorySnapshot();
+    } catch {
+      // Leave the dirty bit set so the next turn retries. We don't break
+      // this turn over a transient memory-read failure.
+      return;
+    }
+    this.promptBuilderOptions = {
+      ...this.promptBuilderOptions,
+      memorySnapshot: snapshot,
+    };
+    this.cachedSystemPrompt = null;
+    this.onMemoryRefresh?.(this.memoryDirty);
+    this.memoryDirty = null;
+  }
+
+  private async ensureSystemPrompt(): Promise<string | null> {
+    if (!this.promptBuilder || !this.promptBuilderOptions) return null;
+    if (this.cachedSystemPrompt !== null) return this.cachedSystemPrompt;
+    this.cachedSystemPrompt = await this.promptBuilder.build(this.promptBuilderOptions);
+    return this.cachedSystemPrompt;
+  }
+
+  private async narrowTools(
+    userMsg: string,
+    history: Message[],
+  ): Promise<ToolSchema[]> {
+    if (!this.plannerGuard) return this.tools;
+    const decision = await this.plannerGuard.decide(userMsg, history);
+    this.onPlannerGuardDecision?.(decision);
+    const allowed = new Set(decision.selectedTools);
+    return this.tools.filter((t) => allowed.has(t.name));
+  }
+
+  private makeTrackers(): {
+    skill: SkillEnforcementTracker;
+    url:   UrlProvenanceTracker;
+  } {
+    return {
+      skill: new SkillEnforcementTracker(this.skillEnforcementMetrics),
+      url:   new UrlProvenanceTracker(this.urlProvenanceMetrics),
+    };
+  }
+
+  /**
+   * The actual tool-calling loop. Returns a partial result the public
+   * `runConversation` enriches with post-loop scan output.
+   */
+  private async runTurnLoop(
+    initialMessages:  Message[],
+    tools:            ToolSchema[],
+    trackers:         { skill: SkillEnforcementTracker; url: UrlProvenanceTracker },
+    runOptions:       RunConversationOptions,
+  ): Promise<{
+    finalContent:       string;
+    messages:           Message[];
+    turnCount:          number;
+    toolCallCount:      number;
+    fallbackActivated:  boolean;
+    finishReason:       'stop' | 'budget_exhausted' | 'error';
+    totalUsage:         { inputTokens: number; outputTokens: number };
+    toolCallTrace:      HonestyTraceEntry[];
+    fullTrace:          Array<{ name: string; args: Record<string, unknown> }>;
+  }> {
+    const messages: Message[]              = [...initialMessages];
+    const toolCallTrace: HonestyTraceEntry[] = [];
+    // Internal trace mirror that retains tool-call arguments — Honesty's
+    // shape doesn't include args, but SkillTeacher needs them. Both live
+    // off the same entry index.
+    const fullTrace: Array<{ name: string; args: Record<string, unknown> }> = [];
+    const totalUsage = { inputTokens: 0, outputTokens: 0 };
+    let   turnCount         = 0;
+    let   toolCallCount     = 0;
+    let   fallbackActivated = false;
+    let   cautionFired      = false;
+    let   warningFired      = false;
+    let   emptyRetriesUsed  = 0;
+    let   finishReason: 'stop' | 'budget_exhausted' | 'error' = 'stop';
+    let   finalContent      = '';
+
+    while (true) {
+      if (turnCount >= this.maxTurns) {
+        finishReason = 'budget_exhausted';
+        break;
+      }
+      turnCount += 1;
+
+      // Budget warnings — at the threshold turn, exactly once each.
+      const cautionAt = Math.ceil(this.maxTurns * CAUTION_FRACTION);
+      const warningAt = Math.ceil(this.maxTurns * WARNING_FRACTION);
+      if (!cautionFired && turnCount >= cautionAt) {
+        cautionFired = true;
+        this.onBudgetWarning?.('caution', turnCount, this.maxTurns);
+      }
+      if (!warningFired && turnCount >= warningAt) {
+        warningFired = true;
+        this.onBudgetWarning?.('warning', turnCount, this.maxTurns);
       }
 
-      // ── Phase 13: PromptCaching markers (Anthropic only) ─────────
-      const dispatchMessages = this.promptCaching && this.providerId
-        ? this.promptCaching.applyMarkers(messages, this.providerId)
-        : messages;
-
+      // ── Provider call (stream or non-stream) ──────────────────────────
       let output: ProviderCallOutput;
       try {
-        const wantStream =
-          runOpts.stream === true && typeof this.provider.callStream === 'function';
-        if (wantStream) {
-          output = await this.runStreamingTurn(
-            dispatchMessages,
-            activeTools,
-            runOpts,
-          );
-        } else {
-          output = await this.provider.call({
-            messages: dispatchMessages,
-            tools: activeTools,
-          });
-        }
+        output = await this.callProvider(messages, tools, runOptions);
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
-        if (!fallbackActivated && this.fallback) {
-          const swapped = await this.fallback.activate(error, turnCount);
-          if (swapped) {
-            this.provider = swapped;
+        if (this.fallback && !fallbackActivated) {
+          const next = await this.fallback.activate(error, turnCount);
+          if (next) {
+            this.provider = next;
             fallbackActivated = true;
-            // Re-attempt this turn with the new provider. Decrement turn so
-            // the swap doesn't count against the budget —
-            // _activate_fallback semantics.
+            // Retry the same turn with the new provider; don't burn budget.
             turnCount -= 1;
             continue;
           }
         }
-        finishReason = 'error';
         throw error;
       }
 
-      totalUsage.inputTokens += output.usage.inputTokens;
-      totalUsage.outputTokens += output.usage.outputTokens;
+      totalUsage.inputTokens  += output.usage?.inputTokens  ?? 0;
+      totalUsage.outputTokens += output.usage?.outputTokens ?? 0;
 
-      const hasToolCalls = output.toolCalls && output.toolCalls.length > 0;
+      // ── Append assistant message ──────────────────────────────────────
+      const assistantMsg: Message = output.toolCalls.length > 0
+        ? { role: 'assistant', content: output.content ?? '', toolCalls: output.toolCalls }
+        : { role: 'assistant', content: output.content ?? '' };
+      messages.push(assistantMsg);
 
-      // Append the assistant turn to history. Even content-only assistant
-      // messages are appended so the conversation record is complete.
-      const assistantMessage: Message = {
-        role: 'assistant',
-        content: output.content ?? '',
-        ...(hasToolCalls ? { toolCalls: output.toolCalls } : {}),
-      };
-      messages.push(assistantMessage);
-
-      // Termination: model says stop AND emitted no tool calls.
-      // (If finishReason is 'tool_use' but toolCalls is empty, treat as stop —
-      // a known provider quirk; logging hook can be wired later.)
-      if (!hasToolCalls) {
-        // Phase 23.4a-fix2 (Bug Z2): empty-response retry guard.
-        // Codex backend occasionally returns a completed response
-        // with text.len=0 AND no tool calls. The user sees a blank
-        // reply. Detect that condition BEFORE skill enforcement —
-        // skill enforcement of an empty message is meaningless (the
-        // model said nothing, not "the model said the wrong thing").
-        // Retry once with a corrective system message; on cap-
-        // exceeded surface honest failure prefix.
-        const replyText = (output.content ?? '').trim();
-        const isEmptyResponse = replyText.length === 0;
-        if (isEmptyResponse) {
-          this.emptyResponseMetrics.detected += 1;
-          if (emptyResponseDebug) {
-            const lastUser = lastUserMessage(messages);
-            const armed = enforcement.armedSkill();
-            // eslint-disable-next-line no-console
-            console.warn(
-              `[empty-response] detected turn=${turnCount} ` +
-                `lastUser=${JSON.stringify(lastUser.slice(0, 120))} ` +
-                `tools.count=${activeTools.length} ` +
-                `skill.armed=${armed ?? '(none)'} ` +
-                `enforcement.attempt=${enforcement.attempt()} ` +
-                `emptyRetries=${emptyResponseRetries}/${EMPTY_RESPONSE_RETRY_CAP}`,
-            );
-          }
-          if (emptyResponseRetries < EMPTY_RESPONSE_RETRY_CAP) {
-            // Discard the empty assistant message — keeping it in
-            // history confuses the model on the retry ("I already
-            // replied, why is the user asking again?").
-            messages.pop();
-            messages.push({
-              role: 'system',
-              content:
-                '[empty-response] Your previous turn returned no ' +
-                'content and no tool calls. Respond to the user’s ' +
-                'most recent message now — call the appropriate ' +
-                'tool, or write a direct answer if no tool is ' +
-                'needed. Do not return a blank reply.',
-            });
-            this.emptyResponseMetrics.retried += 1;
-            emptyResponseRetries += 1;
-            continue;
-          }
-          // Cap exceeded — finalize honestly. Surface the failure
-          // verbatim so the user sees the truth instead of a blank.
-          const honest =
-            `[empty-response] failed: model returned no content ` +
-            `after ${EMPTY_RESPONSE_RETRY_CAP} retry. The provider ` +
-            `(model/backend) produced an empty completion twice in ` +
-            `a row. Try sending the message again, or restart the ` +
-            `session if it persists.`;
-          finalContent = honest;
-          messages[messages.length - 1] = {
-            role: 'assistant',
-            content: honest,
-          };
-          finishReason = 'stop';
-          return await this.finalize({
-            finalContent,
-            messages,
-            turnCount,
-            toolCallCount,
-            fallbackActivated,
-            finishReason,
-            totalUsage,
-            toolCallTrace,
-            aborted: false,
-          });
-        }
-        // Recovery accounting: a non-empty response after at least
-        // one empty-response retry counts as recovered.
-        if (emptyResponseRetries > 0) {
-          this.emptyResponseMetrics.recovered += 1;
-        }
-        // Phase 23.1: skill-required-tool enforcement. Before letting
-        // the turn end, check whether a skill_view armed a required
-        // sequence and whether every required tool actually fired.
-        // On incomplete-with-retries-available, drop the assistant
-        // message we just appended (so transcripts don't carry the
-        // confabulated summary), inject a corrective system message,
-        // and continue the loop. Mirrors Hermes's incomplete-retry
-        // mechanism (run_agent.py:12966-13022) with a different trigger.
-        const verdict = enforcement.evaluateOnFinal();
-        if (verdict.kind === 'incomplete-can-retry') {
-          messages.pop(); // discard the fabricated final message
-          messages.push({
-            role: 'system',
-            content: enforcement.buildCorrectiveMessage(verdict.missing),
-          });
-          enforcement.incrementRetry();
+      // ── Empty-response guard (cap=1 per turn) ─────────────────────────
+      const isEmpty = (output.content ?? '').length === 0 && output.toolCalls.length === 0;
+      if (isEmpty) {
+        this.emptyResponseMetrics.detected += 1;
+        if (emptyRetriesUsed < EMPTY_RETRY_CAP) {
+          emptyRetriesUsed += 1;
+          this.emptyResponseMetrics.retried += 1;
+          messages.push({ role: 'system', content: EMPTY_RETRY_NOTE });
           continue;
         }
-        if (verdict.kind === 'incomplete-cap-exceeded') {
-          const honestPrefix =
-            `[skill-enforcement] failed: required tools missing for ` +
-            `\`${verdict.skillName}\` after ${verdict.cap} retries: ` +
-            `[${verdict.missing.join(', ')}].\n\n`;
-          finalContent = honestPrefix + (output.content ?? '');
-          // Replace the trailing assistant message with the honest
-          // version so transcripts and downstream callers see the
-          // truthful summary, not the confabulated one.
-          const lastIdx = messages.length - 1;
-          if (
-            lastIdx >= 0 &&
-            messages[lastIdx].role === 'assistant'
-          ) {
-            messages[lastIdx] = { role: 'assistant', content: finalContent };
-          }
-          finishReason = 'stop';
-          return await this.finalize({
-            finalContent,
-            messages,
-            turnCount,
-            toolCallCount,
-            fallbackActivated,
-            finishReason,
-            totalUsage,
-            toolCallTrace,
-            aborted: false,
-          });
-        }
-        finalContent = output.content ?? '';
+        // Cap exceeded — accept the empty response and stop.
+        finalContent = '';
         finishReason = 'stop';
-        return await this.finalize({
-          finalContent,
-          messages,
-          turnCount,
-          toolCallCount,
-          fallbackActivated,
-          finishReason,
-          totalUsage,
-          toolCallTrace,
-          aborted: false,
-        });
+        break;
+      }
+      if (emptyRetriesUsed > 0) {
+        this.emptyResponseMetrics.recovered += 1;
+        emptyRetriesUsed = 0;
       }
 
-      // Dispatch tool calls sequentially. Parallel execution
-      // is deferred to v4.1.
-      const toolMessages: Message[] = [];
-      // Phase 23.4a: track if the gate blocked any call this iteration.
-      // When it does, we inject a corrective system message after the
-      // tool messages and continue the outer loop (provenance retry).
-      // gateCapExceeded short-circuits to honest failure on next final.
-      let provenanceBlockMessage: string | null = null;
-      let provenanceCapExceeded:
-        | null
-        | { videoId: string; cap: number } = null;
-      for (const call of output.toolCalls) {
-        toolCallCount += 1;
-        this.onToolCall?.(call, 'before');
+      // ── Skill-enforcement: record each tool call (skill_view result
+      //    handled after dispatch when we have its body) ────────────────
+      for (const tc of output.toolCalls) {
+        trackers.skill.recordToolCall(tc.name);
+      }
 
-        // Phase 23.4a: pre-dispatch URL provenance gate. Blocks
-        // open_url calls whose YouTube watch id wasn't deposited
-        // by a youtube_search call earlier this turn. Tool does
-        // NOT execute on block — we synthesize an error result so
-        // the model sees the gate fired and the tool didn't,
-        // mirror what a tool-level error looks like in history.
-        const verdict = urlProvenance.checkOpenUrl(call.name, call.arguments);
-        if (verdict.kind === 'block-can-retry' || verdict.kind === 'block-cap-exceeded') {
-          const blockMsg =
-            `Blocked: open_url URL https://www.youtube.com/watch?v=` +
-            `${verdict.videoId} was not returned by any youtube_search ` +
-            `call this turn (URL provenance gate).`;
-          const result: ToolCallResult = {
-            id: call.id,
-            name: call.name,
-            result: null,
-            error: blockMsg,
-          };
-          this.onToolCall?.(call, 'after', result);
-          toolCallTrace.push({
-            name: call.name,
-            result: null,
-            error: blockMsg,
-            verified: false,
+      // ── No tool calls → terminal turn (with skill-retry chance) ──────
+      if (output.toolCalls.length === 0) {
+        const verdict = trackers.skill.evaluateOnFinal();
+        if (verdict.kind === 'incomplete-can-retry') {
+          trackers.skill.incrementRetry();
+          messages.push({
+            role:    'system',
+            content: trackers.skill.buildCorrectiveMessage(verdict.missing),
           });
-          toolMessages.push({
-            role: 'tool',
-            toolCallId: call.id,
-            content: `Error: ${blockMsg}`,
-          });
-          if (verdict.kind === 'block-can-retry') {
-            provenanceBlockMessage =
-              urlProvenance.buildCorrectiveMessage(verdict.videoId);
-            urlProvenance.incrementRetry();
-          } else {
-            provenanceCapExceeded = {
-              videoId: verdict.videoId,
-              cap: verdict.cap,
-            };
-          }
-          // Skill enforcement still observes the call name (the
-          // attempt happened even if blocked) so its retry budget
-          // stays consistent with skill_view-armed sequences.
-          enforcement.recordToolCall(call.name);
           continue;
         }
+        // 'no-skill-armed', 'satisfied', 'incomplete-cap-exceeded' all end
+        // the loop. Tracker handles its own recovered/failed counters.
+        finalContent = output.content ?? '';
+        finishReason = 'stop';
+        break;
+      }
 
+      // ── URL provenance pre-check on outgoing open_url calls ──────────
+      let provenanceRetry = false;
+      for (const tc of output.toolCalls) {
+        const v = trackers.url.checkOpenUrl(tc.name, tc.arguments);
+        if (v.kind === 'block-can-retry') {
+          // Drop the tool-using assistant turn we just appended; inject
+          // a corrective system note so the model knows to retry with a
+          // candidate it actually saw.
+          trackers.url.incrementRetry();
+          messages.pop();
+          messages.push({
+            role:    'system',
+            content: trackers.url.buildCorrectiveMessage(v.videoId),
+          });
+          provenanceRetry = true;
+          break;
+        }
+        if (v.kind === 'pass') {
+          trackers.url.recordRecovery();
+        }
+      }
+      if (provenanceRetry) {
+        // Don't count this against the iteration budget.
+        turnCount -= 1;
+        continue;
+      }
+
+      // ── Dispatch tools sequentially ──────────────────────────────────
+      const turnToolMessages: Message[] = [];
+      for (const call of output.toolCalls) {
+        this.onToolCall?.(call, 'before');
         let result: ToolCallResult;
         try {
           result = await this.toolExecutor(call);
         } catch (err) {
-          // Tool throws don't crash the loop. The model sees the error in
-          // its context and decides what to do —.
-          const message = err instanceof Error ? err.message : String(err);
-          result = { id: call.id, name: call.name, result: null, error: message };
-        }
-
-        this.onToolCall?.(call, 'after', result);
-
-        // Phase 23.4a: deposit youtube_search candidates into the
-        // ledger so subsequent open_url calls this turn can clear
-        // the gate. Recovered-counter increments when an open_url
-        // passes after a prior block — handled below at dispatch
-        // pass-through.
-        urlProvenance.recordToolResult(call.name, result.result);
-        if (call.name === 'open_url' && verdict.kind === 'pass') {
-          urlProvenance.recordRecovery();
-        }
-
-        // Phase 23.1: tracker sees every dispatch (regardless of error).
-        // A failed tool still counts as "called" — the model's job was
-        // to fire the tool; surfacing the error back through tool-result
-        // history is a separate concern.
-        enforcement.recordToolCall(call.name);
-        // If skill_view returned a payload with required_tools, arm the
-        // tracker now so the message-final boundary check has data.
-        const armable = extractSkillViewRequiredTools(call.name, result.result);
-        if (armable) {
-          enforcement.recordSkillView(armable.skillName, armable.requiredTools);
-        }
-
-        // Phase 12: append to trace BEFORE tool message goes onto history.
-        toolCallTrace.push({
-          name: call.name,
-          result: result.result,
-          error: result.error,
-          verified: this.resolveVerifiedFlag?.(result),
-        });
-
-        const toolContent = result.error
-          ? `Error: ${result.error}`
-          : typeof result.result === 'string'
-            ? result.result
-            : JSON.stringify(result.result);
-
-        toolMessages.push({
-          role: 'tool',
-          toolCallId: call.id,
-          content: toolContent,
-        });
-      }
-
-      // ── Phase 13: Iteration budget injection ───────────────────
-      // When ≤30% of budget remains, append a pressure note to the
-      // last tool result so the LLM literally sees it on its next turn.
-      if (this.iterationBudgetInjection && toolMessages.length > 0) {
-        const remaining = this.maxTurns - turnCount;
-        const remainingFraction = remaining / this.maxTurns;
-        if (remainingFraction <= 0.3 && remaining >= 0) {
-          const last = toolMessages[toolMessages.length - 1];
-          const note =
-            `\n\n[iteration budget: ${remaining} of ${this.maxTurns} turns remaining — wrap up soon]`;
-          toolMessages[toolMessages.length - 1] = {
-            ...last,
-            content: last.content + note,
+          result = {
+            id:     call.id,
+            name:   call.name,
+            result: null,
+            error:  err instanceof Error ? err.message : String(err),
           };
         }
-      }
-
-      messages.push(...toolMessages);
-
-      // Phase 23.4a: handle the URL-provenance gate decision now that
-      // tool messages are on history. On cap-exceeded, finalize with
-      // an honest-failure prefix on the assistant content so the user
-      // sees the truth instead of a confabulated open. On block-can-
-      // retry, inject the corrective system message so the next loop
-      // iteration prompts the model with explicit guidance.
-      if (provenanceCapExceeded) {
-        const honestPrefix =
-          `[url-provenance] failed: open_url for ` +
-          `https://www.youtube.com/watch?v=${provenanceCapExceeded.videoId} ` +
-          `blocked after ${provenanceCapExceeded.cap} retries — ` +
-          `the video id was never returned by youtube_search this turn. ` +
-          `The model invented the URL. No browser was opened.\n\n`;
-        finalContent = honestPrefix;
-        // Append a final assistant turn that surfaces the failure
-        // without a model round-trip — we have nothing useful left to
-        // ask the model and forcing another turn just burns budget.
-        messages.push({ role: 'assistant', content: finalContent });
-        finishReason = 'stop';
-        return await this.finalize({
-          finalContent,
-          messages,
-          turnCount,
-          toolCallCount,
-          fallbackActivated,
-          finishReason,
-          totalUsage,
-          toolCallTrace,
-          aborted: false,
+        toolCallCount += 1;
+        toolCallTrace.push({
+          name:     call.name,
+          result:   result.result,
+          error:    result.error,
+          verified: this.resolveVerifiedFlag?.(result),
+        });
+        fullTrace.push({ name: call.name, args: call.arguments });
+        // URL ledger ingest — extracts ids from result body for next turn.
+        trackers.url.recordToolResult(call.name, result.result);
+        // skill_view result → arm the enforcement tracker if the skill
+        // declares required_tools.
+        const skillView = extractSkillViewRequiredTools(call.name, result.result);
+        if (skillView) {
+          trackers.skill.recordSkillView(skillView.skillName, skillView.requiredTools);
+        }
+        this.onToolCall?.(call, 'after', result);
+        turnToolMessages.push({
+          role:        'tool',
+          toolCallId:  call.id,
+          content:     result.error
+            ? `[error] ${result.error}`
+            : stringifyToolResult(result.result),
         });
       }
-      if (provenanceBlockMessage) {
-        messages.push({ role: 'system', content: provenanceBlockMessage });
+
+      // ── Iteration-budget injection on the LAST tool message ──────────
+      if (this.iterationBudgetInjection && turnToolMessages.length > 0) {
+        const remaining = this.maxTurns - turnCount;
+        if (remaining / this.maxTurns <= BUDGET_INJECT_FRAC) {
+          const last = turnToolMessages[turnToolMessages.length - 1];
+          last.content = `${last.content}\n\n[iteration budget: ${remaining} of ${this.maxTurns} turns remaining]`;
+        }
       }
+
+      messages.push(...turnToolMessages);
+      // Loop continues — provider gets the tool results next iteration.
     }
 
-    // Budget exhausted — return partial result. The last assistant message
-    // (if any) becomes the final content; otherwise empty string.
-    finishReason = 'budget_exhausted';
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const msg = messages[i];
-      if (msg.role === 'assistant' && msg.content) {
-        finalContent = msg.content;
-        break;
-      }
-    }
-    return await this.finalize({
+    return {
       finalContent,
       messages,
       turnCount,
@@ -1017,193 +756,70 @@ export class AidenAgent {
       finishReason,
       totalUsage,
       toolCallTrace,
-      aborted: true,
-    });
+      fullTrace,
+    };
   }
 
   /**
-   * Phase 16c: drive the active provider's `callStream` and surface
-   * deltas through `runOpts` callbacks. Returns the assembled
-   * `ProviderCallOutput` from the `done` event so the rest of
-   * `runConversation` is unchanged.
-   *
-   * Mirrors Hermes's "buffer text + suppress on tool_call" semantics
-   * (run_agent.py:6849-6873). Display layer is responsible for
-   * rendering deltas in real time and switching modes when a
-   * `tool_call` event fires; this method just relays.
+   * Drive the configured provider through one turn. Routes to streaming
+   * if the caller opted in AND the adapter implements `callStream`;
+   * otherwise plain `.call()`. Stream callbacks (`onDelta`,
+   * `onFirstDelta`, `onToolCallStart`) are wired here so the surrounding
+   * loop sees the same `ProviderCallOutput` regardless.
    */
-  private async runStreamingTurn(
-    messages: Message[],
-    tools: ToolSchema[],
-    runOpts: RunConversationOptions,
+  private async callProvider(
+    messages:    Message[],
+    tools:       ToolSchema[],
+    runOptions:  RunConversationOptions,
   ): Promise<ProviderCallOutput> {
-    const stream = this.provider.callStream!({ messages, tools, stream: true });
+    const wantStream = runOptions.stream === true && typeof this.provider.callStream === 'function';
+    if (!wantStream) {
+      return this.provider.call({ messages, tools });
+    }
+
     let firstDeltaFired = false;
     let finalOutput: ProviderCallOutput | null = null;
-    for await (const evt of stream as AsyncIterable<StreamEvent>) {
+    const stream = (this.provider.callStream as NonNullable<ProviderAdapter['callStream']>)({
+      messages,
+      tools,
+      stream: true,
+    });
+    for await (const evt of stream) {
       if (evt.type === 'delta') {
         if (!firstDeltaFired) {
           firstDeltaFired = true;
-          try {
-            runOpts.onFirstDelta?.();
-          } catch {
-            // Display callbacks must never break the loop.
-          }
+          runOptions.onFirstDelta?.();
         }
-        try {
-          runOpts.onDelta?.(evt.content);
-        } catch {
-          // Same as above — swallow callback errors.
-        }
+        runOptions.onDelta?.(evt.content);
       } else if (evt.type === 'tool_call') {
-        if (!firstDeltaFired) {
-          firstDeltaFired = true;
-          try {
-            runOpts.onFirstDelta?.();
-          } catch {
-            // ignore
-          }
-        }
-        try {
-          runOpts.onToolCallStart?.(evt.toolCall);
-        } catch {
-          // ignore
-        }
+        runOptions.onToolCallStart?.(evt.toolCall);
       } else if (evt.type === 'done') {
         finalOutput = evt.output;
       }
     }
     if (!finalOutput) {
-      throw new Error(
-        `Provider ${this.provider.apiMode} stream ended without a 'done' event`,
-      );
+      throw new Error('Streaming provider closed without a done event');
     }
     return finalOutput;
   }
-
-  /**
-   * Phase 12: post-loop pass — runs HonestyEnforcement against the trace,
-   * runs SkillTeacher observation, and assembles the final result.
-   *
-   * The two layers compose without coupling: Honesty runs first because it
-   * may rewrite `finalContent` (which SkillTeacher does NOT inspect — it
-   * only looks at the trace + user messages). Layer order matters and is
-   * intentional.
-   */
-  private async finalize(args: {
-    finalContent: string;
-    messages: Message[];
-    turnCount: number;
-    toolCallCount: number;
-    fallbackActivated: boolean;
-    finishReason: 'stop' | 'budget_exhausted' | 'error';
-    totalUsage: { inputTokens: number; outputTokens: number };
-    toolCallTrace: HonestyTraceEntry[];
-    aborted: boolean;
-  }): Promise<AidenAgentResult> {
-    let finalContent = args.finalContent;
-    let honestyFindings: HonestyFinding[] | undefined;
-    let skillCreated: string | undefined;
-
-    // ── Phase 12 layer 2: HonestyEnforcement ──────────────────────
-    if (this.honestyEnforcement && finalContent) {
-      const honesty = await this.honestyEnforcement.check(
-        finalContent,
-        args.messages,
-        args.toolCallTrace,
-      );
-      if (!honesty.passed) {
-        if (honesty.correctedResponse) {
-          finalContent = honesty.correctedResponse;
-        }
-        honestyFindings = honesty.findings;
-      }
-    }
-
-    // ── Phase 12 layer 3: SkillTeacher observation ────────────────
-    if (this.skillTeacher) {
-      const teacherTrace: SkillTeacherTraceEntry[] = args.toolCallTrace.map(
-        (t) => ({
-          name: t.name,
-          args: {},
-          result: t.result,
-          error: t.error,
-          toolset: this.resolveToolset?.(t.name),
-        }),
-      );
-      const proposal = await this.skillTeacher.observeTurn(
-        args.messages,
-        teacherTrace,
-        args.aborted,
-      );
-      if (proposal) {
-        const decision = await this.skillTeacher.handleProposal(
-          proposal,
-          this.skillTeacherCallbacks ?? {},
-        );
-        if (decision.created && decision.skillName) {
-          skillCreated = decision.skillName;
-        }
-      }
-    }
-
-    return {
-      finalContent,
-      messages: args.messages,
-      turnCount: args.turnCount,
-      toolCallCount: args.toolCallCount,
-      fallbackActivated: args.fallbackActivated,
-      finishReason: args.finishReason,
-      totalUsage: args.totalUsage,
-      toolCallTrace: args.toolCallTrace,
-      compressionEvents: this.compressionEvents,
-      auxiliaryUsage: this.auxiliaryClient?.getUsage() ?? {},
-      skillEnforcement: { ...this.skillEnforcementMetrics },
-      urlProvenance: { ...this.urlProvenanceMetrics },
-      emptyResponse: { ...this.emptyResponseMetrics },
-      ...(honestyFindings ? { honestyFindings } : {}),
-      ...(skillCreated ? { skillCreated } : {}),
-    };
-  }
-
-  /**
-   * Phase 23.1: read-only snapshot of cumulative skill-enforcement
-   * counters since this agent instance was constructed. /doctor reads
-   * this; tests do too. Returns a copy so callers can't mutate the
-   * internal counters.
-   */
-  getSkillEnforcementMetrics(): SkillEnforcementMetrics {
-    return { ...this.skillEnforcementMetrics };
-  }
-
-  /**
-   * Phase 23.4a: read-only snapshot of cumulative URL-provenance
-   * counters. Same shape and lifecycle as
-   * getSkillEnforcementMetrics — /doctor reads it for the diagnostic
-   * line, tests for assertions.
-   */
-  getUrlProvenanceMetrics(): UrlProvenanceMetrics {
-    return { ...this.urlProvenanceMetrics };
-  }
-
-  /**
-   * Phase 23.4a-fix2: read-only snapshot of cumulative empty-
-   * response counters. /doctor reads it for the diagnostic line,
-   * tests for assertions.
-   */
-  getEmptyResponseMetrics(): {
-    detected: number;
-    retried: number;
-    recovered: number;
-  } {
-    return { ...this.emptyResponseMetrics };
-  }
 }
 
-function lastUserMessage(messages: Message[]): string {
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const m = messages[i];
+// ── Free helpers ────────────────────────────────────────────────────────
+
+function lastUserMessageContent(history: Message[]): string {
+  for (let i = history.length - 1; i >= 0; i--) {
+    const m = history[i];
     if (m.role === 'user') return m.content;
   }
   return '';
+}
+
+function stringifyToolResult(result: unknown): string {
+  if (result === null || result === undefined) return '';
+  if (typeof result === 'string') return result;
+  try {
+    return JSON.stringify(result);
+  } catch {
+    return String(result);
+  }
 }
