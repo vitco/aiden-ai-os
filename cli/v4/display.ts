@@ -522,6 +522,25 @@ export class Display {
     return this.skin.applyColors(text, kind);
   }
 
+  /**
+   * Phase 26.2.1 — render a tight pill: `‹label VALUE›` (with leading
+   * space-separated label) or `‹VALUE›` when label is empty. The
+   * `‹›` glyphs (U+2039 / U+203A) sit in `muted`; the label sits in
+   * `muted`; the value sits in `kind` (default `brand`). Pure — returns
+   * a string with no trailing newline so callers can compose multiple
+   * pills on a single line.
+   *
+   * Used by the boot card (single `‹v4.0.0›` pill) and Phase 26.2.2's
+   * status-bar pill row.
+   */
+  pill(label: string, value: string, kind: 'brand' | 'success' | 'warn' | 'error' | 'muted' = 'brand'): string {
+    const open = this.skin.applyColors('‹', 'muted');
+    const close = this.skin.applyColors('›', 'muted');
+    const lbl = label ? `${this.skin.applyColors(label, 'muted')} ` : '';
+    const val = this.skin.applyColors(value, kind);
+    return `${open}${lbl}${val}${close}`;
+  }
+
   /** Horizontal rule for grouping CLI output. */
   line(width = 60): void {
     const ch = this.skin.getActive().glyphs?.bullet === '*' ? '-' : '─';

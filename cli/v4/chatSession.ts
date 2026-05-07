@@ -411,17 +411,18 @@ export class ChatSession implements ChatSessionLike {
     }
   }
 
-  // ── Startup card (Phase 23.6: v3 visual style port) ────────────────
-  // Boot rhythm matches the v3 reference (cli/aiden.ts:printBanner):
+  // ── Startup card (Phase 26.2.1: banner polish) ─────────────────────
+  // Boot rhythm:
   //
   //     [AIDEN ASCII art in brand orange]
+  //       Autonomous AI Engine                       (muted tagline)
   //
-  //     ● <provider> <model>  ·  ● <skill_count> skills  ·  <tools> tools  ·  ○ 0 mem
+  //     ● <provider> <model>  ·  ● <N> skills  ·  <M> tools  ·  ○ 0 mem
   //     ────────────────────────────────────────────────
-  //     session  <id>
-  //     v4.0.0
+  //       ‹v4.0.0›  session  <id>                    (pill + session)
   //     ────────────────────────────────────────────────
   //     ready ▸  /help for commands
+  //       ✦ Tip: <random tip>                        (skipped < 60 cols)
   //
   // Pure presentation — no boxen, no inline catalogs.
   async renderStartupCard(): Promise<void> {
@@ -430,6 +431,7 @@ export class ChatSession implements ChatSessionLike {
 
     display.write('\n');
     display.printBanner();
+    display.write(`  ${display.muted('Autonomous AI Engine')}\n`);
     display.write('\n');
 
     const tools = this.opts.toolRegistry.list();
@@ -452,12 +454,18 @@ export class ChatSession implements ChatSessionLike {
       }) + '\n',
     );
     display.write(`  ${display.rule()}\n`);
+    const sessionSlug = (this.sessionId ?? 'new').slice(0, 9);
     display.write(
-      `  ${display.muted('session  ')}${display.muted((this.sessionId ?? 'new').slice(0, 9))}\n`,
+      `  ${display.pill('', `v${VERSION}`)}  ${display.muted('session  ')}${display.muted(sessionSlug)}\n`,
     );
-    display.write(`  ${display.muted(`v${VERSION}`)}\n`);
     display.write(`  ${display.rule()}\n`);
     display.write(display.readyLine('/help for commands') + '\n');
+
+    // Boot tip — gated below 60 cols where wrapping would mangle it.
+    if (display.cols() >= 60) {
+      const tip = getRandomTip();
+      if (tip) display.write(`  ${display.muted(`✦ Tip: ${tip}`)}\n`);
+    }
     display.write('\n');
   }
 
