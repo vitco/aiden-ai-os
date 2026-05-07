@@ -59,7 +59,7 @@ Local-first · Self-healing routing · Browser & terminal control · Persistent 
 <p align="center">
   <img src="https://img.shields.io/badge/Vitest-4-6e9f18?logo=vitest&logoColor=white&style=for-the-badge" alt="Vitest 4" />
   <img src="https://img.shields.io/badge/esbuild-bundler-ffcf00?logo=esbuild&logoColor=black&style=for-the-badge" alt="esbuild" />
-  <img src="https://img.shields.io/badge/electron--builder-NSIS-47848f?style=for-the-badge" alt="electron-builder" />
+  <img src="https://img.shields.io/badge/install-npm%20global-cb3837?logo=npm&logoColor=white&style=for-the-badge" alt="npm install -g aiden-runtime" />
 </p>
 
 <p align="center">
@@ -139,7 +139,7 @@ Most AI agents answer questions. Aiden runs work end-to-end on your machine.
 - **Plugin extension** — drop a plugin into `<aiden-home>/plugins/` and call `ctx.commandRegistry.register()` to add slash commands without touching core
 - **Open source** — AGPL-3.0 core, Apache-2.0 skills. Read every line, modify anything, contribute back.
 
-Aiden is a local-first AI operating system. It runs entirely on your machine — no cloud account required, no telemetry, no data leaving your hardware unless you configure a cloud provider. It ships with a signed Windows installer, Linux AppImage and .deb, and runs in headless API mode on macOS. Features: 68 bundled skills, 42 built-in tools across 11 categories, multi-layer memory architecture, self-healing provider routing across 19 providers, the ability to control your screen, browse the web, run code, send emails and messages, manage files, and hold a full conversation — offline via Ollama.
+Aiden is a local-first AI operating system. It runs entirely on your machine — no cloud account required, no telemetry, no data leaving your hardware unless you configure a cloud provider. It installs as a global npm package (`aiden-runtime`, ~16 MB) on Windows, Linux, WSL, and macOS — Node.js 18+ is the only prerequisite. Features: 68 bundled skills, 42 built-in tools across 11 categories, multi-layer memory architecture, self-healing provider routing across 19 providers, the ability to control your screen, browse the web, run code, send emails and messages, manage files, and hold a full conversation — offline via Ollama.
 
 ---
 
@@ -164,12 +164,14 @@ For commercial deployments with support and indemnification, see [aiden.taracod.
 
 ## Platform support
 
-| Platform | GUI app | API + CLI | Skills available |
-|---|---|---|---|
-| **Windows 10/11** | ✅ signed installer | ✅ | All 68 (including Windows-only skills) |
-| **Linux** | ✅ AppImage / .deb | ✅ headless | ~62 (Windows-only skills auto-skipped) |
-| **WSL 2** | — | ✅ headless | ~62 (Windows-only skills auto-skipped) |
-| **macOS** | — | ✅ headless | ~62 (Windows-only skills auto-skipped) |
+All platforms use the same npm-based install path. Node.js 18+ is the only prerequisite.
+
+| Platform | Install | Skills available |
+|---|---|---|
+| **Windows 10/11** | ✅ `npm install -g aiden-runtime` | All 68 (including Windows-only skills) |
+| **Linux** | ✅ `npm install -g aiden-runtime` | ~62 (Windows-only skills auto-skipped) |
+| **WSL 2** | ✅ `npm install -g aiden-runtime` | ~62 (Windows-only skills auto-skipped) |
+| **macOS** | ✅ `npm install -g aiden-runtime` | ~62 (Windows-only skills auto-skipped) |
 
 Windows-only skills (clipboard history, Defender, OneNote, Outlook COM, registry, Task Scheduler, etc.) are tagged `platform: windows` and silently skipped on other platforms at load time.
 
@@ -224,18 +226,18 @@ npm install -g aiden-runtime
 aiden
 ```
 
-### Prerequisites (for installer / manual builds)
+### Prerequisites (all platforms)
 - Node.js 18+
-- Git
+- Git (only for the manual install path below)
 - Ollama (optional, for offline mode): [ollama.ai](https://ollama.ai)
 
-### Windows — signed installer
+### Windows — one-line install
 
 ```powershell
 irm aiden.taracod.com/install.ps1 | iex
 ```
 
-Or [download the signed installer](https://github.com/taracodlabs/aiden-releases/releases/latest) manually. Windows 10/11, 64-bit, ~500 MB disk space.
+The installer verifies Node.js 18+ then runs `npm install -g aiden-runtime`. Same package as `npx aiden-runtime` above; just adds the `aiden` command to your PATH so you can launch from any terminal.
 
 ### Linux / WSL / macOS — one-line install
 
@@ -648,7 +650,7 @@ Both the terminal CLI and the browser dashboard (`localhost:4200/ui`) expose the
 
 - **TypeScript 5.9** — strict mode, full typing across core, providers, CLI, API.
 - **Node.js 18+** — runtime; `node-fetch` not needed (built-in `fetch`).
-- **Electron 41** — Windows NSIS installer, Linux AppImage + .deb.
+- **Electron 41** — optional desktop wrapper; primary install is npm-based.
 - **Next.js (app router)** — `dashboard-next/` for the browser UI.
 - **React 18** — dashboard component model.
 - **Playwright 1.58** — browser automation backbone.
@@ -658,7 +660,7 @@ Both the terminal CLI and the browser dashboard (`localhost:4200/ui`) expose the
 - **croner** — cron scheduler.
 - **discord.js**, **@slack/web-api**, **whatsapp-web.js**, **twilio**, **nodemailer**, **imap-simple** — channel adapters.
 - **Vitest 4** — test runner; ~1,500 unit + integration tests.
-- **esbuild** + **electron-builder** — build pipeline.
+- **esbuild** — bundler for the npm package; **electron-builder** — optional desktop wrapper.
 - **Cloudflare Workers** — landing page + license server + install-script proxy.
 
 ---
