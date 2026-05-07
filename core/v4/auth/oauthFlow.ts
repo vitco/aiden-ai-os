@@ -180,6 +180,12 @@ export async function runCopyPasteFlow(
   const buildUrl = cfg.buildAuthUrl ?? defaultBuildAuthUrl;
   const authUrl = buildUrl(cfg.authUrl, params);
 
+  // Phase 25.1.5 diagnostic: gated by env var so it never leaks in production.
+  if (process.env.AIDEN_DEBUG_OAUTH === '1') {
+    // eslint-disable-next-line no-console
+    console.error(`[oauth-debug] auth url: ${authUrl}`);
+  }
+
   ua.log('');
   ua.log('Authorise Aiden with your Claude Pro/Max subscription.');
   ua.log('');

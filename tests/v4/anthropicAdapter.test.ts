@@ -2,6 +2,11 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { AnthropicAdapter } from '../../providers/v4/anthropicAdapter';
 import { ProviderError, ProviderRateLimitError } from '../../providers/v4/errors';
 import type { Message, ToolSchema } from '../../providers/v4/types';
+import {
+  __setRunnerForTests as setUaRunner,
+  __resetForTests as resetUa,
+  FALLBACK_VERSION,
+} from '../../providers/v4/anthropic/userAgent';
 
 function makeResponse(
   body: unknown,
@@ -38,12 +43,16 @@ let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   fetchMock = vi.fn();
   vi.stubGlobal('fetch', fetchMock);
+  // Pin the User-Agent detection so tests don't depend on whether `claude`
+  // is on the host PATH. Individual tests override as needed.
+  setUaRunner(async () => '2.1.74');
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.useRealTimers();
   vi.restoreAllMocks();
+  resetUa();
 });
 
 describe('AnthropicAdapter', () => {
@@ -100,20 +109,54 @@ describe('AnthropicAdapter', () => {
     expect(headers['x-api-key']).toBe('sk-ant-test');
     expect(headers['Authorization']).toBeUndefined();
     expect(headers['anthropic-version']).toBe('2023-06-01');
+    // Phase 25.1.5d billing-routing fingerprint — present on EVERY request,
+    // not gated on auth mode.
+    expect(headers['x-app']).toBe('cli');
+    expect(headers['user-agent']).toBe('claude-cli/2.1.74 (external, cli)');
   });
 
-  it('3. OAuth mode sends Authorization Bearer + anthropic-beta header', async () => {
+  it('3. OAuth mode sends Authorization Bearer + 4-flag anthropic-beta header', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
     await new AnthropicAdapter(oauthOptions).call({ messages: [userMsg('hi')], tools: [] });
     const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
     expect(headers['Authorization']).toBe('Bearer oauth-token-xyz');
-    expect(headers['anthropic-beta']).toBe('claude-code-20250219,oauth-2025-04-20');
+    // Phase 25.1.5g: 4-flag set. context-1m-2025-08-07 is account-gated
+    // and 400s subscriptions that lack the entitlement, so it's omitted.
+    const beta = headers['anthropic-beta'];
+    expect(beta).toContain('claude-code-20250219');
+    expect(beta).toContain('oauth-2025-04-20');
+    expect(beta).toContain('interleaved-thinking-2025-05-14');
+    expect(beta).toContain('fine-grained-tool-streaming-2025-05-14');
+    expect(beta).not.toContain('context-1m');
+    expect(beta!.split(',')).toHaveLength(4);
     expect(headers['x-api-key']).toBeUndefined();
+    // 25.1.5d: billing fingerprint also flows on the OAuth path.
+    expect(headers['x-app']).toBe('cli');
+    expect(headers['user-agent']).toMatch(/^claude-cli\/\d+\.\d+\.\d+ \(external, cli\)$/);
   });
 
-  it('4. OAuth mode injects Claude Code identity prefix into system', async () => {
+  it('3c. API-key mode sends NO anthropic-beta header (regression)', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
+    );
+    await new AnthropicAdapter(apiKeyOptions).call({ messages: [userMsg('hi')], tools: [] });
+    const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
+    expect(headers['anthropic-beta']).toBeUndefined();
+  });
+
+  it('3b. User-Agent falls back to claude-cli/<FALLBACK> when claude binary missing', async () => {
+    setUaRunner(async () => null);
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
+    );
+    await new AnthropicAdapter(oauthOptions).call({ messages: [userMsg('hi')], tools: [] });
+    const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
+    expect(headers['user-agent']).toBe(`claude-cli/${FALLBACK_VERSION} (external, cli)`);
+  });
+
+  it('4. OAuth mode emits system as a 2-element block array (Claude Code identity at index 0)', async () => {
     fetchMock.mockResolvedValueOnce(
       makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
     );
@@ -122,8 +165,178 @@ describe('AnthropicAdapter', () => {
       tools: [],
     });
     const body = JSON.parse(fetchMock.mock.calls[0][1].body);
-    expect(body.system.startsWith('You are Claude Code')).toBe(true);
-    expect(body.system).toContain('be brief');
+    expect(Array.isArray(body.system)).toBe(true);
+    expect(body.system).toHaveLength(2);
+    expect(body.system[0]).toEqual({
+      type: 'text',
+      text: "You are Claude Code, Anthropic's official CLI for Claude.",
+    });
+    expect(body.system[1]).toEqual({ type: 'text', text: 'be brief' });
+  });
+
+  it('4b. OAuth with no caller system prompt → single-block identity array', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
+    );
+    await new AnthropicAdapter(oauthOptions).call({
+      messages: [userMsg('hi')],
+      tools: [],
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(Array.isArray(body.system)).toBe(true);
+    expect(body.system).toHaveLength(1);
+    expect(body.system[0].text).toBe(
+      "You are Claude Code, Anthropic's official CLI for Claude.",
+    );
+  });
+
+  it('4c. OAuth with caller system that already includes the prefix → no duplication', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
+    );
+    // Use a payload with no Aiden/Taracod tokens so this test stays
+    // focused on dedup behaviour. Identity sanitization is exercised
+    // separately in test 4e.
+    const baked =
+      "You are Claude Code, Anthropic's official CLI for Claude.\n\n" +
+      'Use British spelling.';
+    await new AnthropicAdapter(oauthOptions).call({
+      messages: [{ role: 'system', content: baked }, userMsg('hi')],
+      tools: [],
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.system).toHaveLength(2);
+    // Block 0 is exactly the prefix, not the caller's whole pre-baked string.
+    expect(body.system[0].text).toBe(
+      "You are Claude Code, Anthropic's official CLI for Claude.",
+    );
+    expect(body.system[1].text).toBe('Use British spelling.');
+  });
+
+  it('4d. API-key mode keeps system as a flat string (no block array)', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
+    );
+    await new AnthropicAdapter(apiKeyOptions).call({
+      messages: [{ role: 'system', content: 'be brief' }, userMsg('hi')],
+      tools: [],
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(typeof body.system).toBe('string');
+    expect(body.system).toBe('be brief');
+  });
+
+  it('4e. OAuth mode rewrites Aiden/Taracod identity in system block 1', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
+    );
+    await new AnthropicAdapter(oauthOptions).call({
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are Aiden, a local-first AI agent built by Taracod. AIDEN never lies.',
+        },
+        userMsg('hi'),
+      ],
+      tools: [],
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const block1 = body.system[1].text;
+    expect(block1).toContain('Claude Code');
+    expect(block1).toContain('Anthropic');
+    expect(block1).toContain('CLAUDE CODE');
+    expect(block1).not.toMatch(/\bAiden\b/);
+    expect(block1).not.toMatch(/\bTaracod\b/);
+  });
+
+  it('4f. API-key mode does NOT rewrite identity (regression)', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
+    );
+    await new AnthropicAdapter(apiKeyOptions).call({
+      messages: [{ role: 'system', content: 'You are Aiden.' }, userMsg('hi')],
+      tools: [],
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.system).toBe('You are Aiden.');
+  });
+
+  it('5a. OAuth mode prefixes outgoing tool names with mcp_', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
+    );
+    const tools: ToolSchema[] = [
+      {
+        name: 'web_search',
+        description: 'searches',
+        inputSchema: { type: 'object', properties: { q: { type: 'string' } }, required: ['q'] },
+      },
+      {
+        name: 'read_file',
+        description: 'reads',
+        inputSchema: { type: 'object', properties: { p: { type: 'string' } }, required: ['p'] },
+      },
+    ];
+    await new AnthropicAdapter(oauthOptions).call({ messages: [userMsg('hi')], tools });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.tools.map((t: any) => t.name)).toEqual(['mcp_web_search', 'mcp_read_file']);
+  });
+
+  it('5b. API-key mode keeps tool names raw (regression)', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'ok' }], stop_reason: 'end_turn' }),
+    );
+    const tools: ToolSchema[] = [
+      {
+        name: 'web_search',
+        description: 'searches',
+        inputSchema: { type: 'object', properties: {} },
+      },
+    ];
+    await new AnthropicAdapter(apiKeyOptions).call({ messages: [userMsg('hi')], tools });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    expect(body.tools[0].name).toBe('web_search');
+  });
+
+  it('5c. OAuth strips mcp_ from incoming tool_use names (decoded back to internal name)', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({
+        content: [
+          { type: 'tool_use', id: 'toolu_2', name: 'mcp_web_search', input: { q: 'cats' } },
+        ],
+        stop_reason: 'tool_use',
+      }),
+    );
+    const result = await new AnthropicAdapter(oauthOptions).call({
+      messages: [userMsg('search')],
+      tools: [],
+    });
+    expect(result.toolCalls).toEqual([
+      { id: 'toolu_2', name: 'web_search', arguments: { q: 'cats' } },
+    ]);
+  });
+
+  it('5d. OAuth prefixes tool_use blocks in assistant message history', async () => {
+    fetchMock.mockResolvedValueOnce(
+      makeResponse({ content: [{ type: 'text', text: 'done' }], stop_reason: 'end_turn' }),
+    );
+    await new AnthropicAdapter(oauthOptions).call({
+      messages: [
+        userMsg('search'),
+        {
+          role: 'assistant',
+          content: '',
+          toolCalls: [{ id: 'tc1', name: 'web_search', arguments: { q: 'x' } }],
+        },
+        { role: 'tool', toolCallId: 'tc1', content: 'result' },
+      ],
+      tools: [],
+    });
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const assistantMsg = body.messages.find((m: any) => m.role === 'assistant');
+    const toolUseBlock = assistantMsg.content.find((b: any) => b.type === 'tool_use');
+    expect(toolUseBlock.name).toBe('mcp_web_search');
   });
 
   it('5. parses simple text response', async () => {

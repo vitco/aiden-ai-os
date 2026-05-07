@@ -81,11 +81,22 @@ export async function loadOAuthProvider(
 }
 
 /**
- * Best-effort cross-platform browser open. Same approach as
- * `tools/v4/web/open_url.ts` but inlined here so this module can be
- * imported from the wizard without pulling the tool registry. On
- * Windows we use `cmd.exe /c start ""` to avoid the well-known shell
- * quoting issue Phase 16f fixed for the open_url tool.
+ * Best-effort cross-platform browser open.
+ *
+ * Phase 25.1.5: the prior implementation routed the URL through
+ * `cmd.exe /c start "" <url>` on Windows. cmd.exe's `&` is a command-chain
+ * separator, and Node's `spawn` does not quote the URL when constructing
+ * the Windows command line — so OAuth URLs (which contain `&` between
+ * every query param) were truncated at the first `&` before the browser
+ * received them. Anthropic then legitimately reported "Missing client_id
+ * parameter" because the request really did lack it.
+ *
+ * The fix is to invoke the OS protocol handler directly so the URL travels
+ * as a single argv element and never passes through a shell parser:
+ *
+ *   Windows  →  rundll32 url.dll,FileProtocolHandler <url>   (ShellExecute)
+ *   macOS    →  open <url>                                    (LaunchServices)
+ *   Linux    →  xdg-open <url>                                (XDG)
  *
  * Always returns — never throws — so the OAuth flow falls back to the
  * "copy this URL into a browser" path silently when no browser is
@@ -95,7 +106,9 @@ export async function openOAuthBrowserUrl(url: string): Promise<void> {
   try {
     const platform = process.platform;
     if (platform === 'win32') {
-      spawn('cmd.exe', ['/c', 'start', '""', url], {
+      // url.dll's FileProtocolHandler invokes ShellExecuteW with the URL
+      // as a single string. No cmd.exe involvement, no `&` truncation.
+      spawn('rundll32.exe', ['url.dll,FileProtocolHandler', url], {
         detached: true,
         stdio: 'ignore',
       }).unref();
