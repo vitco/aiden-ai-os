@@ -352,12 +352,12 @@ function evaluateOne(
         : null;
     }
     case 'contains': {
-      return response.toLowerCase().includes(exp.text.toLowerCase())
+      return normalizeForMatch(response).includes(normalizeForMatch(exp.text))
         ? null
         : `expected response to contain '${exp.text}'${exp.reason ? ` (${exp.reason})` : ''}`;
     }
     case 'absent': {
-      return response.toLowerCase().includes(exp.text.toLowerCase())
+      return normalizeForMatch(response).includes(normalizeForMatch(exp.text))
         ? `expected response NOT to contain '${exp.text}' (got: "${snippet(response, exp.text)}")${exp.reason ? ` (${exp.reason})` : ''}`
         : null;
     }
@@ -381,9 +381,45 @@ function evaluateOne(
 }
 
 function snippet(text: string, hit: string): string {
-  const i = text.toLowerCase().indexOf(hit.toLowerCase());
+  // Search the normalized form (so curly apostrophes etc. don't miss);
+  // slice the ORIGINAL so the diagnostic reflects the model's actual
+  // typography. normalizeForMatch keeps string length stable (every
+  // mapped char is single→single except ellipsis which is single→3 —
+  // see normalizeForMatch comment), so for the typography-mismatch
+  // case the index is faithful to the original.
+  const i = normalizeForMatch(text).indexOf(normalizeForMatch(hit));
   if (i < 0) return text.slice(0, 80);
   const start = Math.max(0, i - 20);
   const end   = Math.min(text.length, i + hit.length + 20);
   return `${start > 0 ? '…' : ''}${text.slice(start, end)}${end < text.length ? '…' : ''}`;
+}
+
+/**
+ * Normalize the auto-typography character class to ASCII before
+ * substring comparison. Surfaced by v4.1.2-slice2b: frontier models
+ * (gpt-5.5 confirmed) emit Unicode curly apostrophes for contractions,
+ * which broke `contains` checks written with straight apostrophes.
+ *
+ * Mappings cover the bug class — every character a smart-typography
+ * pipeline (model output, Word autocorrect, markdown renderer) tends
+ * to produce in place of plain ASCII:
+ *   - U+2018 / U+2019 / U+02BC → '   (curly singles, modifier apostrophe)
+ *   - U+201C / U+201D          → "   (curly doubles)
+ *   - U+2026                   → ... (horizontal ellipsis)
+ *   - U+2013 / U+2014          → -   (en dash, em dash)
+ *
+ * Length is preserved for single-char mappings; the ellipsis case
+ * expands one char to three, which is fine for `indexOf` but means
+ * a `snippet()` cursor over an ellipsis-containing hit would be off
+ * by up to 2 characters. Acceptable for a diagnostic message.
+ *
+ * The function is intentionally pure — exposed for unit testing.
+ */
+export function normalizeForMatch(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/[‘’ʼ]/g, "'")
+    .replace(/[“”]/g, '"')
+    .replace(/…/g, '...')
+    .replace(/[–—]/g, '-');
 }

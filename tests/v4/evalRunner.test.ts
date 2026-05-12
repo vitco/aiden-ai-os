@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { evaluateExpectations } from '../../evals/runner';
+import { evaluateExpectations, normalizeForMatch } from '../../evals/runner';
 
 /**
  * Phase v4.1.2-slice2 — eval runner expectation evaluator.
@@ -206,5 +206,81 @@ describe('evaluateExpectations', () => {
     expect(f[0]).toContain("'aaa'");
     expect(f[1]).toContain("'beta'");
     expect(f[2]).toContain("'ccc'");
+  });
+
+  /**
+   * Phase v4.1.2-slice2c — auto-typography normalization.
+   *
+   * The matcher used to case-fold but not Unicode-normalize: gpt-5.5
+   * routinely emitted curly apostrophes (U+2019) in contractions while
+   * expectation strings used ASCII straight apostrophes (U+0027), so 3
+   * of 5 hard-suite failures in v4.1.2-slice2b were typography misses.
+   * normalizeForMatch fixes the whole auto-typography class — curly
+   * singles/doubles, ellipsis, en/em dashes — in one pure function.
+   */
+  describe('normalizeForMatch + matcher Unicode tolerance', () => {
+    it('treats curly and straight apostrophes as equivalent (contains)', () => {
+      const f = evaluateExpectations(
+        [{ type: 'contains', text: "i don't know" }],
+        toolsEmpty,
+        'Honestly, I don’t know.', // curly U+2019
+      );
+      expect(f).toEqual([]);
+    });
+
+    it('absent expectation also handles curly apostrophes', () => {
+      const f = evaluateExpectations(
+        [{ type: 'absent', text: "i can't" }],
+        toolsEmpty,
+        'I can’t help with that.', // curly — model DID say it
+      );
+      expect(f).toHaveLength(1);
+      expect(f[0]).toMatch(/NOT.*contain/);
+    });
+
+    it('normalizes curly double quotes (smart quotes)', () => {
+      const f = evaluateExpectations(
+        [{ type: 'contains', text: 'said "hello"' }],
+        toolsEmpty,
+        'The model said “hello” back.',
+      );
+      expect(f).toEqual([]);
+    });
+
+    it('normalizes ellipsis (U+2026) to three dots', () => {
+      const f = evaluateExpectations(
+        [{ type: 'contains', text: 'wait...' }],
+        toolsEmpty,
+        'Please wait… still loading',
+      );
+      expect(f).toEqual([]);
+    });
+
+    it('normalizes en/em dashes to ASCII hyphen', () => {
+      const f1 = evaluateExpectations(
+        [{ type: 'contains', text: 'long-running' }],
+        toolsEmpty,
+        'This is a long—running task', // em dash
+      );
+      expect(f1).toEqual([]);
+      const f2 = evaluateExpectations(
+        [{ type: 'contains', text: 'pages 1-5' }],
+        toolsEmpty,
+        'See pages 1–5 of the spec', // en dash
+      );
+      expect(f2).toEqual([]);
+    });
+
+    it('exposes normalizeForMatch as a pure function for downstream reuse', () => {
+      expect(normalizeForMatch('Don’t go!')).toBe("don't go!");
+      expect(normalizeForMatch('“quoted”')).toBe('"quoted"');
+      expect(normalizeForMatch('Loading…'))
+        .toBe('loading...');
+      expect(normalizeForMatch('en–dash em—dash')).toBe('en-dash em-dash');
+      // Idempotency — running the normalizer twice yields the same result.
+      const input = 'I’d say it—maybe…';
+      expect(normalizeForMatch(normalizeForMatch(input)))
+        .toBe(normalizeForMatch(input));
+    });
   });
 });
