@@ -1,3 +1,37 @@
+## v4.1.1 — 2026-05-12
+
+Hotfix release. Fixes ChatGPT Plus OAuth users hitting 400 errors on every message. Adds proactive provider health checks.
+
+### Fixed
+
+- **ChatGPT Plus 400 on every message** — `subagent_fanout` tool schema was missing `items` declaration; OpenAI's Codex backend rejected it on strict validation. Real chats now work normally.
+- **Codex adapter sent orphaned `tool_choice`** — `tool_choice: 'auto'` and `parallel_tool_calls: true` were unconditionally set in the request body even when `tools` was absent. Now conditional on tools being present.
+- **Ollama error doubled** — response body appeared twice in error messages. Adapter no longer pre-formats the body; `ProviderError.composeMessage` handles surface rendering centrally.
+- **README drift** — removed two stale lines claiming `subagent_fanout` was deferred (it shipped in v4.1.0).
+
+### Added
+
+- **`aiden doctor --providers`** — opt-in deep mode that pings each configured / authed provider with a minimal request and reports green / red + latency + error per provider. Catches OAuth-class bugs proactively. Default `aiden doctor` is unchanged (fast config check, ~2 s).
+- **Provider error bodies surfaced** — `ProviderError` constructor now composes the upstream response body (OpenAI / Anthropic-style JSON `error.message`, plain text, or truncated) into the surfaced error message. No more opaque "request failed (400)" with no detail.
+
+### Known issue
+
+- `aiden doctor --providers` shows ChatGPT Plus as red even when real chat works. The diagnostic's no-tools probe triggers a Codex backend edge case (requires non-empty tools field). Real chatgpt-plus chat in the REPL is unaffected. Probe payload will be refined in v4.1.2.
+
+### Upgrade
+
+```bash
+npm install -g aiden-runtime@4.1.1
+```
+
+Or rebuild from source:
+
+```bash
+git pull && npm install -g .
+```
+
+---
+
 ## v4.1.0 — 2026-05-09 · Multi-channel autonomous AI engine
 
 Headline release after 22 ship phases. Aiden becomes a multi-surface
