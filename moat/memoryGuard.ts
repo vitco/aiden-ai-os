@@ -134,6 +134,85 @@ export class MemoryGuard {
     return { ok: true, verified: true, fileLength: text.length };
   }
 
+  /**
+   * Phase v4.1.2 alive-core: section-aware write. Replaces the body of
+   * a markdown `## <header>` section, creating the section at file end
+   * if it doesn't yet exist. Body lines below the header up to the
+   * next `## ` (or EOF) are replaced wholesale.
+   *
+   * Preserves the standard verify-on-disk contract: the post-write read
+   * confirms `newBody` is present and (when applicable) the previous
+   * section body is gone before returning `verified: true`.
+   *
+   * Additive — does not change `guardedAdd` / `guardedReplace` /
+   * `guardedRemove` semantics.
+   */
+  async replaceSection(
+    file: MemoryFile,
+    header: string,
+    newBody: string,
+  ): Promise<GuardedResult> {
+    const headerTrim = header.trim();
+    if (!headerTrim.startsWith('## ')) {
+      return {
+        ok: false,
+        verified: false,
+        reason: 'header must start with "## " (markdown h2)',
+      };
+    }
+    const bodyTrim = newBody.trim();
+    if (!bodyTrim) {
+      return {
+        ok: false,
+        verified: false,
+        reason: 'newBody cannot be empty. Use guardedRemove() to drop a section.',
+      };
+    }
+
+    // Read current file state so we can compute the precise old block.
+    const snapBefore = await this.memory.loadSnapshot();
+    const before = pickFile(snapBefore, file);
+
+    // Match `<header>` and everything below it up to the next `## `
+    // line or EOF. No `m` flag — we want `$` to mean end-of-string;
+    // with `m`, the trailing-`$` lookahead would match at every line
+    // ending and chop off all but the first body line.
+    const escapedHeader = headerTrim.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const sectionRe = new RegExp(
+      `${escapedHeader}[^\\n]*(?:\\r?\\n[\\s\\S]*?)?(?=\\n## |$)`,
+    );
+    const match = before.match(sectionRe);
+    const newSection = `${headerTrim}\n${bodyTrim}`;
+
+    let mutation;
+    if (match && match[0]) {
+      mutation = await this.memory.replace(file, match[0], newSection);
+    } else {
+      // Section doesn't exist — append at end with a blank-line gap.
+      const sep = before.length > 0 && !before.endsWith('\n') ? '\n\n' : '\n';
+      mutation = await this.memory.add(file, `${sep}${newSection}`);
+    }
+    if (!mutation.ok) {
+      return {
+        ok: false,
+        verified: false,
+        reason: mutation.reason ?? 'section write failed',
+      };
+    }
+
+    const snapAfter = await this.memory.loadSnapshot();
+    const after = pickFile(snapAfter, file);
+    if (!after.includes(headerTrim) || !after.includes(bodyTrim)) {
+      return {
+        ok: false,
+        verified: false,
+        reason: 'Section write claimed but header/body not found post-write',
+        fileLength: after.length,
+      };
+    }
+    return { ok: true, verified: true, fileLength: after.length };
+  }
+
   async guardedRemove(
     file: MemoryFile,
     text: string,

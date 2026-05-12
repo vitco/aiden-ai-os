@@ -326,8 +326,11 @@ Reply with ONE word: safe, caution, or dangerous.`;
    * by the chat loop right after `memory_add` returns `verified=true` —
    * this hook is the diagnostic counterpart for verbose mode.
    */
-  onMemoryRefresh = (which: 'memory' | 'user' | 'both'): void => {
-    this.display.dim(`[memory] refreshed system prompt (${which})`);
+  onMemoryRefresh = (files: ReadonlyArray<'memory' | 'user' | 'soul'>): void => {
+    // Phase v4.1.2: argument switched from single-string-or-'both' to
+    // the full sorted set of dirty files (SOUL.md joined the rotation).
+    const label = files.length > 0 ? files.join(', ') : 'none';
+    this.display.dim(`[memory] refreshed system prompt (${label})`);
   };
 }
 

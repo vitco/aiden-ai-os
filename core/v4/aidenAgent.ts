@@ -91,6 +91,14 @@ import { preArmIntent } from './agent/intentPreArm';
 export type ToolExecutor = (call: ToolCallRequest) => Promise<ToolCallResult>;
 
 /**
+ * Phase v4.1.2 alive-core: identity / memory files that can flip the
+ * system-prompt cache dirty bit. Replaces the older single-string
+ * `'memory' | 'user' | 'both' | null` representation with a `Set` so
+ * SOUL.md can join MEMORY.md / USER.md as a turn-time-refreshable file.
+ */
+export type MemoryFile = 'memory' | 'user' | 'soul';
+
+/**
  * One-shot fallback. Activated at most once per `runConversation` when
  * the primary provider throws. Returning a new adapter swaps it in for
  * the rest of the turn; returning null re-throws.
@@ -152,7 +160,7 @@ export interface AidenAgentOptions {
   /** Returns a fresh memory snapshot when the dirty bit triggers a refresh. */
   refreshMemorySnapshot?:  () => Promise<MemorySnapshot>;
   /** Diagnostic hook for the display layer when the prompt gets rebuilt. */
-  onMemoryRefresh?:        (file: 'memory' | 'user' | 'both') => void;
+  onMemoryRefresh?:        (files: ReadonlyArray<MemoryFile>) => void;
   /** Stage-0 intent pre-arm: look up a skill's `required_tools`. */
   lookupSkillRequiredTools?: (skillName: string) => Promise<string[] | null>;
 }
@@ -237,7 +245,11 @@ export class AidenAgent {
   /** Cached system prompt — invalidated by setPersonalityOverlay/markMemoryDirty/explicit. */
   private cachedSystemPrompt:  string | null = null;
   private compressionEvents:    number        = 0;
-  private memoryDirty:          'memory' | 'user' | 'both' | null = null;
+  // Phase v4.1.2: tracks which identity / memory files need a system-
+  // prompt rebuild on the next turn. Empty set = clean. Plain Set keeps
+  // the membership-test path O(1) and avoids the combinatorial union
+  // type the previous representation grew when SOUL.md joined the list.
+  private memoryDirty:          Set<MemoryFile> = new Set();
 
   /** Process-scoped tracker metrics for `/doctor`. */
   private readonly skillEnforcementMetrics: SkillEnforcementMetrics = {
@@ -320,22 +332,32 @@ export class AidenAgent {
   }
 
   /**
-   * Mark MEMORY.md / USER.md as dirty. The next `runConversation` will
-   * call `refreshMemorySnapshot`, rebuild the prompt, fire
-   * `onMemoryRefresh`, and clear the bit. No-op when no refresh callback
-   * is wired (frozen-snapshot semantics retained).
+   * Mark MEMORY.md / USER.md / SOUL.md as dirty. The next
+   * `runConversation` will rebuild the prompt, fire `onMemoryRefresh`,
+   * and clear the dirty set.
+   *
+   *   - 'memory' / 'user' refresh through `refreshMemorySnapshot` (the
+   *     in-memory MEMORY.md / USER.md blobs need a re-read). No-op when
+   *     no refresh callback is wired (frozen-snapshot semantics).
+   *   - 'soul' just invalidates the prompt cache; SOUL.md is re-read
+   *     from disk by `PromptBuilder.build()` on the next rebuild. No
+   *     snapshot callback required, so this kind always takes effect.
    */
-  markMemoryDirty(file: 'memory' | 'user'): void {
-    if (!this.refreshMemorySnapshot) return;
-    if (this.memoryDirty === null) {
-      this.memoryDirty = file;
-    } else if (this.memoryDirty !== file) {
-      this.memoryDirty = 'both';
+  markMemoryDirty(file: MemoryFile): void {
+    if ((file === 'memory' || file === 'user') && !this.refreshMemorySnapshot) {
+      return;
     }
+    this.memoryDirty.add(file);
   }
 
-  getMemoryDirtyState(): 'memory' | 'user' | 'both' | null {
-    return this.memoryDirty;
+  /**
+   * Returns the set of dirty files as a stable-sorted readonly array.
+   * Empty array = clean. (Phase v4.1.2: replaces the older
+   * `'memory' | 'user' | 'both' | null` return type now that SOUL.md
+   * joins the rotation — a Set scales without union-type explosion.)
+   */
+  getMemoryDirtyState(): ReadonlyArray<MemoryFile> {
+    return [...this.memoryDirty].sort();
   }
 
   /** /doctor accessor for cumulative skill-enforcement counters. */
@@ -538,26 +560,34 @@ export class AidenAgent {
   // ── Private helpers ──────────────────────────────────────────────────
 
   private async refreshSystemPromptIfDirty(): Promise<void> {
-    if (this.memoryDirty === null) return;
-    if (!this.refreshMemorySnapshot || !this.promptBuilder || !this.promptBuilderOptions) {
-      this.memoryDirty = null;
+    if (this.memoryDirty.size === 0) return;
+    if (!this.promptBuilder || !this.promptBuilderOptions) {
+      this.memoryDirty.clear();
       return;
     }
-    let snapshot: MemorySnapshot;
-    try {
-      snapshot = await this.refreshMemorySnapshot();
-    } catch {
-      // Leave the dirty bit set so the next turn retries. We don't break
-      // this turn over a transient memory-read failure.
-      return;
+    const dirtyFiles: ReadonlyArray<MemoryFile> = [...this.memoryDirty].sort();
+    // 'soul' is satisfied by a cache invalidation alone — SOUL.md is
+    // re-read by PromptBuilder.build() on the next rebuild. 'memory'
+    // / 'user' need a snapshot refresh first.
+    const needsSnapshot =
+      this.memoryDirty.has('memory') || this.memoryDirty.has('user');
+    if (needsSnapshot && this.refreshMemorySnapshot) {
+      let snapshot: MemorySnapshot;
+      try {
+        snapshot = await this.refreshMemorySnapshot();
+      } catch {
+        // Leave the dirty set as-is so the next turn retries. We don't
+        // break this turn over a transient memory-read failure.
+        return;
+      }
+      this.promptBuilderOptions = {
+        ...this.promptBuilderOptions,
+        memorySnapshot: snapshot,
+      };
     }
-    this.promptBuilderOptions = {
-      ...this.promptBuilderOptions,
-      memorySnapshot: snapshot,
-    };
     this.cachedSystemPrompt = null;
-    this.onMemoryRefresh?.(this.memoryDirty);
-    this.memoryDirty = null;
+    this.onMemoryRefresh?.(dirtyFiles);
+    this.memoryDirty.clear();
   }
 
   private async ensureSystemPrompt(): Promise<string | null> {

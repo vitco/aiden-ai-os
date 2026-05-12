@@ -144,7 +144,23 @@ describe('PromptBuilder slot 1 SOUL.md loading', () => {
     await fs.writeFile(paths.soulMd, customSoul, 'utf8');
     const builder = new PromptBuilder();
     const prompt = await builder.build({ paths });
-    expect(prompt.startsWith(customSoul)).toBe(true);
+    // Phase v4.1.2 alive-core: when SOUL.md is present from disk, the
+    // identity slot is prefixed by the embodiment directive. The SOUL
+    // content follows on a fresh line.
+    expect(prompt).toContain('Embody this identity and tone');
+    expect(prompt).toContain(customSoul);
+    expect(prompt.indexOf('Embody this identity and tone'))
+      .toBeLessThan(prompt.indexOf(customSoul));
+  });
+
+  it('does NOT prepend the embodiment directive when SOUL.md is absent', async () => {
+    const root = await makeTempRoot();
+    const paths = resolveAidenPaths({ rootOverride: root });
+    await ensureAidenDirsExist(paths);
+    // Deliberately do NOT write SOUL.md — builder falls back to DEFAULT_SOUL_MD.
+    const builder = new PromptBuilder();
+    const prompt = await builder.build({ paths });
+    expect(prompt).not.toContain('Embody this identity and tone');
   });
 
   it('falls back to DEFAULT_SOUL_MD when no SOUL.md is on disk', async () => {

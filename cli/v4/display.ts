@@ -30,6 +30,7 @@ import { visibleLength, truncateVisible } from './box';
 import { getReplyRenderer } from './replyRenderer';
 // Optional "Sources" footer when AIDEN_CITATIONS=1 (default off).
 import { renderCitationFooter } from './citationFooter';
+import { buildToolPreview } from './toolPreview';
 
 export interface SpinnerHandle {
   stop(finalText?: string): void;
@@ -948,11 +949,26 @@ export class Display {
   }
 
   /**
-   * Pretty-print a tool call before it executes. Args are JSON-stringified
-   * with a 200-char hard cap so megabyte arguments don't flood the screen.
+   * Pretty-print a tool call before it executes. Phase v4.1.2 first
+   * consults the `TOOL_PRIMARY_ARG` map in `toolPreview.ts` to render
+   * just the meaningful argument (e.g. `terminal: npm test`); falls
+   * back to the legacy full-JSON stringification (200-char hard cap)
+   * for tools that aren't in the map.
    */
   toolPreview(name: string, args: unknown): string {
     const sk = this.skin;
+    const arrow = sk.getActive().glyphs?.arrow ?? '>';
+
+    // Phase v4.1.2: per-tool primary-arg preview.
+    const preview = buildToolPreview(name, args);
+    if (preview !== null) {
+      if (preview === '') {
+        return `${sk.applyColors(arrow, 'tool')} ${sk.applyColors(name, 'tool')}`;
+      }
+      return `${sk.applyColors(arrow, 'tool')} ${sk.applyColors(name, 'tool')} ${sk.applyColors(preview, 'muted')}`;
+    }
+
+    // Unknown tool — original behaviour (full JSON, 200-char cap).
     let serialized: string;
     try {
       serialized = JSON.stringify(args);
@@ -960,7 +976,6 @@ export class Display {
       serialized = String(args);
     }
     if (serialized.length > 200) serialized = `${serialized.slice(0, 197)}...`;
-    const arrow = sk.getActive().glyphs?.arrow ?? '>';
     return `${sk.applyColors(arrow, 'tool')} ${sk.applyColors(name, 'tool')} ${sk.applyColors(serialized, 'muted')}`;
   }
 

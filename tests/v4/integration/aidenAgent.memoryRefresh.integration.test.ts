@@ -43,7 +43,10 @@ describe('integration — memory write turn 1, recall turn 2', () => {
       MockProviderAdapter.stop('I remember concise answers'),
     ]);
     const pb = new PromptBuilder();
-    const refreshLog: Array<'memory' | 'user' | 'both'> = [];
+    // Phase v4.1.2: onMemoryRefresh now receives a sorted readonly
+    // array of the dirty files (SOUL.md joined the rotation), not a
+    // single 'memory' | 'user' | 'both' string.
+    const refreshLog: Array<ReadonlyArray<'memory' | 'user' | 'soul'>> = [];
     const agent = new AidenAgent({
       provider,
       toolExecutor: noopExec,
@@ -56,7 +59,7 @@ describe('integration — memory write turn 1, recall turn 2', () => {
         memorySnapshot: initial,
       },
       refreshMemorySnapshot: () => mgr.loadSnapshot(),
-      onMemoryRefresh: (which) => refreshLog.push(which),
+      onMemoryRefresh: (which) => refreshLog.push([...which]),
     });
 
     // Wire the same way aidenCLI.ts does.
@@ -73,7 +76,8 @@ describe('integration — memory write turn 1, recall turn 2', () => {
     // ── Simulate memory_add fired (real tool wrapper calls mgr.add()) ──
     const r = await mgr.add('user', 'I prefer concise answers');
     expect(r.ok).toBe(true);
-    expect(agent.getMemoryDirtyState()).toBe('user');
+    // Phase v4.1.2: dirty state is now a sorted readonly array.
+    expect(agent.getMemoryDirtyState()).toEqual(['user']);
 
     // ── Turn 2: refresh path runs at startup ──
     await agent.runConversation([
@@ -82,8 +86,8 @@ describe('integration — memory write turn 1, recall turn 2', () => {
     expect(provider.capturedInputs[1].messages[0].content).toContain(
       'I prefer concise answers',
     );
-    expect(refreshLog).toEqual(['user']);
-    expect(agent.getMemoryDirtyState()).toBeNull();
+    expect(refreshLog).toEqual([['user']]);
+    expect(agent.getMemoryDirtyState()).toEqual([]);
 
     await fs.rm(tmpRoot, { recursive: true, force: true });
   });

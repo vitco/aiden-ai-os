@@ -55,6 +55,13 @@ export interface PromptBuilderOptions {
   config?:              ConfigManager;
   memorySnapshot?:      MemorySnapshot;
   skillsList?:          Array<{ name: string; description: string }>;
+  /**
+   * Phase v4.1.2 alive-core: which tool-set tags are currently loaded
+   * in the agent's ToolRegistry. Each known toolset unlocks a paragraph
+   * of behavioural guidance (slot 4.5). Caller builds this from
+   * `toolRegistry.list().map(name => registry.get(name)?.toolset)`.
+   */
+  toolsetsLoaded?:      Set<string>;
   personalityOverlay?:  string;
   initialBudget?:       { used: number; max: number };
   platform?:            'windows' | 'linux' | 'macos';
@@ -95,6 +102,80 @@ const SKILLS_LOAD_NOTE =
   'the underlying capability. Skills carry the procedure the tools alone don\'t.';
 
 /**
+ * Phase v4.1.2 alive-core: when the user has authored a real SOUL.md
+ * (not the bundled default), prepend a one-line embodiment directive
+ * to its content. The directive tells the model to *be* the identity,
+ * not narrate about it — closes the most common "stiff generic reply"
+ * failure mode where the model paraphrases SOUL.md back at the user.
+ *
+ * Intentionally suppressed when the identity slot falls back to
+ * DEFAULT_SOUL_MD: that text is generic by design and the directive
+ * would coach the model to perform a flat persona.
+ */
+const EMBODIMENT_DIRECTIVE =
+  'Embody this identity and tone. Speak as Aiden, not about Aiden. ' +
+  'Avoid generic, stiff replies.';
+
+/**
+ * Phase v4.1.2 alive-core: tool-conditional guidance blocks. Each one
+ * is injected only when the corresponding toolset tag is in
+ * `opts.toolsetsLoaded`. Replaces the "fixed slot order regardless of
+ * capability" assumption — persona shape-shifts per available
+ * capability (the OpenClaw / Hermes pattern from v4.2 recon).
+ *
+ * Key match strings:
+ *   - 'memory'         → MEMORY_GUIDANCE
+ *   - 'session-search' → SESSION_SEARCH_GUIDANCE
+ *   - 'skills'         → SKILLS_GUIDANCE
+ *
+ * Match the strings in `ToolHandler.toolset` on the registered tools
+ * (tools/v4/memory/*.ts ships `toolset: 'memory'`,
+ * tools/v4/sessions/sessionSearch.ts ships `toolset: 'session-search'`,
+ * skill tools ship `toolset: 'skills'`).
+ */
+const MEMORY_GUIDANCE = [
+  '## Persistent memory',
+  '',
+  'You have persistent memory across sessions. Save durable facts using `memory_add`:',
+  'user preferences, environment details, stable conventions. Memory is injected into',
+  'every turn; keep it compact and focused on facts that will still matter later.',
+  'Prioritize what reduces future user steering.',
+].join('\n');
+
+const SESSION_SEARCH_GUIDANCE = [
+  '## Session recall',
+  '',
+  'When the user references something from a past conversation or you suspect',
+  'relevant cross-session context exists, use `session_search` to recall it before',
+  'asking them to repeat themselves.',
+].join('\n');
+
+const SKILLS_GUIDANCE = [
+  '## Skill upkeep',
+  '',
+  'After completing a complex task (5+ tool calls), fixing a tricky error, or',
+  'discovering a non-trivial workflow, save it as a skill so you can reuse it next',
+  'time. When using an existing skill and finding it outdated, patch it immediately',
+  '— don\'t wait to be asked.',
+].join('\n');
+
+/**
+ * Phase v4.1.2 alive-core: execution-discipline prose. Counters the
+ * "I'll run the tests" → no tool call → end-of-turn failure mode by
+ * making the contract explicit. Injected when
+ * `shouldInjectExecutionDiscipline(modelId)` is true (currently always).
+ */
+const EXECUTION_DISCIPLINE_PROSE = [
+  '## Tool use enforcement',
+  '',
+  'When you say you will perform an action ("I\'ll run the tests", "let me check the',
+  'file"), you MUST immediately make the corresponding tool call in the same response.',
+  'Never end your turn with a promise of future action — execute it now. Every',
+  'response should either contain tool calls that make progress, or deliver a final',
+  'result. Responses that only describe intentions without acting are not acceptable.',
+].join('\n');
+
+/**
  * Llama-3.3-specific tool-call format guard. Adapter-side recovery picks
  * up failures, but we'd rather avoid the 400 round-trip.
  */
@@ -109,6 +190,17 @@ const LLAMA_33_TOOL_CALL_HINT =
 export function shouldInjectLlama33ToolHint(modelId: string | undefined): boolean {
   if (!modelId) return false;
   return /llama-?3\.3/i.test(modelId);
+}
+
+/**
+ * Phase v4.1.2: predicate for the execution-discipline prose slot.
+ * Currently always-on — the "act, don't narrate" directive helps every
+ * tool-using model we route through. Narrow this if a specific model
+ * proves counter-productive; better to over-apply a useful prompt than
+ * guess incorrectly which models need it.
+ */
+export function shouldInjectExecutionDiscipline(_modelId: string | undefined): boolean {
+  return true;
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────
@@ -234,8 +326,15 @@ export class PromptBuilder {
     if (!opts.skipFilesystem) {
       identity = await readNonEmpty(opts.paths.soulMd);
     }
+    // Phase v4.1.2: track whether the identity came from a real
+    // user-authored SOUL.md so the embodiment directive only fires
+    // when there's a meaningful persona to embody.
+    const identityFromDisk = identity !== null;
     if (!identity) identity = DEFAULT_SOUL_MD;
-    slots.push({ name: 'identity', content: identity.trim(), optional: false });
+    const identityContent = identityFromDisk
+      ? `${EMBODIMENT_DIRECTIVE}\n\n${identity.trim()}`
+      : identity.trim();
+    slots.push({ name: 'identity', content: identityContent, optional: false });
 
     // ── 2. Personality overlay ────────────────────────────────────────
     const overlay = opts.personalityOverlay?.trim();
@@ -263,6 +362,35 @@ export class PromptBuilder {
       });
     }
 
+    // ── 4.5. Tool-conditional guidance ────────────────────────────────
+    // Each block fires only when its corresponding toolset is loaded.
+    // Order is deterministic so the prefix cache stays stable across
+    // turns with the same toolset set.
+    const toolsets = opts.toolsetsLoaded;
+    if (toolsets && toolsets.size > 0) {
+      if (toolsets.has('memory')) {
+        slots.push({
+          name:     'guidance.memory',
+          content:  MEMORY_GUIDANCE,
+          optional: true,
+        });
+      }
+      if (toolsets.has('session-search')) {
+        slots.push({
+          name:     'guidance.sessionSearch',
+          content:  SESSION_SEARCH_GUIDANCE,
+          optional: true,
+        });
+      }
+      if (toolsets.has('skills')) {
+        slots.push({
+          name:     'guidance.skills',
+          content:  SKILLS_GUIDANCE,
+          optional: true,
+        });
+      }
+    }
+
     // ── 5. Skills ─────────────────────────────────────────────────────
     if (opts.skillsList && opts.skillsList.length > 0) {
       slots.push({
@@ -277,6 +405,18 @@ export class PromptBuilder {
       slots.push({
         name:     'llama33Hint',
         content:  LLAMA_33_TOOL_CALL_HINT,
+        optional: true,
+      });
+    }
+
+    // ── 6.5. Execution discipline ─────────────────────────────────────
+    // Phase v4.1.2: closes the "promise without acting" failure mode.
+    // Model-conditional via shouldInjectExecutionDiscipline so we can
+    // narrow later if a specific model proves counter-productive.
+    if (shouldInjectExecutionDiscipline(opts.modelId)) {
+      slots.push({
+        name:     'executionDiscipline',
+        content:  EXECUTION_DISCIPLINE_PROSE,
         optional: true,
       });
     }

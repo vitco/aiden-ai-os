@@ -371,7 +371,15 @@ export class ChatSession implements ChatSessionLike {
             // Phase 18: raw text prompt for /auth login OAuth code paste.
             prompt: (msg: string) => promptApi.readLine(msg),
           });
-          if (result.exit) break;
+          if (result.exit) {
+            // Phase v4.1.2 alive-core: auto-trigger session_summary on
+            // /quit when the session was substantive (>5 user turns).
+            // SIGINT and crash paths intentionally skip this — they
+            // bypass the slash-command handler entirely (signal handler
+            // at line 274 calls process.exit(0) directly).
+            await this.maybeAutoSummarize();
+            break;
+          }
           if (result.clearHistory) this.history = [];
           // Phase 23.6 — v3 doesn't print a status footer after slash
           // commands; the footer belongs to agent turns only.
@@ -389,6 +397,35 @@ export class ChatSession implements ChatSessionLike {
   }
 
   // ── Inner: a single agent turn ─────────────────────────────────────
+  /**
+   * Phase v4.1.2 alive-core: auto-trigger `session_summary` on /quit
+   * when the session was substantive (>5 user turns). The synthetic
+   * prompt asks the model to craft five bullets and call the tool.
+   *
+   * Best-effort: any failure (provider down, approval denial, tool
+   * error) is logged dimly and /quit proceeds normally. SIGINT path
+   * skips this method entirely because the signal handler does
+   * process.exit(0) before this slash-command branch runs.
+   */
+  private async maybeAutoSummarize(): Promise<void> {
+    const userTurns = this.history.filter((m) => m.role === 'user').length;
+    if (userTurns <= 5) return;          // session too short to summarise
+    if (this.opts.unconfigured)  return; // no provider available
+    try {
+      this.opts.display.dim('Saving session summary to MEMORY.md…');
+      await this.runAgentTurn(
+        'Before we end this session, call the `session_summary` tool with ' +
+        'exactly five concise bullets covering what we worked on, decisions ' +
+        'made, files changed, problems solved, and any open items. Use ' +
+        'trigger: "auto-quit". Don\'t write any prose after the tool call.',
+      );
+    } catch (err) {
+      this.opts.display.dim(
+        `Session summary skipped: ${(err as Error).message}`,
+      );
+    }
+  }
+
   private async runAgentTurn(userInput: string): Promise<void> {
     // Phase 30.2.1 — explore mode: short-circuit BEFORE building the
     // turn-status spinner / agent call. The wizard skipped, so there's

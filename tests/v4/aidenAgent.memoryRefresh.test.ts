@@ -108,14 +108,14 @@ describe('AidenAgent — Phase 16d memory snapshot refresh', () => {
     expect(provider.capturedInputs[0].messages[0].content).toContain('initial');
 
     agent.markMemoryDirty('memory');
-    expect(agent.getMemoryDirtyState()).toBe('memory');
+    expect(agent.getMemoryDirtyState()).toEqual(['memory']);
 
     await agent.runConversation([userMsg('turn 2')]);
     // Rebuild happened: build called twice, refresh called once.
     expect(buildSpy).toHaveBeenCalledTimes(2);
     expect(refreshes.length).toBe(1);
-    // Dirty bit cleared post-rebuild.
-    expect(agent.getMemoryDirtyState()).toBeNull();
+    // Dirty set cleared post-rebuild.
+    expect(agent.getMemoryDirtyState()).toEqual([]);
     // Slot 3 reflects the fresh content.
     expect(provider.capturedInputs[1].messages[0].content).toContain('updated');
     expect(provider.capturedInputs[1].messages[0].content).not.toContain('initial');
@@ -235,20 +235,20 @@ describe('AidenAgent — Phase 16d memory snapshot refresh', () => {
     });
     await agent.runConversation([userMsg('hi')]);
     agent.markMemoryDirty('memory');
-    expect(agent.getMemoryDirtyState()).toBeNull(); // no-op without refresh callback
+    expect(agent.getMemoryDirtyState()).toEqual([]); // no-op without refresh callback
     await agent.runConversation([userMsg('hi 2')]);
     // Frozen-snapshot semantics retained — only one build.
     expect(buildSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('7. multiple writes between turns escalate single-file → "both"', async () => {
+  it('7. multiple writes between turns coalesce in the dirty set', async () => {
     const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-mref-'));
     const provider = new MockProviderAdapter([
       MockProviderAdapter.stop('a'),
       MockProviderAdapter.stop('b'),
     ]);
     const pb = new PromptBuilder();
-    const refreshObserved: Array<'memory' | 'user' | 'both'> = [];
+    const refreshObserved: Array<ReadonlyArray<'memory' | 'user' | 'soul'>> = [];
     const agent = new AidenAgent({
       provider,
       toolExecutor: noopExec,
@@ -261,15 +261,58 @@ describe('AidenAgent — Phase 16d memory snapshot refresh', () => {
         memorySnapshot: snap('m', 'u'),
       },
       refreshMemorySnapshot: async () => snap('m2', 'u2'),
-      onMemoryRefresh: (which) => refreshObserved.push(which),
+      onMemoryRefresh: (which) => refreshObserved.push([...which]),
     });
     await agent.runConversation([userMsg('hi')]);
     agent.markMemoryDirty('memory');
     agent.markMemoryDirty('user');
-    expect(agent.getMemoryDirtyState()).toBe('both');
+    // Phase v4.1.2: dirty state is a sorted readonly array now.
+    expect(agent.getMemoryDirtyState()).toEqual(['memory', 'user']);
     await agent.runConversation([userMsg('hi 2')]);
-    expect(refreshObserved).toEqual(['both']);
-    expect(agent.getMemoryDirtyState()).toBeNull();
+    expect(refreshObserved).toEqual([['memory', 'user']]);
+    expect(agent.getMemoryDirtyState()).toEqual([]);
+  });
+
+  it('7b. SOUL.md dirty bit invalidates cache without snapshot refresh', async () => {
+    const tmp = await fs.mkdtemp(path.join(os.tmpdir(), 'aiden-mref-'));
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.stop('a'),
+      MockProviderAdapter.stop('b'),
+    ]);
+    const pb = new PromptBuilder();
+    const buildSpy = vi.spyOn(pb, 'build');
+    const refreshes: number[] = [];
+    const agent = new AidenAgent({
+      provider,
+      toolExecutor: noopExec,
+      tools: NO_TOOLS,
+      promptBuilder: pb,
+      promptBuilderOptions: {
+        paths: makePaths(tmp),
+        platform: 'linux',
+        skipFilesystem: true,
+        memorySnapshot: snap('m', 'u'),
+      },
+      // refreshMemorySnapshot is still wired (so 'soul' isn't filtered
+      // out by the no-callback guard), but 'soul' shouldn't actually
+      // invoke it — SOUL.md is re-read by PromptBuilder.build() instead.
+      refreshMemorySnapshot: async () => {
+        refreshes.push(1);
+        return snap('m', 'u');
+      },
+    });
+    await agent.runConversation([userMsg('turn 1')]);
+    expect(buildSpy).toHaveBeenCalledTimes(1);
+    expect(refreshes.length).toBe(0);
+
+    agent.markMemoryDirty('soul');
+    expect(agent.getMemoryDirtyState()).toEqual(['soul']);
+
+    await agent.runConversation([userMsg('turn 2')]);
+    // Prompt rebuilt (cache invalidated), but snapshot refresh NOT called.
+    expect(buildSpy).toHaveBeenCalledTimes(2);
+    expect(refreshes.length).toBe(0);
+    expect(agent.getMemoryDirtyState()).toEqual([]);
   });
 
   it('8. refresh callback failure leaves dirty bit set (retry next turn)', async () => {
@@ -304,14 +347,14 @@ describe('AidenAgent — Phase 16d memory snapshot refresh', () => {
     // turn retries the refresh.
     await agent.runConversation([userMsg('hi 2')]);
     expect(provider.capturedInputs[1].messages[0].content).toContain('initial');
-    expect(agent.getMemoryDirtyState()).toBe('memory');
+    expect(agent.getMemoryDirtyState()).toEqual(['memory']);
 
     // Now allow refresh — the still-set dirty bit should drive a retry on the
     // next turn without needing another markMemoryDirty call.
     allowRefresh = true;
     await agent.runConversation([userMsg('hi 3')]);
     expect(provider.capturedInputs[2].messages[0].content).toContain('updated');
-    expect(agent.getMemoryDirtyState()).toBeNull();
+    expect(agent.getMemoryDirtyState()).toEqual([]);
     expect(buildSpy).toHaveBeenCalled();
   });
 });

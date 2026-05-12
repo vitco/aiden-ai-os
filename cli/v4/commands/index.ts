@@ -43,6 +43,7 @@ import { voice } from './voice';
 import { status } from './status';
 import { show } from './show';
 import { history } from './history';
+import { reloadSoul } from './reloadSoul';
 
 export {
   help,
@@ -76,6 +77,7 @@ export {
   status,
   show,
   history,
+  reloadSoul,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -106,6 +108,7 @@ export const allCommands: SlashCommand[] = [
   status,
   show,
   history,
+  reloadSoul,
   reloadMcp,
   reasoning,
   verbose,

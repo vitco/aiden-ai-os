@@ -56,6 +56,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
 
   // ── Identity ── SOUL.md introspection
   identity: 'Identity',
+  // Phase v4.1.2 alive-core: manual SOUL.md cache invalidation.
+  'reload-soul': 'Identity',
 
   // ── System ── housekeeping & process control (default fallback)
   doctor: 'System',

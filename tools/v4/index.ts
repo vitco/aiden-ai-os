@@ -71,6 +71,7 @@ import { processWaitTool } from './process/processWait';
 import { memoryAddTool } from './memory/memoryAdd';
 import { memoryReplaceTool } from './memory/memoryReplace';
 import { memoryRemoveTool } from './memory/memoryRemove';
+import { sessionSummaryTool } from './memory/sessionSummary';
 
 import {
   makeSubagentFanoutTool,
@@ -186,6 +187,8 @@ export function registerWriteTools(registry: ToolRegistry): void {
   registry.register(memoryAddTool);
   registry.register(memoryReplaceTool);
   registry.register(memoryRemoveTool);
+  // Phase v4.1.2 alive-core: cross-session continuity via /quit auto-summary.
+  registry.register(sessionSummaryTool);
 
   // Phase 10: skill_manage — mutating, also goes through the approval
   // engine. skills_list / skill_view stay in registerReadOnlyTools.
@@ -242,3 +245,4 @@ export { processWaitTool } from './process/processWait';
 export { memoryAddTool } from './memory/memoryAdd';
 export { memoryReplaceTool } from './memory/memoryReplace';
 export { memoryRemoveTool } from './memory/memoryRemove';
+export { sessionSummaryTool } from './memory/sessionSummary';

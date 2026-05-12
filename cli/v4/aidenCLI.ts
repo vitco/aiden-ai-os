@@ -28,7 +28,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { Command } from 'commander';
-import { promises as fs } from 'node:fs';
+import { promises as fs, watch as fsWatch } from 'node:fs';
 import path from 'node:path';
 
 import { ChatSession } from './chatSession';
@@ -1019,10 +1019,20 @@ export async function buildAgentRuntime(
   } catch {
     skillsList = [];
   }
+  // Phase v4.1.2 alive-core: enumerate which toolset tags are loaded
+  // so PromptBuilder can inject tool-conditional guidance. Pure
+  // string-set; no ToolRegistry reference threaded through the builder.
+  const toolsetsLoaded = new Set<string>();
+  for (const name of toolRegistry.list()) {
+    const ts = toolRegistry.get(name)?.toolset;
+    if (ts) toolsetsLoaded.add(ts);
+  }
+
   const promptBuilderOptions = {
     paths,
     memorySnapshot,
     skillsList,
+    toolsetsLoaded,
     personalityOverlay: activeOverlay,
     modelId,
   };
@@ -1102,6 +1112,31 @@ export async function buildAgentRuntime(
   memoryManager.onMutation((file) => {
     agent.markMemoryDirty(file === 'user' ? 'user' : 'memory');
   });
+
+  // Phase v4.1.2 alive-core: SOUL.md file watcher. Best-effort —
+  // some filesystems (network mounts, certain WSL configs) don't
+  // support fs.watch reliably. We try to attach; if it fails, the
+  // /reload-soul slash command stays as the manual fallback.
+  try {
+    const soulWatcher = fsWatch(paths.soulMd, { persistent: false }, (eventType) => {
+      if (eventType === 'change' || eventType === 'rename') {
+        agent.markMemoryDirty('soul');
+      }
+    });
+    soulWatcher.on('error', () => {
+      // Some FS backends emit errors mid-stream; degrade to manual
+      // fallback. The slash command still works.
+    });
+    // Phase 23.4b: leak-free shutdown — closed by the existing
+    // process-exit cleanup path. We don't unref since we *want* the
+    // watcher to keep the process alive only as long as the REPL does.
+    process.on('exit', () => { try { soulWatcher.close(); } catch { /* noop */ } });
+  } catch (err) {
+    display.warn(
+      `SOUL.md watcher could not attach (${(err as Error).message}). ` +
+      'Use `/reload-soul` to apply edits mid-session.',
+    );
+  }
 
   // ── Phase v4.1-subagent.1 — subagent_fanout wiring is below
   // (after `bootLogger` is declared and the gateway processor is set
