@@ -1,0 +1,4 @@
+# Phase v4.1.2-slice2: keep the directory tracked so `npm run eval`
+# has somewhere to write JSON results on a fresh clone. The result
+# files themselves are gitignored (per `.gitignore: evals/results/*`
+# with the explicit `!evals/results/.gitkeep` exemption).

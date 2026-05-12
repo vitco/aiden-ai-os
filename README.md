@@ -694,6 +694,30 @@ aiden                  # CLI
 - Follow [Conventional Commits](https://www.conventionalcommits.org/).
 - Run `npm run typecheck` and `npm test` before opening a PR.
 
+### Evals — measuring behavior at scale
+
+Aiden ships an opt-in eval harness that runs scenario-based behavior checks
+against a real provider. Distinct from `npm test` (unit / integration) — evals
+are scenario-driven, make live LLM calls, and are *measurement* rather than
+release gates.
+
+```bash
+npm run eval                                  # default suite (honesty), default provider
+npm run eval:honesty                          # explicit suite
+npm run eval -- --scenario honesty/no-fabricated-file-contents
+npm run eval -- --provider groq --model llama-3.3-70b-versatile
+npm run eval -- --strict                      # exit 1 on any failure (for CI)
+```
+
+Results land in `evals/results/<timestamp>.json` (gitignored — local history).
+Eval failures are signal, not gates: the runner exits 0 unless `--strict`.
+
+Default provider: `chatgpt-plus / gpt-5.5`. Falls back to the test-provider
+chain (Groq / Together via env-var keys) when ChatGPT Plus isn't authed.
+
+Available suites: `honesty` (10 scenarios covering fabricated content, fake
+"I found" claims, claimed actions without tool calls, unverified completions).
+
 ---
 
 ## Community

@@ -37,6 +37,12 @@ config/hardware.json
 # (see CLAUDE.md). Not source of truth, not shipped to users.
 graphify-out/
 
+# Eval result artifacts. Timestamped JSON dumps from `npm run eval` —
+# local-only run history. The directory itself stays tracked via the
+# .gitkeep exemption so a fresh clone has somewhere to write.
+evals/results/*
+!evals/results/.gitkeep
+
 # ── Claude Code session state ─────────────────────────────────────────────────
 .claude/worktrees/
 .claude/settings.local.json
