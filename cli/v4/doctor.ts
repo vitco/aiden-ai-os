@@ -861,6 +861,15 @@ export async function runDoctorCli(opts?: DoctorOptions): Promise<DoctorReport> 
     `\n${report.passed ? 'all checks passed' : 'some checks failed'} in ${report.totalMs} ms\n`,
   );
 
+  // Phase v4.1.1-oauth-fix Phase 5: discoverability hint for the deep
+  // mode. Only emitted in standard mode — if the user already passed
+  // `--providers`, the section right below this is the answer to the hint.
+  if (!opts?.liveness) {
+    process.stdout.write(
+      '  hint: Run `aiden doctor --providers` for live provider checks\n',
+    );
+  }
+
   // Phase v4.1.1-oauth-fix Phase 4: opt-in provider liveness.
   // Runs after the standard report so a failed config check is visible
   // before the network probes start. Section header + summary line are

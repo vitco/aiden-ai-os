@@ -132,8 +132,13 @@ export class OllamaPromptToolsAdapter implements ProviderAdapter {
         const status = response.status;
         const rawText = await this.safeReadText(response);
         const retryable = status >= 500 || status === 429;
+        // Phase v4.1.1-oauth-fix Phase 5: short message only. The raw
+        // body flows via the .raw arg and composeMessage in errors.ts
+        // appends a truncated summary into the final .message — this
+        // file used to inline it, producing duplicated output in
+        // `aiden doctor --providers` and anywhere else err.message is logged.
         const err = new ProviderError(
-          `Provider ${this.providerName} returned ${status}: ${rawText.slice(0, 500)}`,
+          `Provider ${this.providerName} returned ${status}`,
           this.providerName,
           status,
           rawText,
@@ -233,8 +238,10 @@ export class OllamaPromptToolsAdapter implements ProviderAdapter {
       clearTimeout(timer);
       const status = response.status;
       const rawText = await this.safeReadText(response);
+      // Phase v4.1.1-oauth-fix Phase 5: composeMessage handles body
+      // rendering centrally; inlining it here would duplicate.
       throw new ProviderError(
-        `Provider ${this.providerName} returned ${status}: ${rawText.slice(0, 500)}`,
+        `Provider ${this.providerName} returned ${status}`,
         this.providerName,
         status,
         rawText,

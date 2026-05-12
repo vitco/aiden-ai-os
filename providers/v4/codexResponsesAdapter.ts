@@ -262,13 +262,18 @@ export class CodexResponsesAdapter implements ProviderAdapter {
     const body: WireRequestBody = {
       model:                this.model,
       input:                items,
-      tool_choice:          'auto',
-      parallel_tool_calls:  true,
       store:                false,
     };
     if (instructions)                  body.instructions  = instructions;
+    // Phase v4.1.1-oauth-fix Phase 5: `tool_choice` and
+    // `parallel_tool_calls` are only meaningful when tools are present.
+    // OpenAI Codex returns HTTP 400 (empty body) for `tool_choice: 'auto'`
+    // without a `tools` field — surfaced by `aiden doctor --providers`'s
+    // no-tools liveness probe.
     if (input.tools && input.tools.length > 0) {
-      body.tools = input.tools.map(toWireTool);
+      body.tools                = input.tools.map(toWireTool);
+      body.tool_choice          = 'auto';
+      body.parallel_tool_calls  = true;
     }
     if (typeof input.temperature === 'number') {
       (body as Record<string, unknown>).temperature = input.temperature;

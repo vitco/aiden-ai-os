@@ -109,6 +109,23 @@ describe('ProviderError message composition', () => {
     expect(err.message).toContain('xxxxx');
   });
 
+  it('ollama-style plain JSON body does not duplicate when adapter passes raw separately', () => {
+    // Phase v4.1.1-oauth-fix Phase 5 regression: ollama adapter used to
+    // inline the body into the message string AND pass it as `raw`, so
+    // the body appeared twice in err.message after composeMessage ran.
+    // The adapter now emits a short message and lets composeMessage
+    // do the rendering.
+    const err = new ProviderError(
+      'Provider ollama returned 404',
+      'ollama',
+      404,
+      '{"error":"model \'llama3.2\' not found"}',
+    );
+    const occurrences = (err.message.match(/model 'llama3\.2' not found/g) ?? []).length;
+    expect(occurrences).toBe(1);
+    expect(err.message).toContain('Provider ollama returned 404');
+  });
+
   it('preserves .raw for programmatic inspection', () => {
     const rawBody = { error: { message: 'boom', type: 'invalid_request_error' } };
     const err = new ProviderError(
