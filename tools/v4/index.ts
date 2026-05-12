@@ -58,6 +58,15 @@ import { makeLookupToolSchema } from './skills/lookupToolSchema';
 import { systemInfoTool } from './system/systemInfo';
 import { nowPlayingTool } from './system/nowPlaying';
 import { naturalEventsTool } from './system/naturalEvents';
+// Phase v4.1.2-followup-3 computer-control bundle.
+import { screenshotTool } from './system/screenshot';
+import { osProcessListTool } from './system/osProcessList';
+import { mediaKeyTool } from './system/mediaKey';
+import { volumeSetTool } from './system/volumeSet';
+import { appLaunchTool } from './system/appLaunch';
+import { appCloseTool } from './system/appClose';
+import { clipboardReadTool } from './system/clipboardRead';
+import { clipboardWriteTool } from './system/clipboardWrite';
 
 import { shellExecTool } from './terminal/shellExec';
 import { executeCodeTool } from './executeCode';
@@ -115,6 +124,11 @@ export function registerReadOnlyTools(registry: ToolRegistry): void {
   registry.register(systemInfoTool);
   registry.register(nowPlayingTool);
   registry.register(naturalEventsTool);
+
+  // Phase v4.1.2-followup-3 — computer-control read-only tools.
+  registry.register(screenshotTool);
+  registry.register(osProcessListTool);
+  registry.register(clipboardReadTool);
 
   registry.register(makeLookupToolSchema(registry));
 
@@ -193,6 +207,14 @@ export function registerWriteTools(registry: ToolRegistry): void {
   // Phase 10: skill_manage — mutating, also goes through the approval
   // engine. skills_list / skill_view stay in registerReadOnlyTools.
   registry.register(skillManageTool);
+
+  // Phase v4.1.2-followup-3 — computer-control mutating tools. All
+  // route through the approval engine like every other write.
+  registry.register(mediaKeyTool);
+  registry.register(volumeSetTool);
+  registry.register(appLaunchTool);
+  registry.register(appCloseTool);
+  registry.register(clipboardWriteTool);
 }
 
 /** Register every v4 tool. Most callers want this. */
@@ -235,6 +257,15 @@ export { makeLookupToolSchema } from './skills/lookupToolSchema';
 export { systemInfoTool } from './system/systemInfo';
 export { nowPlayingTool } from './system/nowPlaying';
 export { naturalEventsTool } from './system/naturalEvents';
+// Phase v4.1.2-followup-3 computer-control bundle exports.
+export { screenshotTool } from './system/screenshot';
+export { osProcessListTool } from './system/osProcessList';
+export { mediaKeyTool } from './system/mediaKey';
+export { volumeSetTool } from './system/volumeSet';
+export { appLaunchTool } from './system/appLaunch';
+export { appCloseTool } from './system/appClose';
+export { clipboardReadTool } from './system/clipboardRead';
+export { clipboardWriteTool } from './system/clipboardWrite';
 export { shellExecTool } from './terminal/shellExec';
 export { executeCodeTool } from './executeCode';
 export { processSpawnTool } from './process/processSpawn';
