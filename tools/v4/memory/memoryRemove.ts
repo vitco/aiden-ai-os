@@ -11,16 +11,40 @@
  * Returns `verified: true` only after the post-write read confirms
  * the text is gone from the file.
  *
- * Status: PHASE 9.
+ * Phase v4.1.2-bug-X: user-approved durable facts (anything in
+ * MEMORY.md `## Durable facts`) are protected from autonomous
+ * deletion. A subsequent session on a weak model (llama-3.3 in the
+ * smoke test) called memory_remove on a Phase-D-promoted fact with
+ * reasoning "outdated" — violating Phase D's opt-in trust contract.
+ *
+ * The guard is STRICT: if the requested substring appears ANYWHERE
+ * in the `## Durable facts` body, the call is rejected. Substring
+ * removal operates whole-file, so partial protection would still
+ * nuke the durable copy as side-effect. Hard rejection (vs propose-
+ * and-defer) is honest: model must surface to user; only the user
+ * (editing MEMORY.md directly, or via a future `/forget` slash
+ * command) can revoke durable content.
+ *
+ * Status: PHASE 9 (PHASE v4.1.2-bug-X: section protection).
  */
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
+import { containsInSection } from '../../../moat/memoryGuard';
+
+/** Section in MEMORY.md that Phase D promotion writes to. */
+const DURABLE_FACTS_HEADER = '## Durable facts';
 
 export const memoryRemoveTool: ToolHandler = {
   schema: {
     name: 'memory_remove',
     description:
-      'Remove an entry from MEMORY.md or USER.md by substring match. Returns verified=true only after the change is confirmed on disk.',
+      'Remove an entry from MEMORY.md or USER.md by substring match. ' +
+      'CANNOT remove entries in MEMORY.md `## Durable facts` — those are ' +
+      'user-approved facts the user explicitly promoted; only the user ' +
+      'can revoke them by editing MEMORY.md directly. If you think a ' +
+      'durable fact is outdated, surface that to the user and ask them ' +
+      'to confirm; do not propose autonomous removal. Returns ' +
+      'verified=true only after the change is confirmed on disk.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -43,6 +67,40 @@ export const memoryRemoveTool: ToolHandler = {
     }
     const file = args.file === 'user' ? 'user' : 'memory';
     const text = String(args.text ?? '');
+
+    // Phase v4.1.2-bug-X: durable-section protection. Only applies
+    // to MEMORY.md (USER.md has no section structure today). The
+    // check requires snapshot access — when ctx.memory is not
+    // wired (test contexts, future surface refactors), we fall
+    // through to the existing guardedRemove behavior. Real CLI
+    // sessions wire memoryManager, so production paths get the
+    // guard. Documented intentional fall-through.
+    if (file === 'memory' && ctx.memory) {
+      try {
+        const snap = await ctx.memory.loadSnapshot();
+        const memoryMd = snap?.memoryMd ?? '';
+        if (memoryMd && containsInSection(memoryMd, text, DURABLE_FACTS_HEADER)) {
+          const preview = text.length > 60
+            ? `${text.slice(0, 60)}…`
+            : text;
+          return {
+            success: false,
+            verified: false,
+            error:
+              `Cannot remove "${preview}" — it's in MEMORY.md ` +
+              `\`${DURABLE_FACTS_HEADER}\`, which holds user-approved facts. ` +
+              `Only the user can revoke these. Ask them to confirm removal ` +
+              `in their next message; do not propose autonomous deletion.`,
+            file,
+            protectedSection: DURABLE_FACTS_HEADER,
+          };
+        }
+      } catch {
+        // Snapshot read failed — fall through to old behavior rather
+        // than block legitimate removals on transient I/O errors.
+      }
+    }
+
     const r = await ctx.memoryGuard.guardedRemove(file, text);
     return {
       success: r.ok,

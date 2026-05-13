@@ -247,3 +247,49 @@ export class MemoryGuard {
 function pickFile(snap: MemorySnapshot, file: MemoryFile): string {
   return file === 'user' ? snap.userMd : snap.memoryMd;
 }
+
+/**
+ * Phase v4.1.2-bug-X: section-aware containment check.
+ *
+ * Returns `true` if `target` appears anywhere within the body of the
+ * section identified by `sectionHeader` (e.g. `"## Durable facts"`).
+ * The section body runs from the line after the header to the line
+ * before the next `## ` header — or end-of-file, whichever comes
+ * first. Returns `false` when the section doesn't exist OR when the
+ * target sits outside it.
+ *
+ * Pure: no I/O, deterministic from inputs. Used by `memory_remove`
+ * to protect user-approved durable facts from autonomous deletion:
+ * the model proposed substring-match against MEMORY.md, but
+ * substring removal operates whole-file — partial protection would
+ * still nuke the durable copy as side-effect. STRICT containment
+ * (rejects if the substring appears ANYWHERE in the section body)
+ * is the honest guard.
+ *
+ * Case-sensitive: matches the existing `guardedRemove` semantics
+ * which use `String.prototype.includes` directly on the raw content.
+ *
+ * @param fileContent  Full file content (e.g. MEMORY.md as one string).
+ * @param target       Substring the caller intends to remove.
+ * @param sectionHeader Header line including the `## ` prefix.
+ */
+export function containsInSection(
+  fileContent:   string,
+  target:        string,
+  sectionHeader: string,
+): boolean {
+  if (!fileContent || !target || !sectionHeader) return false;
+  const headerEscaped = sectionHeader.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Match the header line, then capture the body until the next `## `
+  // (any h2) or end-of-string. No `m` flag — the trailing-`$` would
+  // otherwise match every line ending and chop the body at the first
+  // newline (the same trap the slice2 sessionSummary regex already
+  // documents).
+  const sectionRe = new RegExp(
+    `${headerEscaped}[^\\n]*\\n([\\s\\S]*?)(?=\\n## |$)`,
+  );
+  const m = fileContent.match(sectionRe);
+  if (!m) return false;
+  const body = m[1] ?? '';
+  return body.includes(target);
+}
