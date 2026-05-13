@@ -53,6 +53,13 @@ import { ModelMetadata } from '../../core/v4/modelMetadata';
 import type { Message } from '../../providers/v4/types';
 import type { HonestyTraceEntry } from '../../moat/honestyEnforcement';
 import {
+  distillSession,
+  type SessionExitPath,
+  type SessionDistillation,
+} from '../../core/v4/sessionDistiller';
+import { writeDistillation } from '../../core/v4/distillationStore';
+import path from 'node:path';
+import {
   enableBracketedPaste,
   disableBracketedPaste,
   stripPasteMarkers,
@@ -235,6 +242,22 @@ export interface ChatSessionOptions {
 
 const STATUS_BAR_WIDTH = 10;
 
+/**
+ * Phase v4.1.2-memory-AB: hard cap on the session distillation
+ * auxiliary call. Default 4000 ms — comfortable headroom for
+ * chatgpt-plus (typical ~1-2s), generous for groq (typical <1s).
+ * Override via `AIDEN_SUMMARY_TIMEOUT_MS` env var for power users.
+ * Above this we abandon the LLM half (still write a deterministic-
+ * only distillation so the session isn't lost) and exit honestly.
+ */
+const SUMMARY_TIMEOUT_MS_DEFAULT = 4_000;
+function resolveSummaryTimeoutMs(): number {
+  const raw = process.env.AIDEN_SUMMARY_TIMEOUT_MS;
+  if (!raw) return SUMMARY_TIMEOUT_MS_DEFAULT;
+  const parsed = Number.parseInt(raw, 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : SUMMARY_TIMEOUT_MS_DEFAULT;
+}
+
 export class ChatSession implements ChatSessionLike {
   history: Message[] = [];
   private sessionId: string | null = null;
@@ -258,6 +281,25 @@ export class ChatSession implements ChatSessionLike {
   // provider used last turn (so a switch surfaces as `groq ──→ together`).
   private lastTurnElapsedMs = 0;
   private lastFooterProvider: string | null = null;
+
+  /**
+   * Phase v4.1.2-memory-AB:
+   * Accumulated tool-call trace across every `runConversation` call
+   * in this ChatSession instance. Fed to the session distiller at
+   * exit to derive deterministic fields (files_touched, tools_used).
+   * Reset only when ChatSession itself is re-instantiated.
+   */
+  private sessionToolTrace: HonestyTraceEntry[] = [];
+
+  /**
+   * Phase v4.1.2-memory-AB:
+   * Idempotency flag. Set ONLY after a successful summary write
+   * (verified-on-disk via MemoryGuard). A failed or timed-out attempt
+   * leaves this `false` so the next exit path retries — matches the
+   * "honest by design / best-effort, log clearly" stance.
+   * Scoped to ChatSession instance lifetime (no DB persistence).
+   */
+  private summarized = false;
 
   constructor(private opts: ChatSessionOptions) {
     this.currentProviderId = opts.initialProviderId;
@@ -330,15 +372,52 @@ export class ChatSession implements ChatSessionLike {
     // 2. Boxed startup card.
     await this.renderStartupCard();
 
-    // 3. Optional SIGINT handler.
-    let sigintHandler: (() => void) | null = null;
+    // 3. Optional SIGINT / SIGTERM handlers.
+    //
+    // Phase v4.1.2-memory-AB: SIGINT used to do `process.exit(0)` directly,
+    // bypassing session_summary + the new distillation file. The Ctrl-C
+    // path is the most common premature exit, so it's now hooked too.
+    // Both signals route to the same async-with-timeout helper; on
+    // timeout (default 4s, override AIDEN_SUMMARY_TIMEOUT_MS) the exit
+    // proceeds anyway with a dim log line — honest about the skip.
+    let sigintHandler: (() => Promise<void>) | null = null;
+    let sigtermHandler: (() => Promise<void>) | null = null;
+    let exitHandler: (() => void) | null = null;
     if (this.opts.installSignalHandler !== false) {
-      sigintHandler = () => {
+      const makeHandler = (sig: SessionExitPath) => async () => {
         this.opts.display.write('\n');
+        this.opts.display.dim(`Got ${sig.toUpperCase()} — saving session before exit…`);
+        try {
+          await this.maybeAutoSummarizeWithTimeout(sig);
+        } catch (err) {
+          this.opts.display.warn(
+            `Session summary skipped on ${sig}: ${(err as Error).message}`,
+          );
+        }
         this.opts.display.dim('Goodbye.');
         process.exit(0);
       };
-      process.on('SIGINT', sigintHandler);
+      sigintHandler  = makeHandler('sigint');
+      sigtermHandler = makeHandler('sigterm');
+      process.on('SIGINT',  sigintHandler);
+      process.on('SIGTERM', sigtermHandler);
+
+      // Last-resort safety net: synchronous-only hook, so we can't run
+      // the auxiliary call here. Just log when we exited without
+      // summarizing so the user knows where to look for missing data.
+      exitHandler = () => {
+        if (!this.summarized) {
+          // Best-effort one-liner — stderr because stdout may be torn
+          // down already.
+          try {
+            process.stderr.write(
+              '[aiden] process exiting without session summary — ' +
+              'distillation file not written for this session.\n',
+            );
+          } catch { /* nothing to do */ }
+        }
+      };
+      process.on('exit', exitHandler);
     }
 
     // 4. Main loop.
@@ -437,12 +516,14 @@ export class ChatSession implements ChatSessionLike {
             prompt: (msg: string) => promptApi.readLine(msg),
           });
           if (result.exit) {
-            // Phase v4.1.2 alive-core: auto-trigger session_summary on
-            // /quit when the session was substantive (≥3 user turns).
-            // SIGINT and crash paths intentionally skip this — they
-            // bypass the slash-command handler entirely (signal handler
-            // at line 274 calls process.exit(0) directly).
-            await this.maybeAutoSummarize();
+            // Phase v4.1.2 alive-core / Phase v4.1.2-memory-AB:
+            // auto-trigger session distillation on /quit when the
+            // session was substantive (≥3 user turns). SIGINT and
+            // SIGTERM now also hit this path via their own handlers
+            // above; the in-memory `summarized` flag prevents double-
+            // writes. The /quit path tags exit_path='quit' so the
+            // distillation file records which exit class fired.
+            await this.maybeAutoSummarizeWithTimeout('quit');
             break;
           }
           if (result.clearHistory) this.history = [];
@@ -454,7 +535,9 @@ export class ChatSession implements ChatSessionLike {
         await this.runAgentTurn(input);
       }
     } finally {
-      if (sigintHandler) process.off('SIGINT', sigintHandler);
+      if (sigintHandler)  process.off('SIGINT',  sigintHandler);
+      if (sigtermHandler) process.off('SIGTERM', sigtermHandler);
+      if (exitHandler)    process.off('exit',    exitHandler);
       if (pasteEnabled) disableBracketedPaste(stdout);
       restorePasteInterceptor();
       restoreResizeGuard();
@@ -485,7 +568,40 @@ export class ChatSession implements ChatSessionLike {
    * signal handler does process.exit(0) before this slash-command
    * branch runs.
    */
-  private async maybeAutoSummarize(): Promise<void> {
+  /**
+   * Phase v4.1.2-memory-AB: combined Phase A (reliable session-end
+   * firing) + Phase B (structured distillation) entry point.
+   *
+   * Drives one auxiliary-LLM call, produces a SessionDistillation,
+   * writes the distillation JSON to <paths.root>/distillations/, AND
+   * writes the bullets-only summary to MEMORY.md via the existing
+   * sessionSummaryTool — both artifacts populated from the single
+   * LLM call (no extra cost over the previous Path D).
+   *
+   * Idempotency: `this.summarized` is set to true ONLY on full
+   * success (MEMORY.md write verified). Failed or timed-out attempts
+   * leave the flag false so the next exit path retries. Matches
+   * Hermes's `_agent_running` pattern minus the gateway complexity.
+   *
+   * Timeout: SUMMARY_TIMEOUT_MS_DEFAULT (4s) override via env var.
+   * On timeout the LLM result is treated as empty → distillation
+   * file written with `partial: true` + deterministic fields only;
+   * MEMORY.md not updated (no bullets to write).
+   *
+   * Honest logging: every skip / timeout / partial path produces a
+   * user-visible dim or warn line. No silent drops.
+   */
+  private async maybeAutoSummarizeWithTimeout(
+    exitPath: SessionExitPath,
+  ): Promise<void> {
+    // Idempotency check first — cheapest possible bail.
+    if (this.summarized) {
+      this.opts.display.dim(
+        `Session already summarized; skipping ${exitPath} re-fire.`,
+      );
+      return;
+    }
+
     const userTurns = this.history.filter((m) => m.role === 'user').length;
     const memoryPath = this.opts.paths?.memoryMd;
 
@@ -514,18 +630,6 @@ export class ChatSession implements ChatSessionLike {
       }
     }
 
-    // Snapshot MEMORY.md state before the synthetic turn so we can
-    // detect whether the agent actually wrote anything. Missing file
-    // is treated as size=0 / mtime=0; equal-to-before-after after the
-    // turn → same outcome (warn the user).
-    const before = await this.snapshotMemoryStat(memoryPath);
-
-    // Phase v4.1.2 session-summary-followup: bypass the main agent loop
-    // entirely. The model could decline to call session_summary even
-    // with a directive prompt (smoke confirmed this). Auxiliary client
-    // generates the bullets deterministically; we call the tool
-    // directly with the parsed bullets, so there's no model decision
-    // about whether to actually save.
     if (!this.opts.auxiliaryClient || !this.opts.memoryGuard || !this.opts.memoryManager) {
       this.opts.display.warn(
         'Skipping session summary — auxiliary client / memory plumbing not wired ' +
@@ -534,35 +638,77 @@ export class ChatSession implements ChatSessionLike {
       return;
     }
 
-    this.opts.display.dim(`Saving session summary to ${memoryPath}…`);
-    this.opts.display.dim('Generating session summary via auxiliary client…');
+    const timeoutMs = resolveSummaryTimeoutMs();
+    const memoryPathSafe = memoryPath!;
+    this.opts.display.dim(
+      `Generating session distillation via auxiliary client (timeout ${timeoutMs}ms)…`,
+    );
 
-    let bullets: string[] | null = null;
+    // Snapshot MEMORY.md state to detect post-write whether the write
+    // actually advanced the file — preserves the verify-on-disk check
+    // from the pre-AB path.
+    const before = await this.snapshotMemoryStat(memoryPathSafe);
+
+    // Single auxiliary call → SessionDistillation. distillSession
+    // owns its own internal timeout, so we don't need an outer race
+    // here; the deterministic fields populate regardless of LLM
+    // outcome (so even a full timeout produces a useful artifact).
+    let dist: SessionDistillation;
     try {
-      bullets = await this.requestSessionBulletsFromAuxiliary();
+      dist = await distillSession({
+        sessionId:        this.sessionId ?? `unbound-${Date.now()}`,
+        startedAt:        new Date(this.startedAt).toISOString(),
+        exitPath,
+        userTurns,
+        messages:         this.history,
+        toolTrace:        this.sessionToolTrace,
+        auxiliaryClient:  this.opts.auxiliaryClient,
+        timeoutMs,
+      });
     } catch (err) {
       this.opts.display.warn(
-        `Session summary failed: auxiliary client errored — ${(err as Error).message}. MEMORY.md unchanged at: ${memoryPath}`,
+        `Session distillation failed: ${(err as Error).message}. ` +
+        `MEMORY.md unchanged at: ${memoryPathSafe}`,
       );
       return;
     }
-    if (!bullets || bullets.length === 0) {
+
+    // Persist the distillation JSON. Failures are recorded into the
+    // slice3 subsystem health surface (when the agent wires one) and
+    // logged here; they don't block the MEMORY.md write.
+    if (this.opts.paths?.root) {
+      const dir = path.join(this.opts.paths.root, 'distillations');
+      try {
+        const file = await writeDistillation(dir, dist);
+        this.opts.display.dim(
+          `Session distillation${dist.partial ? ' (partial)' : ''} saved to ${file}`,
+        );
+      } catch (err) {
+        this.opts.display.warn(
+          `Distillation write failed: ${(err as Error).message}. ` +
+          `(Continuing to MEMORY.md update.)`,
+        );
+      }
+    }
+
+    // Update MEMORY.md `## Recent sessions` via the existing tool — no
+    // change to its on-disk shape (back-compat per slice's hard
+    // constraint). Skip when bullets are empty (full LLM timeout) —
+    // a zero-bullet entry would just be noise in MEMORY.md.
+    if (dist.bullets.length === 0) {
       this.opts.display.warn(
-        `Session summary failed: auxiliary client returned unparseable response. MEMORY.md unchanged at: ${memoryPath}`,
+        `Session summary skipped MEMORY.md update — auxiliary returned no bullets ` +
+        `(distillation file may still have deterministic fields).`,
       );
       return;
     }
 
     try {
-      // Call the tool directly with the auxiliary-generated bullets.
-      // sessionSummaryTool already handles section rotation + 10-entry
-      // cap + verify-on-disk via MemoryGuard.replaceSection — no need
-      // to duplicate that logic here.
       const { sessionSummaryTool } = await import(
         '../../tools/v4/memory/sessionSummary'
       );
       const result = await sessionSummaryTool.execute(
-        { bullets, trigger: 'auto-quit' },
+        { bullets: dist.bullets, trigger: 'auto-quit' },
         {
           cwd:         process.cwd(),
           paths:       this.opts.paths!,
@@ -573,24 +719,29 @@ export class ChatSession implements ChatSessionLike {
 
       if (!result.success) {
         this.opts.display.warn(
-          `Session summary failed: ${result.error ?? 'unknown error'}. MEMORY.md may be unchanged at: ${memoryPath}`,
+          `Session summary failed: ${result.error ?? 'unknown error'}. ` +
+          `MEMORY.md may be unchanged at: ${memoryPathSafe}`,
         );
         return;
       }
     } catch (err) {
       this.opts.display.warn(
-        `Session summary failed during write: ${(err as Error).message}. MEMORY.md unchanged at: ${memoryPath}`,
+        `Session summary failed during write: ${(err as Error).message}. ` +
+        `MEMORY.md unchanged at: ${memoryPathSafe}`,
       );
       return;
     }
 
-    const after = await this.snapshotMemoryStat(memoryPath);
+    const after = await this.snapshotMemoryStat(memoryPathSafe);
     if (memoryGrewBetween(before, after)) {
-      this.opts.display.dim(`Session summary saved to ${memoryPath}`);
+      this.opts.display.dim(`Session summary saved to ${memoryPathSafe}`);
+      // Mark summarized ONLY after both writes verified — partial
+      // states leave the flag false so the next exit path retries.
+      this.summarized = true;
     } else {
       this.opts.display.warn(
         `Session summary write completed but MEMORY.md size+mtime did not advance. ` +
-        `Check ${memoryPath} manually.`,
+        `Check ${memoryPathSafe} manually.`,
       );
     }
   }
@@ -784,6 +935,13 @@ export class ChatSession implements ChatSessionLike {
       // Unverified writes get a quieter line so the user knows the model
       // tried but the round-trip didn't confirm.
       renderMemoryConfirmations(result.toolCallTrace, this.opts.display);
+
+      // Phase v4.1.2-memory-AB: accumulate the turn's tool-call trace
+      // so the session distiller can derive deterministic fields
+      // (files_touched / tools_used) at exit.
+      if (result.toolCallTrace && result.toolCallTrace.length > 0) {
+        this.sessionToolTrace.push(...result.toolCallTrace);
+      }
 
       // When streaming was active and emitted the final content already,
       // skip the markdown re-render — we'd otherwise duplicate text.
