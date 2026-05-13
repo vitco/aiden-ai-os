@@ -275,12 +275,19 @@ export const PROVIDER_REGISTRY: Record<string, ProviderRegistryEntry> = {
     apiMode: 'chat_completions',
     baseUrl: 'https://api.deepseek.com/v1',
     apiKeyEnvVar: 'DEEPSEEK_API_KEY',
-    description: 'DeepSeek direct API — V3 chat + R1 reasoning.',
+    description: 'DeepSeek direct API — V4 Pro reasoning flagship + legacy aliases.',
     tier: 'paid',
     hasFreeTier: false,
     docsUrl: 'https://api-docs.deepseek.com/',
     supportsToolCalling: true,
-    modelIds: ['deepseek-chat', 'deepseek-reasoner'],
+    // Phase v4.1.2-deepseek: `deepseek-v4-pro` prepended as the new
+    // flagship — becomes the auto-pick default for new users via
+    // pickProbeModel(). Legacy `deepseek-chat` and `deepseek-reasoner`
+    // retained for back-compat (still functional aliases of the V4
+    // flash family per DeepSeek docs; deprecated-but-live). Removal
+    // is its own deprecation slice. Per-call thinking + reasoning
+    // _effort defaults for v4-pro live in providers/v4/modelDefaults.ts.
+    modelIds: ['deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner'],
   },
   mistral: {
     id: 'mistral',

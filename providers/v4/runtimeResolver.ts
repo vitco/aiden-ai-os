@@ -47,6 +47,7 @@ import { ChatCompletionsAdapter } from './chatCompletionsAdapter';
 import { AnthropicAdapter } from './anthropicAdapter';
 import { CodexResponsesAdapter } from './codexResponsesAdapter';
 import { OllamaPromptToolsAdapter } from './ollamaPromptToolsAdapter';
+import { getModelDefaults } from './modelDefaults';
 import {
   loadTokens,
   isExpired,
@@ -113,6 +114,11 @@ export class RuntimeResolver {
           model: model.id,
           providerName: entry.id,
           extraHeaders: entry.extraHeaders,
+          // Phase v4.1.2-deepseek: per-model body defaults (e.g.
+          // DeepSeek V4-Pro's mandatory thinking + reasoning_effort).
+          // Undefined for models without registered defaults — adapter
+          // skips the merge in that case.
+          defaultExtraBody: getModelDefaults(entry.id, model.id)?.extraBody,
         });
 
       case 'anthropic_messages':

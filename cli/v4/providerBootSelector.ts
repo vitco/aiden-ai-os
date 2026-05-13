@@ -42,6 +42,11 @@ export const BOOT_PRIORITY: readonly string[] = [
   'claude-pro',    // OAuth — Anthropic equivalent
   'anthropic',     // API key — power-user tier
   'openai',        // API key — power-user tier
+  // Phase v4.1.2-deepseek: paid tier, strong tool-caller, ranked
+  // above groq for the same first-run-UX reason — groq's free-tier
+  // tool emission was the original bug1 (llama-3.3-70b 400s on
+  // tool calls).
+  'deepseek',      // API key — paid, strong tool-caller (V4 Pro)
   'groq',          // free-tier API key — common but tool-emission flaky
   'ollama',        // local — only if daemon up
 ];

@@ -230,6 +230,57 @@ describe('BOOT_PRIORITY (sanity)', () => {
       expect(PROVIDER_REGISTRY[id]).toBeDefined();
     }
   });
+  // Phase v4.1.2-deepseek: deepseek sits between openai and groq.
+  // Paid tier, strong tool-caller; placed above groq because groq's
+  // free-tier tool emission was the original first-run UX bug.
+  it('deepseek is positioned between openai and groq', () => {
+    const i_openai   = BOOT_PRIORITY.indexOf('openai');
+    const i_deepseek = BOOT_PRIORITY.indexOf('deepseek');
+    const i_groq     = BOOT_PRIORITY.indexOf('groq');
+    expect(i_deepseek).toBeGreaterThan(-1);
+    expect(i_openai).toBeLessThan(i_deepseek);
+    expect(i_deepseek).toBeLessThan(i_groq);
+  });
+});
+
+describe('priority-list auto-pick across deepseek (Phase v4.1.2-deepseek)', () => {
+  it('picks deepseek when openai/anthropic/chatgpt-plus all unauthed but deepseek is', async () => {
+    const out = await resolveBootProvider(
+      {},
+      enumerator([
+        cp('chatgpt-plus', false), cp('claude-pro', false),
+        cp('anthropic', false),    cp('openai', false),
+        cp('deepseek', true),      cp('groq', true),
+      ]),
+    );
+    expect(out?.providerId).toBe('deepseek');
+    expect(out?.modelId).toBe('deepseek-v4-pro'); // first non-codex in modelIds
+    expect(out?.source).toBe('auto-priority');
+  });
+
+  it('openai still wins over deepseek when both authed', async () => {
+    const out = await resolveBootProvider(
+      {},
+      enumerator([
+        cp('chatgpt-plus', false), cp('claude-pro', false),
+        cp('anthropic', false),    cp('openai', true),
+        cp('deepseek', true),
+      ]),
+    );
+    expect(out?.providerId).toBe('openai');
+  });
+
+  it('deepseek still beats groq when both authed', async () => {
+    const out = await resolveBootProvider(
+      {},
+      enumerator([
+        cp('chatgpt-plus', false), cp('claude-pro', false),
+        cp('anthropic', false),    cp('openai', false),
+        cp('deepseek', true),      cp('groq', true),
+      ]),
+    );
+    expect(out?.providerId).toBe('deepseek');
+  });
 });
 
 describe('findProviderForModel', () => {

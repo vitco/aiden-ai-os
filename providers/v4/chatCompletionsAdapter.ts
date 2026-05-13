@@ -75,6 +75,18 @@ export interface ChatCompletionsAdapterOptions {
   maxRetries?:    number;
   /** Header overrides — wins over computed headers. e.g. OpenRouter wants HTTP-Referer + X-Title. */
   extraHeaders?:  Record<string, string>;
+  /**
+   * Phase v4.1.2-deepseek: model-mandated body fields merged before
+   * each call. Resolver populates this from `MODEL_DEFAULTS` keyed by
+   * `${providerId}:${modelId}` (see `providers/v4/modelDefaults.ts`).
+   * Per-call `input.extraBody` is merged LAST so callers can override
+   * a default on a single request without re-registering the model.
+   *
+   * Used today only by DeepSeek V4-Pro to set
+   * `{ thinking: { type: 'enabled' }, reasoning_effort: 'high' }`
+   * on every call.
+   */
+  defaultExtraBody?: Record<string, unknown>;
 }
 
 // ── Constants ───────────────────────────────────────────────────────────
@@ -150,16 +162,19 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
   private readonly timeoutMs:    number;
   private readonly maxRetries:   number;
   private readonly extraHeaders: Record<string, string>;
+  /** Phase v4.1.2-deepseek: model-mandated body fields merged on every call. */
+  private readonly defaultExtraBody?: Record<string, unknown>;
 
   constructor(opts: ChatCompletionsAdapterOptions) {
     const baseUrl = opts.baseUrl.replace(/\/+$/, '');
-    this.endpoint     = `${baseUrl}/chat/completions`;
-    this.apiKey       = opts.apiKey;
-    this.model        = opts.model;
-    this.providerName = opts.providerName;
-    this.timeoutMs    = opts.timeoutMs  ?? DEFAULT_TIMEOUT_MS;
-    this.maxRetries   = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
-    this.extraHeaders = opts.extraHeaders ?? {};
+    this.endpoint         = `${baseUrl}/chat/completions`;
+    this.apiKey           = opts.apiKey;
+    this.model            = opts.model;
+    this.providerName     = opts.providerName;
+    this.timeoutMs        = opts.timeoutMs  ?? DEFAULT_TIMEOUT_MS;
+    this.maxRetries       = opts.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.extraHeaders     = opts.extraHeaders ?? {};
+    this.defaultExtraBody = opts.defaultExtraBody;
   }
 
   // ── Non-streaming ────────────────────────────────────────────────────
@@ -229,7 +244,14 @@ export class ChatCompletionsAdapter implements ProviderAdapter {
       // the stream closes promptly and we get accurate token accounting.
       body.stream_options = { include_usage: true };
     }
-    if (input.extraBody) Object.assign(body, input.extraBody);
+    // Phase v4.1.2-deepseek: merge order is base body → defaultExtraBody
+    // (model-mandated, from resolver lookup in MODEL_DEFAULTS) → per-call
+    // input.extraBody (caller). Per-call wins so a single request can
+    // override a default (e.g. disabling thinking on a probe). This
+    // matters because providers/v4/modelDefaults.ts sets thinking +
+    // reasoning_effort for deepseek-v4-pro on EVERY call.
+    if (this.defaultExtraBody) Object.assign(body, this.defaultExtraBody);
+    if (input.extraBody)       Object.assign(body, input.extraBody);
     return body;
   }
 
