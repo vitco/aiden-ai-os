@@ -202,4 +202,85 @@ describe('formatRawForMessage helper', () => {
     expect(formatRawForMessage(42)).toBeNull();
     expect(formatRawForMessage(true)).toBeNull();
   });
+
+  // Phase v4.1.2-bug3: Codex Responses {detail: "..."} envelope.
+  // Surfaced by v4.1.2-slice5 (the chatgpt-plus liveness probe
+  // 400'd with this body shape, but the user saw bare "request
+  // failed (400)" until we manually instrumented).
+
+  it('extracts Codex {detail: "..."} envelope verbatim', () => {
+    expect(
+      formatRawForMessage({
+        detail: "The 'gpt-5.1-codex-max' model is not supported when using Codex with a ChatGPT account.",
+      }),
+    ).toBe("The 'gpt-5.1-codex-max' model is not supported when using Codex with a ChatGPT account.");
+  });
+
+  it('falls through to null when detail is empty', () => {
+    expect(formatRawForMessage({ detail: '' })).toBeNull();
+  });
+
+  it('falls through to null when detail is non-string (FastAPI array form)', () => {
+    // FastAPI schema validation: detail is an array of {loc, msg, type}.
+    // Leave it to .raw for programmatic consumers; the message tail
+    // stays empty rather than rendering "[object Object]".
+    expect(
+      formatRawForMessage({
+        detail: [{ loc: ['body', 'tools'], msg: 'invalid', type: 'value_error' }],
+      }),
+    ).toBeNull();
+    // Nested objects.
+    expect(
+      formatRawForMessage({ detail: { code: 'BAD_MODEL', reason: 'tier' } }),
+    ).toBeNull();
+  });
+
+  it('truncates long detail bodies to 300 chars with ellipsis', () => {
+    const long = 'd'.repeat(500);
+    const out = formatRawForMessage({ detail: long });
+    expect(out!.length).toBeLessThanOrEqual(301);
+    expect(out).toMatch(/…$/);
+  });
+
+  it('regression: OpenAI envelope still wins over a co-present detail field', () => {
+    // Defensive — if a provider ever returns both shapes in the same
+    // body, the OpenAI envelope is the canonical one we already
+    // recognised, so it must keep precedence.
+    expect(
+      formatRawForMessage({
+        error: { message: 'canonical openai reason' },
+        detail: 'codex reason',
+      }),
+    ).toBe('canonical openai reason');
+  });
+
+  it('regression: top-level message still wins over detail', () => {
+    expect(
+      formatRawForMessage({
+        message: 'top-level reason',
+        detail:  'codex reason',
+      }),
+    ).toBe('top-level reason');
+  });
+});
+
+describe('ProviderError composes Codex {detail} into the surfaced message', () => {
+  it('renders the Codex detail string in the tail', () => {
+    // The exact body captured in slice5's diagnostic instrumentation.
+    const err = new ProviderError(
+      'Provider chatgpt-plus request failed (400)',
+      'chatgpt-plus',
+      400,
+      {
+        detail: "The 'gpt-5.1-codex-max' model is not supported when using Codex with a ChatGPT account.",
+      },
+      false,
+    );
+    expect(err.message).toContain('Provider chatgpt-plus request failed (400)');
+    expect(err.message).toContain("'gpt-5.1-codex-max' model is not supported");
+    // .raw is preserved verbatim so doctor / programmatic consumers
+    // see the full envelope (including the leading FastAPI key).
+    expect((err.raw as { detail: string }).detail)
+      .toContain("'gpt-5.1-codex-max'");
+  });
 });

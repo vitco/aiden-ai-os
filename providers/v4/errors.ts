@@ -16,10 +16,17 @@
 
 /**
  * Format a raw response body for inclusion in the user-facing error
- * message. Recognises the OpenAI / Anthropic JSON envelope shape
- * (`{ error: { message: "..." } }`) and falls back to the raw string
- * for plain-text bodies. Returns null when nothing useful is available
- * so callers can omit the ": <detail>" tail entirely.
+ * message. Recognises three JSON envelope shapes and falls back to the
+ * raw string for plain-text bodies. Returns null when nothing useful is
+ * available so callers can omit the ": <detail>" tail entirely.
+ *
+ * Recognised envelopes (most-specific first):
+ *   1. OpenAI / Anthropic:  `{ error: { message: "..." } }`
+ *   2. Top-level message:   `{ message: "..." }`
+ *   3. Codex Responses:     `{ detail: "..." }` (Phase v4.1.2-bug3 —
+ *      surfaced by slice5: the Codex backend at chatgpt.com/backend-api/
+ *      codex/responses returns 4xx bodies in this shape, e.g.
+ *      `{"detail": "The 'gpt-5.1-codex-max' model is not supported..."}`)
  *
  * Truncates to 300 chars to keep multi-line responses from blowing
  * up the user's terminal — full body remains on `error.raw` for
@@ -41,6 +48,15 @@ export function formatRawForMessage(raw: unknown): string | null {
     const topMsg = (raw as { message?: unknown }).message;
     if (typeof topMsg === 'string' && topMsg.length > 0) {
       return topMsg.length > 300 ? `${topMsg.slice(0, 300)}…` : topMsg;
+    }
+    // Codex Responses envelope: { detail: "..." }. Distinct from the
+    // OpenAI shape — the Codex backend uses FastAPI-style validation
+    // errors that surface as `detail` (str) for tier/auth rejections
+    // and `detail: [{...}]` for schema errors. Only the string form is
+    // useful in the message tail; the array form is left to .raw.
+    const detail = (raw as { detail?: unknown }).detail;
+    if (typeof detail === 'string' && detail.length > 0) {
+      return detail.length > 300 ? `${detail.slice(0, 300)}…` : detail;
     }
     return null;
   }
