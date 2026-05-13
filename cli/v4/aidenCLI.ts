@@ -1035,6 +1035,19 @@ export async function buildAgentRuntime(
     () => skillOutcomeHealth.snapshot(),
   );
 
+  // Phase v4.1.2-memory-D fold-in (memory-C Q3 open): recall-session
+  // health tracker. The tool itself (tools/v4/sessions/recallSession.ts)
+  // stays pure of registry knowledge for testability; the registry
+  // caller wires a tracker the tool can record into via ctx. Until
+  // the tool plumbs ctx → tracker (separate follow-up), the slot stays
+  // registered with a snapshot reader so doctor's expand-on-degradation
+  // path sees the subsystem exists even at zero observations.
+  const recallSessionHealth = new SubsystemHealthTracker('recall-session');
+  subsystemHealthRegistry.register(
+    'recall-session',
+    () => recallSessionHealth.snapshot(),
+  );
+
   const skillTeacher = new SkillTeacher(
     skillLoader,
     skillManageProxy,

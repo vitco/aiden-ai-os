@@ -58,6 +58,12 @@ import {
   type SessionDistillation,
 } from '../../core/v4/sessionDistiller';
 import { writeDistillation } from '../../core/v4/distillationStore';
+import { extractCandidates } from '../../core/v4/promotionCandidates';
+import {
+  promptForApproval,
+  writeApprovedDurableFacts,
+  readExistingDurableFactsBody,
+} from './promotionPrompt';
 import path from 'node:path';
 import {
   enableBracketedPaste,
@@ -301,6 +307,15 @@ export class ChatSession implements ChatSessionLike {
    */
   private summarized = false;
 
+  /**
+   * Phase v4.1.2-memory-D:
+   * Last successful distillation, cached so the promotion-prompt flow
+   * (`/quit` path only — SIGINT/SIGTERM skip) can extract candidates
+   * without re-driving the auxiliary LLM. Mirrors `summarized` —
+   * populated alongside it after a verified write.
+   */
+  private lastDistillation: SessionDistillation | null = null;
+
   constructor(private opts: ChatSessionOptions) {
     this.currentProviderId = opts.initialProviderId;
     this.currentModelId = opts.initialModelId;
@@ -524,6 +539,14 @@ export class ChatSession implements ChatSessionLike {
             // writes. The /quit path tags exit_path='quit' so the
             // distillation file records which exit class fired.
             await this.maybeAutoSummarizeWithTimeout('quit');
+            // Phase v4.1.2-memory-D: promotion prompt — only on /quit,
+            // NEVER from signal handlers (async stdin in a signal
+            // handler context is unsafe). Distillation files from
+            // SIGINT-exited sessions stay on disk; their candidates
+            // surface on the next `/quit` only if the conversation
+            // is resumed in the same process (not today's behavior),
+            // otherwise they're skipped — documented in commit.
+            await this.maybeRunPromotion(promptApi);
             break;
           }
           if (result.clearHistory) this.history = [];
@@ -738,10 +761,110 @@ export class ChatSession implements ChatSessionLike {
       // Mark summarized ONLY after both writes verified — partial
       // states leave the flag false so the next exit path retries.
       this.summarized = true;
+      // Phase v4.1.2-memory-D: cache the distillation for the promotion
+      // flow. The /quit handler (and only /quit) consults this to build
+      // candidates without re-driving the auxiliary LLM.
+      this.lastDistillation = dist;
     } else {
       this.opts.display.warn(
         `Session summary write completed but MEMORY.md size+mtime did not advance. ` +
         `Check ${memoryPathSafe} manually.`,
+      );
+    }
+  }
+
+  /**
+   * Phase v4.1.2-memory-D: promotion-prompt flow.
+   *
+   * Called from the `/quit` path ONLY (NOT from SIGINT/SIGTERM
+   * handlers — async stdin can't be safely driven from a signal
+   * handler context). Builds candidates from `this.history` +
+   * `this.lastDistillation`, dedups against the existing
+   * `## Durable facts` section in MEMORY.md, prompts the user,
+   * persists approved selections.
+   *
+   * Gates (any false → silent no-op):
+   *   - this.summarized              (need a fresh distillation)
+   *   - this.lastDistillation        (set alongside summarized)
+   *   - this.opts.memoryManager      (real CLI sessions only)
+   *   - this.opts.memoryGuard        (real CLI sessions only)
+   *
+   * UX rules per Phase D's Q5 first-run experience:
+   *   - 0 candidates AND 0 totalBeforeDedup → completely silent
+   *   - 0 candidates AFTER dedup, but some were dropped → dim line
+   *     "N candidates already in durable facts — nothing new to promote"
+   *   - >0 candidates → prompt for approval, write approved
+   */
+  private async maybeRunPromotion(api: ChatPromptApi): Promise<void> {
+    if (!this.summarized || !this.lastDistillation) return;
+    if (!this.opts.memoryManager || !this.opts.memoryGuard) return;
+
+    let existingBody: string;
+    try {
+      existingBody = await readExistingDurableFactsBody(this.opts.memoryManager);
+    } catch (err) {
+      this.opts.display.warn(
+        `Could not read existing durable facts: ${(err as Error).message}. ` +
+        `Promotion skipped.`,
+      );
+      return;
+    }
+
+    const built = extractCandidates(
+      this.history,
+      this.lastDistillation,
+      existingBody,
+    );
+
+    // Silent on truly empty sessions; reward the user on "all already saved".
+    if (built.candidates.length === 0) {
+      if (built.totalBeforeDedup === 0) {
+        return; // no signals + no distillation gold to promote — silent
+      }
+      if (built.dedupedAgainstExisting > 0) {
+        this.opts.display.dim(
+          `${built.dedupedAgainstExisting} candidate${built.dedupedAgainstExisting === 1 ? '' : 's'} ` +
+          `already in durable facts — nothing new to promote.`,
+        );
+      }
+      return;
+    }
+
+    let approved;
+    try {
+      approved = await promptForApproval(api, this.opts.display, built.candidates);
+    } catch (err) {
+      // The prompt API throwing is rare (broken stdin, etc.) — log
+      // and skip; no auto-write on error per "opt-in by design".
+      this.opts.display.warn(
+        `Promotion prompt failed: ${(err as Error).message}. ` +
+        `Nothing was written to durable facts.`,
+      );
+      return;
+    }
+    if (approved.length === 0) return;     // user replied skip / none / unparseable
+
+    try {
+      const result = await writeApprovedDurableFacts(
+        this.opts.memoryManager,
+        this.opts.memoryGuard,
+        approved,
+      );
+      if (result.ok && result.verified) {
+        this.opts.display.dim(
+          `Promoted ${approved.length} fact${approved.length === 1 ? '' : 's'} ` +
+          `to MEMORY.md \`## Durable facts\`.`,
+        );
+      } else {
+        this.opts.display.warn(
+          `Durable-facts write completed but did not verify: ` +
+          `${result.reason ?? 'unknown'}. Inspect MEMORY.md manually.`,
+        );
+      }
+    } catch (err) {
+      this.opts.display.warn(
+        `Durable-facts write failed: ${(err as Error).message}. ` +
+        `MEMORY.md may be unchanged.`,
       );
     }
   }
