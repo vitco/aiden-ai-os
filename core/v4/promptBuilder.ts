@@ -186,7 +186,8 @@ const EXECUTION_DISCIPLINE_PROSE = [
   'file"), you MUST immediately make the corresponding tool call in the same response.',
   'Never end your turn with a promise of future action — execute it now. Every',
   'response should either contain tool calls that make progress, or deliver a final',
-  'result. Responses that only describe intentions without acting are not acceptable.',
+  'result. When the user requests an action, take it. When the user requests',
+  'discussion, discuss.',
 ].join('\n');
 
 /**

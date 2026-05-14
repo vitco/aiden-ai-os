@@ -7,6 +7,7 @@ import {
   Display,
   countNewlines,
   splitAtUnclosedBold,
+  isPreFramedLine,
 } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
 
@@ -901,5 +902,249 @@ describe('splitAtUnclosedBold (v4.1.3-essentials)', () => {
     const r = splitAtUnclosedBold(next);
     expect(r.carry).toBe('');
     expect(r.rerenderable).toBe('**Live tool indicator** working');
+  });
+});
+
+// ── v4.1.4 reply-quality polish — frame integration via Display ────────────
+//
+// agentTurn and tryRerenderInPlace now route through frame.ts for both
+// indent (gutter = 3 cols) and ANSI-aware soft wrap. Tests below assert
+// the visible left edge at the gutter and that resetStreamFrameForResize
+// neutralises the per-chunk row counter for the resize-reflow path.
+
+describe('Display v4.1.4 frame integration', () => {
+  function captureDisplay(opts: { tty?: boolean; columns?: number } = {}): {
+    d: Display;
+    chunks: string[];
+  } {
+    const chunks: string[] = [];
+    const out = new Writable({
+      write(chunk, _enc, cb) { chunks.push(chunk.toString()); cb(); },
+    }) as Writable & { isTTY?: boolean; columns?: number };
+    out.isTTY  = opts.tty ?? true;
+    out.columns = opts.columns ?? 80;
+    const skin = new SkinEngine({ forceMono: true });
+    return {
+      d: new Display({ stdout: out as unknown as NodeJS.WriteStream, skin }),
+      chunks,
+    };
+  }
+
+  it('agentTurn body lines start at the 3-col gutter', () => {
+    const { d } = captureDisplay({ columns: 80 });
+    const turn = stripAnsi(d.agentTurn('alpha bravo charlie', { markdown: false }));
+    // Skip the header line, look for the body line.
+    const lines = turn.split('\n').filter((l) => l.includes('alpha'));
+    expect(lines.length).toBeGreaterThan(0);
+    expect(lines[0]).toMatch(/^   alpha/); // exactly 3 leading spaces
+  });
+
+  it('agentTurn wraps long prose at bodyWidth and re-indents continuation', () => {
+    const { d } = captureDisplay({ columns: 40 });
+    // bodyWidth for 40 cols = 40 - 3 - 2 = 35
+    const long = 'the quick brown fox jumps over the lazy dog and then keeps running far past the river bend';
+    const turn = stripAnsi(d.agentTurn(long, { markdown: false }));
+    const bodyLines = turn.split('\n').filter((l) => l.trimStart().length > 0 && !/^Aiden$/i.test(l.trim()) && !/^─+$/.test(l.trim()));
+    // At least 2 wrapped body lines (the prose is way longer than 35 cols).
+    const wrappedLines = bodyLines.filter((l) => l.startsWith('   '));
+    expect(wrappedLines.length).toBeGreaterThanOrEqual(2);
+    // Every wrapped line should respect the body width (after stripping
+    // the gutter, content fits inside bodyWidth=35).
+    for (const ln of wrappedLines) {
+      const content = ln.slice(3); // strip gutter
+      expect(content.trimEnd().length).toBeLessThanOrEqual(35);
+    }
+  });
+
+  it('resetStreamFrameForResize is idempotent and safe with no active stream', () => {
+    const { d } = captureDisplay();
+    // No header shown yet — call should be a no-op.
+    expect(() => {
+      (d as unknown as { resetStreamFrameForResize: () => void }).resetStreamFrameForResize();
+    }).not.toThrow();
+  });
+
+  it('resetStreamFrameForResize zeros internal counters mid-stream', () => {
+    const { d } = captureDisplay({ tty: true });
+    d.streamPartial('first chunk text\nsecond line\n');
+    // Internal state must show non-zero line count + buffer.
+    type StreamFields = {
+      streamLineCount: number;
+      streamBuffer:    string;
+      streamHeaderShown: boolean;
+    };
+    const inner = d as unknown as StreamFields;
+    expect(inner.streamLineCount).toBeGreaterThan(0);
+    expect(inner.streamBuffer.length).toBeGreaterThan(0);
+    expect(inner.streamHeaderShown).toBe(true);
+
+    (d as unknown as { resetStreamFrameForResize: () => void }).resetStreamFrameForResize();
+
+    // After reset: counters zeroed; header flag dropped so next
+    // streamPartial re-emits the "Aiden" label.
+    expect(inner.streamLineCount).toBe(0);
+    expect(inner.streamBuffer).toBe('');
+    expect(inner.streamHeaderShown).toBe(false);
+  });
+
+  it('cols() respects the 100-col cap even on wide terminals', () => {
+    const { d: dWide } = captureDisplay({ columns: 200 });
+    const { d: d80 }   = captureDisplay({ columns: 80 });
+    expect(dWide.cols()).toBe(100);
+    expect(d80.cols()).toBe(80);
+  });
+
+  it('rule() spans body width, not terminal width', () => {
+    const { d } = captureDisplay({ columns: 80 });
+    const r = stripAnsi(d.rule());
+    // bodyWidth(80) = 75 → rule = 75 chars of `─`.
+    expect(r.length).toBe(75);
+    expect(r).toMatch(/^─+$/);
+  });
+});
+
+// ── v4.1.4 reply-quality polish — F1 detect-and-skip predicate ─────────────
+//
+// isPreFramedLine determines which lines from the rendered markdown
+// output should be passed through the agentTurn / tryRerenderInPlace
+// indent+wrap pass unchanged. False-positives here are visually
+// catastrophic (prose drifts right by 3 cols, lists nest wrong);
+// false-negatives are catastrophic the other way (code-block rail
+// breaks across wrap continuation). Coverage targets both directions.
+
+describe('isPreFramedLine (v4.1.4 F1)', () => {
+  it('code-block body line (24-bit bg) → pre-framed', () => {
+    const line = '   \x1b[38;5;240m│\x1b[39m \x1b[48;2;50;50;60m const x = 1; \x1b[49m';
+    expect(isPreFramedLine(line)).toBe(true);
+  });
+
+  it('plain code-rail at frame gutter → pre-framed', () => {
+    expect(isPreFramedLine('   │ raw code text')).toBe(true);
+  });
+
+  it('blockquote rail at gutter → pre-framed', () => {
+    expect(isPreFramedLine('   ┃ quoted text')).toBe(true);
+  });
+
+  it('top-level bullet (renderer.list 2-space indent) → pre-framed', () => {
+    expect(isPreFramedLine('  • first item')).toBe(true);
+  });
+
+  it('nested bullet (renderer.list 4-space indent) → pre-framed', () => {
+    expect(isPreFramedLine('    ▸ nested item')).toBe(true);
+  });
+
+  it('numbered bullet with bold ANSI → pre-framed', () => {
+    const line = '  1. \x1b[1m\x1b[4mIt targets the thing\x1b[24m\x1b[22m';
+    expect(isPreFramedLine(line)).toBe(true);
+  });
+
+  it('code-block fence rule (top/bottom ──) → pre-framed', () => {
+    expect(isPreFramedLine('   ──────────────────────')).toBe(true);
+    expect(isPreFramedLine('   ── js ─────────────────')).toBe(true);
+  });
+
+  it('plain prose → NOT pre-framed', () => {
+    expect(isPreFramedLine('this is plain prose with no chrome')).toBe(false);
+  });
+
+  it('heading (bold + brand) → NOT pre-framed (agentTurn should indent)', () => {
+    // Headings carry bold ANSI but no rail / bg / list-bullet marker.
+    const heading = '\x1b[1m\x1b[38;2;255;107;53mPLAN\x1b[39m\x1b[22m';
+    expect(isPreFramedLine(heading)).toBe(false);
+  });
+
+  it('inline-codespan prose (Issue D regression) → NOT pre-framed', () => {
+    // v4.1.4 reply-quality polish — Fix D. Inline `` `code` `` paints
+    // the bg with the same `\x1b[48;…` envelope as code blocks. Before
+    // Fix D the predicate matched on bg presence alone and incorrectly
+    // classified prose-with-inline-code as pre-framed, causing it to
+    // bypass the indent + wrap pass and terminal-natural-wrap past
+    // bodyWidth. Predicate now requires the gutter+rail prefix
+    // (`   │ `) so only true code-block body lines trip the rule.
+    const line = 'services named by developers long gone: \x1b[48;2;50;50;60m \x1b[33mLegacyBridge\x1b[39m \x1b[49m, MaybeUser, more prose';
+    expect(isPreFramedLine(line)).toBe(false);
+  });
+
+  it('code-block body line with bg AND rail prefix → still pre-framed', () => {
+    // Sanity: Fix D didn't break the code-block detection. The
+    // `   │ ` prefix is the new reliable signal.
+    const line = '   │ \x1b[48;2;50;50;60m const x = 1; \x1b[49m';
+    expect(isPreFramedLine(line)).toBe(true);
+  });
+
+  it('empty string → NOT pre-framed', () => {
+    expect(isPreFramedLine('')).toBe(false);
+  });
+});
+
+// ── v4.1.4 reply-quality polish — F-B1 wrap-aware row counter ──────────────
+//
+// streamPartial now counts terminal-natural-wrap rows so the eraser
+// walks back enough rows to clear raw streamed markup before the
+// rerender writes formatted output below it.
+
+describe('Display v4.1.4 F-B1 wrap-aware row counter', () => {
+  function captureDisplay(opts: { columns?: number } = {}): {
+    d: Display;
+    chunks: string[];
+  } {
+    const chunks: string[] = [];
+    const out = new Writable({
+      write(chunk, _enc, cb) { chunks.push(chunk.toString()); cb(); },
+    }) as Writable & { isTTY?: boolean; columns?: number };
+    out.isTTY  = true;
+    out.columns = opts.columns ?? 80;
+    const skin = new SkinEngine({ forceMono: true });
+    return {
+      d: new Display({ stdout: out as unknown as NodeJS.WriteStream, skin }),
+      chunks,
+    };
+  }
+
+  function findEraserCount(s: string): number | null {
+    // eslint-disable-next-line no-control-regex
+    const m = s.match(/\x1b\[(\d+)F\x1b\[J/);
+    return m ? parseInt(m[1]!, 10) : null;
+  }
+
+  it('long bullet list with bold: eraser counts wrapped rows, not just newlines', () => {
+    const { d, chunks } = captureDisplay({ columns: 80 });
+    // 3 bullets, each ~100 chars → each wraps to 2 rows on 80-col → 6 rows
+    const bullet = (n: number) =>
+      `${n}. **It targets the thing users feel immediately and compounds across every workflow they touch**`;
+    d.streamPartial(`${bullet(1)}\n${bullet(2)}\n${bullet(3)}\n`);
+    d.streamComplete();
+    const eraserN = findEraserCount(chunks.join(''));
+    expect(eraserN).not.toBeNull();
+    // boundaries crossed = 2 wraps × 3 bullets + 3 newlines = 9
+    expect(eraserN).toBeGreaterThanOrEqual(6);
+  });
+
+  it('short content (no wrap) — counter matches newline count (back-compat)', () => {
+    const { d, chunks } = captureDisplay({ columns: 80 });
+    d.streamPartial('# Heading\n- item\n');
+    d.streamComplete();
+    const eraserN = findEraserCount(chunks.join(''));
+    expect(eraserN).not.toBeNull();
+    // 2 newlines, no wrap → count exactly 2
+    expect(eraserN).toBe(2);
+  });
+
+  it('counter survives undefined columns (non-TTY fallback)', () => {
+    // No assertion on eraser count (non-TTY path skips rerender) —
+    // just that streamPartial doesn't throw and internal state is sane.
+    const chunks: string[] = [];
+    const out = new Writable({
+      write(c, _e, cb) { chunks.push(c.toString()); cb(); },
+    }) as Writable & { isTTY?: boolean; columns?: number };
+    out.isTTY  = true;
+    // columns deliberately left unset
+    const skin = new SkinEngine({ forceMono: true });
+    const d = new Display({ stdout: out as unknown as NodeJS.WriteStream, skin });
+    expect(() => {
+      d.streamPartial('a long line that would wrap if columns were known');
+      d.streamComplete();
+    }).not.toThrow();
   });
 });

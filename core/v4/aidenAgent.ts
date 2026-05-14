@@ -205,6 +205,14 @@ export interface RunConversationOptions {
   onDelta?:          (text: string) => void;
   onFirstDelta?:     () => void;
   onToolCallStart?:  (call: ToolCallRequest) => void;
+  /**
+   * v4.1.4 Part 1.6 — incremental output-token progress callback.
+   * Fires whenever the streaming adapter emits a `progress` event
+   * (Anthropic running counter; other adapters opt-in over time).
+   * Use this to drive a per-turn token progress bar. Bar stays
+   * hidden when the adapter never emits — honest degradation.
+   */
+  onProgress?:       (outputTokens: number, maxTokens?: number) => void;
 }
 
 interface EmptyResponseMetrics {
@@ -947,6 +955,13 @@ export class AidenAgent {
         runOptions.onDelta?.(evt.content);
       } else if (evt.type === 'tool_call') {
         runOptions.onToolCallStart?.(evt.toolCall);
+      } else if (evt.type === 'progress') {
+        // v4.1.4 Part 1.6 — drive the per-turn token progress bar.
+        // Defensive try/catch — a misbehaving display sink must not
+        // tear down the stream consumer.
+        try {
+          runOptions.onProgress?.(evt.outputTokens, evt.maxTokens);
+        } catch { /* progress sink errors don't block streaming */ }
       } else if (evt.type === 'done') {
         finalOutput = evt.output;
       }

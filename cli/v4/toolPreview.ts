@@ -26,11 +26,26 @@
  */
 
 /**
- * Map of tool-name → name of the property in `args` that should render
- * as the at-a-glance preview. Stable contract; tests assert specific
- * entries.
+ * v4.1.4 Phase 3b' (Issue H1) — extractor function support.
+ *
+ * A `TOOL_PRIMARY_ARG` entry can now be either:
+ *   - A string: the name of the property in `args` to render (legacy
+ *     behavior, unchanged).
+ *   - A function: takes `args` and returns the preview string. Use
+ *     when no single key holds the meaningful target (e.g. app_launch
+ *     uses `explorer.exe` as the binary but the real target is the
+ *     URI in `args[0]`).
+ *
+ * Functions must return a string. Return `''` to show no preview
+ * (matches the empty-key convention). Pure — no side effects.
  */
-export const TOOL_PRIMARY_ARG: Record<string, string> = {
+export type ToolPreviewExtractor = string | ((args: unknown) => string);
+
+/**
+ * Map of tool-name → preview extractor (string key OR function).
+ * Stable contract; tests assert specific entries.
+ */
+export const TOOL_PRIMARY_ARG: Record<string, ToolPreviewExtractor> = {
   // ── terminal / execution ─────────────────────────────────────────────
   shell_exec:        'command',
   execute_code:      'code',
@@ -107,6 +122,37 @@ export const TOOL_PRIMARY_ARG: Record<string, string> = {
   media_transport:   'target',
   media_key:         'action',
   app_input:         'app',
+
+  // ── v4.1.4 Phase 3b' (Issue H) ───────────────────────────────────────
+  // app_launch needs custom logic: when `app === 'explorer.exe'` the
+  // binary is just the URI dispatcher and the meaningful target is in
+  // `args[0]` (e.g. 'spotify:track/...'). Surface the protocol scheme
+  // ('spotify') rather than the dispatch binary. Falls through to the
+  // app name for normal exe launches.
+  app_launch: (args: unknown): string => {
+    if (!args || typeof args !== 'object') return '';
+    const a = args as { app?: unknown; args?: unknown };
+    const appRaw = typeof a.app === 'string' ? a.app.trim() : '';
+    // URI-protocol case: explorer.exe + 'scheme:...' in args[0].
+    if (appRaw.toLowerCase() === 'explorer.exe' && Array.isArray(a.args)) {
+      const first = a.args[0];
+      if (typeof first === 'string' && first.length > 0) {
+        // Scheme requires ≥2 chars so Windows drive letters
+        // (`C:/path`) don't mis-detect as the scheme `C`. Real URI
+        // schemes (spotify, vscode, http, file, etc.) are all
+        // multi-char by RFC.
+        const m = first.match(/^([A-Za-z][A-Za-z0-9+.-]+):/);
+        if (m) return m[1]!;       // 'spotify:track/...' → 'spotify'
+        return first;              // No protocol — surface the raw arg
+      }
+    }
+    return appRaw;
+  },
+
+  // Clipboard write — the actual text being copied is the meaningful
+  // target. Reads have no args worth showing (empty schema).
+  clipboard_write: 'text',
+  clipboard_read:  '',
 };
 
 /**
@@ -133,23 +179,42 @@ export function buildToolPreview(
   if (!Object.prototype.hasOwnProperty.call(TOOL_PRIMARY_ARG, toolName)) {
     return null;
   }
-  const argKey = TOOL_PRIMARY_ARG[toolName];
-  if (argKey === '') return '';
-  if (!args || typeof args !== 'object') return '';
-  const raw = (args as Record<string, unknown>)[argKey];
-  if (raw === undefined || raw === null) return '';
+  const extractor = TOOL_PRIMARY_ARG[toolName]!;
+
+  // v4.1.4 Phase 3b' (Issue H1): function extractor path. Used by
+  // tools whose preview can't be expressed as a single key lookup
+  // (e.g. app_launch with URI-protocol routing through explorer.exe).
   let str: string;
-  if (typeof raw === 'string') {
-    str = raw;
-  } else if (typeof raw === 'number' || typeof raw === 'boolean') {
-    str = String(raw);
-  } else {
+  if (typeof extractor === 'function') {
     try {
-      str = JSON.stringify(raw);
+      const out = extractor(args);
+      str = typeof out === 'string' ? out : '';
     } catch {
+      // Extractor threw — degrade to empty preview rather than crash
+      // the tool-row render. The tool name + state cluster still
+      // carries enough info.
+      str = '';
+    }
+  } else {
+    // String-key path (legacy, unchanged behaviour).
+    const argKey = extractor;
+    if (argKey === '') return '';
+    if (!args || typeof args !== 'object') return '';
+    const raw = (args as Record<string, unknown>)[argKey];
+    if (raw === undefined || raw === null) return '';
+    if (typeof raw === 'string') {
+      str = raw;
+    } else if (typeof raw === 'number' || typeof raw === 'boolean') {
       str = String(raw);
+    } else {
+      try {
+        str = JSON.stringify(raw);
+      } catch {
+        str = String(raw);
+      }
     }
   }
+
   // Collapse whitespace so multi-line commands stay on one preview row.
   str = str.replace(/\s+/g, ' ').trim();
   if (str.length > PREVIEW_MAX_CHARS) {

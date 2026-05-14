@@ -28,6 +28,11 @@
 import { marked } from 'marked';
 import { getSkinEngine } from './skinEngine';
 import { highlightCode, isSupportedLang } from './syntaxHighlight';
+// v4.1.4 reply-quality polish: single source of truth for frame math.
+// Replaces 3 inline `Math.min(process.stdout.columns ?? 80, 100) - 4`
+// callsites in this file with `getBodyWidth()` and adds soft-wrap for
+// code-block lines that previously overflowed the viewport.
+import { getBodyWidth, getIndent, wrap as frameWrap, GUTTER } from './display/frame';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const TerminalRenderer = require('marked-terminal').default ?? require('marked-terminal');
@@ -126,7 +131,11 @@ const CODE_BG_OFF = '\x1b[49m';
 
 function renderCodeBlock(code: string, lang: string | undefined): string {
   const sk = getSkinEngine();
-  const width = Math.min(process.stdout.columns ?? 80, 100) - 4;
+  // v4.1.4 reply-quality polish: width sourced from frame.ts. Same
+  // visual budget as the v4.1.3 formula (cols capped at 100, minus
+  // gutter+2) — but expressed via the shared helper so it tracks any
+  // future width-policy change in one place.
+  const width = getBodyWidth();
   const langLabel = (lang ?? '').trim();
   // v4.1.3-essentials reply-polish: language tag on the top rule
   // already shipped; keep it. Bottom rule unlabeled (closing fence).
@@ -137,26 +146,43 @@ function renderCodeBlock(code: string, lang: string | undefined): string {
   const body = isSupportedLang(langLabel)
     ? highlightCode(code, langLabel)
     : code;
-  // v4.1.3-essentials reply-polish: each body line gets:
-  //   - 2-space outer indent (existing reply container indent)
+  // v4.1.4 reply-quality polish: per-line soft wrap. The rail + bg
+  // chrome adds 4 visible columns (` │ `, padding spaces around the
+  // line). Subtract those so wrap math targets the actual content
+  // budget. `hard: true` ensures even pathological long tokens
+  // (minified JS, hashes) break instead of escaping the frame.
+  //
+  // Width inside the body of a code line:
+  //   gutter (3) + `│ ` (2) + leading-space (1) + CONTENT + trailing-space (1)
+  // → content budget = width - gutter - 4. We further cap at width to
+  //   keep the fence rule aligned with the body's right margin.
+  const contentBudget = Math.max(8, width - GUTTER - 4);
+  // v4.1.3-essentials reply-polish (preserved): each body line gets:
+  //   - frame gutter (was 2-space outer indent; now uses shared GUTTER)
   //   - left rail `│ ` painted muted (mirrors blockquote's `┃ ` rail
   //     with a different glyph so they're visually distinct)
   //   - 24-bit dark background wrapping the rail + content (subtle
   //     "this is code" affordance without going full TUI box-frame)
-  //
-  // Strip the optional ANSI-only NO_COLOR gate by emitting bg codes
-  // unconditionally — the skin engine already short-circuits inner
-  // paint calls when NO_COLOR is set, and bare bg codes degrade
-  // gracefully on terminals that don't render them.
   const rail = sk.applyColors('│', 'muted');
-  const indented = body
-    .split('\n')
-    .map((ln) => `  ${rail} ${CODE_BG_ON} ${ln} ${CODE_BG_OFF}`)
-    .join('\n');
+  const gutter = getIndent(0);
+  // Wrap each source line independently — code-block semantics demand
+  // that a "logical line" remains visible as one continued unit even
+  // when soft-wrapped. The CODE_BG painting closes per VISUAL line so
+  // a wrap break doesn't bleed bg across the rail of the next row.
+  const wrappedLines: string[] = [];
+  for (const srcLine of body.split('\n')) {
+    const wrapped = frameWrap(srcLine, contentBudget, { trim: false, hard: true });
+    for (const visualLine of wrapped.split('\n')) {
+      wrappedLines.push(`${gutter}${rail} ${CODE_BG_ON} ${visualLine} ${CODE_BG_OFF}`);
+    }
+  }
+  const indented = wrappedLines.join('\n');
+  // Top + bottom fence rules sit at the gutter too — visually anchors
+  // the block as a unit inside the assistant frame.
   return [
-    sk.applyColors(top, 'muted'),
+    `${gutter}${sk.applyColors(top, 'muted')}`,
     indented,
-    sk.applyColors(bot, 'muted'),
+    `${gutter}${sk.applyColors(bot, 'muted')}`,
     '',
   ].join('\n') + '\n';
 }
@@ -230,6 +256,109 @@ function renderListItem(text: string): string {
 }
 
 /**
+ * v4.1.4 reply-quality polish — Fix C helper.
+ *
+ * Render a single list item's tokens correctly, expanding inline
+ * emphasis (strong, em, codespan) that the prior `parser.parse` path
+ * silently stranded as raw text.
+ *
+ * Marked v15 token shapes for list items:
+ *
+ *   Tight list (default — no blank lines between items):
+ *     list_item.tokens = [
+ *       { type: 'text', text: '**bold**',
+ *         tokens: [ { type: 'strong', ... } ]   ← inline children
+ *       }
+ *     ]
+ *
+ *   Loose list (blank line between items, OR an item with multiple
+ *   paragraphs):
+ *     list_item.tokens = [
+ *       { type: 'paragraph', tokens: [ inline children… ] },
+ *       { type: 'paragraph', tokens: [ … ] },
+ *     ]
+ *
+ *   Nested list (a list-token inside an item):
+ *     list_item.tokens = [
+ *       { type: 'text', tokens: [...] },   ← the item's own text first
+ *       { type: 'list', items: [...] },    ← then the nested list
+ *     ]
+ *
+ *   Item with fenced code block:
+ *     list_item.tokens = [
+ *       { type: 'text', ... },
+ *       { type: 'code', text: '…', lang: '…' },
+ *     ]
+ *
+ * Dispatch rules:
+ *   - `text` with nested `.tokens`     → parseInline(tokens)
+ *   - `text` with only `.text`          → fall through to raw text
+ *   - `paragraph`                       → parseInline(paragraph.tokens) + '\n'
+ *   - `list` / `code` / other block     → parser.parse([token]) (block path)
+ *
+ * Returns the joined rendered string. Pure-ish: depends on marked's
+ * parser instance (closure-captured) but never mutates it.
+ */
+function renderListItemTokens(
+  it: { tokens?: unknown[]; text?: string },
+  parser: {
+    parse?:       (t: unknown[]) => string;
+    parseInline?: (t: unknown[]) => string;
+  },
+): string {
+  const toks = Array.isArray(it.tokens) ? it.tokens : [];
+  if (toks.length === 0) return it.text ?? '';
+
+  const out: string[] = [];
+  for (const raw of toks) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const tk = raw as {
+      type?:   string;
+      text?:   string;
+      tokens?: unknown[];
+    };
+    const type = tk.type;
+
+    // Inline-only wrapper (tight-list common case). The `text` outer
+    // token holds inline children we want to expand into ANSI.
+    if (type === 'text') {
+      if (Array.isArray(tk.tokens) && tk.tokens.length > 0 && parser.parseInline) {
+        out.push(parser.parseInline(tk.tokens));
+      } else {
+        out.push(tk.text ?? '');
+      }
+      continue;
+    }
+
+    // Paragraph block (loose-list case). Marked wraps each paragraph's
+    // inline content in `.tokens`; render those inline + append a
+    // newline so multi-paragraph items stack visually.
+    if (type === 'paragraph') {
+      if (Array.isArray(tk.tokens) && tk.tokens.length > 0 && parser.parseInline) {
+        out.push(parser.parseInline(tk.tokens));
+        out.push('\n');
+      } else {
+        out.push(tk.text ?? '');
+      }
+      continue;
+    }
+
+    // Nested list, fenced code, or any other block-level token. The
+    // block parser handles these via the normal dispatch (which calls
+    // back into our own `renderer.list` override for nested lists —
+    // depth counter is already incremented before we got here).
+    if (parser.parse) {
+      out.push(parser.parse([tk as unknown] as unknown[]));
+      continue;
+    }
+
+    // Last-resort fallback: drop the token's text in raw.
+    out.push(tk.text ?? '');
+  }
+  return out.join('');
+}
+
+/**
  * Singleton — caching is fine since options bind to the active skin
  * via paint callbacks (which read getSkinEngine() each call).
  */
@@ -254,7 +383,7 @@ export function getReplyRenderer(): { render: (text: string) => string } {
     // need for the 4-tier hierarchy. The prototype-level `renderer.heading`
     // override below owns the depth extraction + tier selection end-to-end.
     // marked-terminal's stripped-args call path never reaches our callback.
-    hr:           () => paint('muted')('─'.repeat(Math.min(process.stdout.columns ?? 80, 100) - 4)) + '\n',
+    hr:           () => paint('muted')('─'.repeat(getBodyWidth())) + '\n',
     listitem:     renderListItem,
     paragraph:    (text: string) => `${text}\n\n`,
     // v4.1.3-essentials: bold renders as ANSI bold + underline
@@ -282,7 +411,12 @@ export function getReplyRenderer(): { render: (text: string) => string } {
     link:         (assembled: string) => paint('accent')(assembled),
     href:         paint('accent'),
     text:         (text: string) => text,
-    width:        Math.min(process.stdout.columns ?? 80, 100),
+    // v4.1.4 reply-quality polish: marked-terminal's `width` is the
+    // *outer* canvas it formats into. Frame-aware body width keeps the
+    // tables / hr / hard-wrap targets inside our gutter envelope.
+    // `reflowText: false` (below) stays off — we own prose wrap via
+    // frame.wrap() in the display layer, not here.
+    width:        getBodyWidth(),
     showSectionPrefix: false,
     reflowText:   false,
     tab:          2,
@@ -428,17 +562,36 @@ export function getReplyRenderer(): { render: (text: string) => string } {
       };
       isOrdered = tok.ordered === true;
       startNum  = typeof tok.start === 'number' ? tok.start : 1;
-      // marked v15: renderer instance has a `parser` field pointing
-      // back to the Parser; `Parser.parse(tokens)` walks the token
-      // tree dispatching back to renderer methods (including this
-      // very `list` override for nested lists, which is what makes
-      // the depth counter increment properly).
-      const parser = (this as { parser?: { parse?: (t: unknown[]) => string; parseInline?: (t: unknown[]) => string } }).parser;
+      // v4.1.4 reply-quality polish — Fix C (token-type dispatch).
+      //
+      // Prior implementation called `parser.parse(it.tokens)` and let
+      // marked's block-parser dispatch each token. For tight-list items
+      // marked v15 wraps the item's content in a `text`-type outer
+      // token whose `.tokens` array holds the actual inline tokens
+      // (strong, em, codespan…). `parser.parse` dispatched the outer
+      // wrapper to `renderer.text` (our `opts.text` = identity), which
+      // returned the RAW raw `**bold**` source string — never recursing
+      // into the inline children. Result: literal asterisks in every
+      // bullet that contained inline emphasis.
+      //
+      // Fix: walk each top-level token by type. Tight-list items have
+      // a `text` wrapper → use `parseInline` on its nested tokens to
+      // expand strong/em/codespan. Loose-list items have block-level
+      // `paragraph`/`list`/`code` tokens → those need block-level
+      // recursion (delegates back to our list override for nested
+      // lists, preserving the depth counter).
+      //
+      // Confirmed against marked v15 token shapes from `marked.lexer`
+      // (see scripts/smoke-issue-c-tokens.ts).
+      const parser = (this as {
+        parser?: {
+          parse?: (t: unknown[]) => string;
+          parseInline?: (t: unknown[]) => string;
+        };
+      }).parser;
       items = (tok.items ?? []).map((it) => {
-        if (it.tokens && parser?.parse) {
-          return parser.parse(it.tokens);
-        }
-        return it.text ?? '';
+        if (!parser) return it.text ?? '';
+        return renderListItemTokens(it, parser);
       });
     } else {
       isOrdered = ordered === true;
@@ -498,13 +651,46 @@ export function getReplyRenderer(): { render: (text: string) => string } {
         // if other code transiently swaps the renderer.
         marked.setOptions({ renderer: renderer as never });
         const out = marked.parse(text);
-        return typeof out === 'string' ? out : String(out);
+        const raw = typeof out === 'string' ? out : String(out);
+        // v4.1.4 Part 1.6 Issue I — collapse excess vertical spacing.
+        //
+        // Our `opts.paragraph` callback emits `text\n\n`, our
+        // `renderCodeBlock` ends with `\n\n`, and marked-terminal's
+        // outer block dispatch ALSO emits `\n\n` between adjacent
+        // blocks. Result: 4 newlines (3 visible blank lines) between
+        // paragraphs, after code blocks, between paragraphs and lists.
+        // Root-cause fix would require auditing marked-terminal's
+        // between-block separator across every override (risk-prone).
+        // Band-aid: collapse any run of 3+ newlines down to exactly 2
+        // (= one blank line). Mechanically safe — can only REMOVE
+        // excess whitespace, never add bad spacing. Existing single-
+        // blank-line gaps pass through unchanged.
+        return normalizeBlankLines(raw);
       } catch {
         return text;
       }
     },
   };
   return cachedRenderer;
+}
+
+/**
+ * v4.1.4 Part 1.6 Issue I — collapse runs of 3+ consecutive newlines
+ * down to exactly 2 (a single blank line). Exported for unit-test
+ * access; pure with no side effects.
+ *
+ * Confirmed via `scripts/smoke-issue-i-spacing.ts`:
+ *   - "A\n\n\n\nB"    → "A\n\nB"     (2 paras → 1 blank line)
+ *   - "A\n\n\n\n\nB"  → "A\n\nB"     (3+ blanks all collapse)
+ *   - "A\n\nB"        → "A\n\nB"     (already correct, unchanged)
+ *   - "A\nB"          → "A\nB"       (single newline preserved)
+ *   - "A\n"           → "A\n"        (trailing pass-through)
+ *
+ * Does NOT touch the list-under-padding case (lists ending with a
+ * single `\n` before a paragraph) — that's a v4.1.5 follow-up.
+ */
+export function normalizeBlankLines(text: string): string {
+  return text.replace(/\n{3,}/g, '\n\n');
 }
 
 /** Test reset — drops the cached renderer so a skin change picks up. */

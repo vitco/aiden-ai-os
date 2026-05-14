@@ -163,21 +163,26 @@ describe('formatStatusLine (Phase 22 Task 4)', () => {
     expect(ctxSegment).toMatch(/\[▓+░+\]/);
   });
 
-  it('coloured output uses the muted #888888 separator (post-v4.1.3 palette)', () => {
-    // v4.1.3-repl-polish moved the soft-cyan (#6FB3D2) from `muted`
-    // to a new dedicated `session` color kind, and set `muted` to a
-    // true grey (#888888 = rgb 136,136,136) so secondary text reads
-    // as genuinely secondary against PowerShell's dark-blue default
-    // background. The status bar separator follows `muted`, so this
-    // test tracks the new grey — same hook, refreshed hue.
+  it('coloured output uses the muted #b8a89a separator (v4.1.4 warm-tinted palette)', () => {
+    // v4.1.3-repl-polish first moved the soft-cyan (#6FB3D2) from
+    // `muted` to a new dedicated `session` color and set `muted` to
+    // neutral grey (#888888) so secondary text read as genuinely
+    // secondary. v4.1.4 reply-quality polish then shifted muted from
+    // neutral grey to warm Aiden-tinted dim (#b8a89a = rgb 184,168,154)
+    // so secondary surfaces feel intentional and brand-coherent rather
+    // than generic terminal grey. The status bar separator follows
+    // `muted`, so this test tracks the new hue — same hook, refreshed
+    // colour.
     const display = makeDisplay({ mono: false });
     const line = formatStatusLine({
       ...baseArgs,
       state: { kind: 'ready' },
       display,
     });
-    // New muted = #888888 = rgb 136, 136, 136.
-    expect(line).toContain('\x1b[38;2;136;136;136m');
+    // New muted = #b8a89a = rgb 184, 168, 154.
+    expect(line).toContain('\x1b[38;2;184;168;154m');
+    // Old neutral grey #888888 must NOT leak in (v4.1.3 sentinel).
+    expect(line).not.toContain('\x1b[38;2;136;136;136m');
     // Old soft-cyan #6FB3D2 must NOT leak into muted's old slot.
     expect(line).not.toContain('\x1b[38;2;111;179;210m');
   });

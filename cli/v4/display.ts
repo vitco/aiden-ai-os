@@ -42,10 +42,70 @@ import { getReplyRenderer } from './replyRenderer';
 // Optional "Sources" footer when AIDEN_CITATIONS=1 (default off).
 import { renderCitationFooter } from './citationFooter';
 import { buildToolPreview } from './toolPreview';
+// v4.1.4 reply-quality polish: shared frame math for width + indent.
+// `cols()`, `rule()`, `agentTurn`, and `tryRerenderInPlace` all route
+// through frame helpers so the visible left edge / right margin / wrap
+// targets are consistent across streaming, rerender, and one-shot
+// reply paths. See `cli/v4/display/frame.ts` for the math.
+import {
+  getTerminalCols      as frameGetTerminalCols,
+  getBodyWidth         as frameGetBodyWidth,
+  getIndent            as frameGetIndent,
+  wrap                 as frameWrap,
+} from './display/frame';
 
 export interface SpinnerHandle {
   stop(finalText?: string): void;
   setText(text: string): void;
+}
+
+/**
+ * v4.1.4 reply-quality polish — Part 1.6 activity indicator.
+ *
+ * Surfaces a `▲ verb. (Ns)` indicator on the same physical line during
+ * the "model is working but nothing is being painted" gaps:
+ *   - Pre-first-token (before first delta arrives)
+ *   - Between tools (paused while a tool row is live, resumed after
+ *     the tool completes)
+ *   - Post-all-tools, pre-reply (a tool batch finished but the final
+ *     content hasn't started streaming yet)
+ *
+ * The handle exposes pause/resume so the caller can hide the indicator
+ * while a tool row owns the screen, then bring it back without losing
+ * the cumulative elapsed time. `stop()` is terminal — cursor moves to
+ * a clean line and no more ticks fire.
+ *
+ * Differs from `SpinnerHandle` (kept for legacy callers) in three ways:
+ *   - Pulsing dots instead of glyph rotation (▲ stays fixed)
+ *   - Elapsed-time suffix `(Ns)` for spans >= 1s
+ *   - Pause/resume for cooperation with tool rows
+ *
+ * Implementation lives in `Display.activityIndicator()`. Pure builder —
+ * caller decides when to start/pause/resume/stop.
+ */
+export interface ActivityIndicatorHandle {
+  /**
+   * Stop ticking and erase the indicator line. State preserved so a
+   * later `resume(verb?)` continues from the same elapsed counter.
+   * Idempotent.
+   */
+  pause(): void;
+  /**
+   * Re-render the indicator on a fresh line below the current cursor
+   * and restart the tick. Optional `verb` overrides the active verb
+   * (e.g. transition from "thinking" → "drafting"). Idempotent.
+   */
+  resume(verb?: string): void;
+  /** Swap the verb without pausing — picked up on the next tick. */
+  setVerb(verb: string): void;
+  /**
+   * Terminal: erase the indicator line, stop the tick, refuse any
+   * further pause/resume calls. Idempotent.
+   */
+  stop(): void;
+  /** Test/inspection — current state snapshot. Pure read. */
+  isPaused(): boolean;
+  isStopped(): boolean;
 }
 
 /**
@@ -333,19 +393,26 @@ export class Display {
   // Pure renderers (return strings, don't write) so chatSession can
   // compose the boot card and turn rhythm without owning ANSI escapes.
 
-  /** Terminal column count clamped to 100 — matches v3 width discipline. */
+  /**
+   * Terminal column count. v4.1.4 reply-quality polish: delegates to
+   * `frame.getTerminalCols()` so all width math shares one formula.
+   * Retains the 100-col cap via `Math.min` so existing callers that
+   * paint full-width chrome (boot card, footer) keep their visual
+   * identity — `frame.BODY_WIDTH_MAX` is the tunable.
+   */
   cols(): number {
-    return Math.min(this.out.columns ?? 80, 100);
+    return Math.min(frameGetTerminalCols(this.out), 100);
   }
 
   /**
-   * Thin horizontal rule (`──…──`) in muted colour, full visible width
-   * minus the 2-column indent the boot card / turn render uses.  Returns
-   * the line WITHOUT a trailing newline; caller adds one + the leading
-   * 2-space indent.
+   * Thin horizontal rule (`──…──`) in muted colour, full body width.
+   * v4.1.4 reply-quality polish: width sourced from `frame.getBodyWidth()`
+   * so the rule sits at the same right margin as wrapped prose and
+   * code blocks. Returns the line WITHOUT a trailing newline; caller
+   * adds one + the leading gutter.
    */
   rule(width?: number): string {
-    const w = Math.max(8, (width ?? this.cols()) - 2);
+    const w = Math.max(8, width ?? frameGetBodyWidth(this.out));
     return this.skin.applyColors('─'.repeat(w), 'muted');
   }
 
@@ -879,6 +946,148 @@ export class Display {
     };
   }
 
+  /**
+   * v4.1.4 reply-quality polish — Part 1.6 activity indicator.
+   *
+   * Renders `▲ {verb}{dots} (Ns)    ▸▸ Ctrl+C cancel` on a single
+   * line. `verb` is the activity label; the dots pulse 0→1→2→3→0
+   * every 400ms; elapsed time `(Ns)` appears only once N >= 1 (avoids
+   * the `(0s)` flash). The "▸▸ Ctrl+C cancel" hint is folded into the
+   * same line so cursor management stays simple (single-line write,
+   * single-line erase).
+   *
+   * Pause/resume semantics:
+   *   - `pause()` erases the line + stops the tick + sets paused=true.
+   *     Elapsed time keeps accumulating wall-clock — when a later
+   *     `resume()` re-renders, the indicator shows the TOTAL elapsed
+   *     since the original `activityIndicator()` call, not just since
+   *     the last resume.
+   *   - `resume(verb?)` re-renders on a fresh line below the current
+   *     cursor and restarts the tick. Optional `verb` swap is the
+   *     supported way to transition phases ("thinking" → "drafting").
+   *   - `stop()` is terminal — erases the line, marks stopped, refuses
+   *     further pause/resume.
+   *
+   * Non-TTY: completely silent. No initial paint, no ticks, no erases.
+   * Pipes / CI / MCP serve mode get clean output by default.
+   *
+   * Cursor invariant on render: the indicator OWNS one line. After
+   * each render the cursor sits at column 0 of the indicator line
+   * (NOT a new line below it) — that way the next render erases the
+   * line and rewrites in place. Callers that want to write OTHER
+   * content below MUST call `pause()` first; otherwise their content
+   * lands on the indicator line and the next tick clobbers it.
+   */
+  activityIndicator(initialVerb: string = 'thinking'): ActivityIndicatorHandle {
+    const sk     = this.skin;
+    const out    = this.out;
+    const isTty  = !!out.isTTY;
+    const startTime = Date.now();
+
+    let verb        = initialVerb;
+    let dotFrame    = 0;
+    let paused      = !isTty;  // non-TTY = effectively pre-paused (silent)
+    let stopped     = false;
+    let printed     = false;
+    let tickTimer: ReturnType<typeof setInterval> | null = null;
+
+    // Tunable cadence. v4.1.4 Phase 3b' (Issue G): bumped from 400ms
+    // to 250ms after visual smoke — 400ms felt sluggish, made the
+    // indicator look static between seconds. 250ms gives ~4 dot
+    // updates per second so motion is always visible even when the
+    // (Ns) counter hasn't ticked. Slow enough not to flicker on SSH
+    // / slow ConPTY refresh.
+    const TICK_MS = 250;
+    // ▲ glyph in brand orange — the user's primary motif. Dots and
+    // elapsed counter paint muted to keep visual weight on the verb.
+    //
+    // v4.1.4 Phase 3b' (Issue F): the inline "▸▸ Ctrl+C cancel" hint
+    // shipped with Phase 3a was visually noisy on the activity line
+    // and collided with planner-debug dim writes. Dropped per user
+    // feedback; a separate bottom-of-screen footer can be added in
+    // v4.1.5 if wanted, but it must NOT be glued to the indicator.
+    const glyph = sk.applyColors('▲', 'brand');
+
+    const buildLine = (): string => {
+      const dots = '.'.repeat(dotFrame); // 0..3 dots
+      const elapsedSec = Math.floor((Date.now() - startTime) / 1000);
+      const elapsedStr = elapsedSec >= 1
+        ? ` ${sk.applyColors(`(${elapsedSec}s)`, 'muted')}`
+        : '';
+      // `▲ {verb}{dots-padded-to-3}{elapsed?}`
+      return `${glyph} ${verb}${dots.padEnd(3, ' ')}${elapsedStr}`;
+    };
+
+    const renderTick = (): void => {
+      if (stopped || paused || !isTty) return;
+      dotFrame = (dotFrame + 1) % 4;
+      // `\r\x1b[K` — carriage return + clear line — then write the
+      // fresh indicator. No newline at end: cursor stays at end of
+      // the indicator line, ready for the next overwrite.
+      out.write(`\r\x1b[K${buildLine()}`);
+    };
+
+    const startTick = (): void => {
+      if (stopped || !isTty || tickTimer !== null) return;
+      tickTimer = setInterval(renderTick, TICK_MS);
+    };
+
+    const stopTick = (): void => {
+      if (tickTimer !== null) {
+        clearInterval(tickTimer);
+        tickTimer = null;
+      }
+    };
+
+    const eraseLine = (): void => {
+      if (isTty && printed) out.write('\r\x1b[K');
+    };
+
+    // Initial paint — only on TTY.
+    if (isTty) {
+      out.write(buildLine());
+      printed = true;
+      startTick();
+    }
+
+    return {
+      pause: () => {
+        if (stopped || paused) return;
+        paused = true;
+        stopTick();
+        eraseLine();
+        // After erase the cursor is at column 0 of the indicator's
+        // (now empty) line. Caller is expected to write its own
+        // content next; that content lands cleanly on this line.
+      },
+      resume: (newVerb?: string) => {
+        if (stopped) return;
+        if (typeof newVerb === 'string' && newVerb.length > 0) verb = newVerb;
+        if (!paused) return;
+        paused = false;
+        if (!isTty) return;
+        // Caller has just finished writing its own content (typically
+        // ending with `\n`), so the cursor is on a fresh line below
+        // whatever was there. Render the indicator there and arm the
+        // tick again.
+        out.write(buildLine());
+        printed = true;
+        startTick();
+      },
+      setVerb: (newVerb: string) => {
+        if (typeof newVerb === 'string' && newVerb.length > 0) verb = newVerb;
+      },
+      stop: () => {
+        if (stopped) return;
+        stopped = true;
+        stopTick();
+        eraseLine();
+      },
+      isPaused:  () => paused,
+      isStopped: () => stopped,
+    };
+  }
+
   // ── Phase 23.5 — tool event row ───────────────────────────────────────
   // One line per tool call: a "·" gutter, the keyword `tool`, the
   // tool name (soft cyan, padded), a brief truncated arg preview, and
@@ -1119,14 +1328,55 @@ export class Display {
     const sk = this.skin;
     const useMd = opts.markdown !== false;
     const rawBody = useMd ? this.markdown(text).trimEnd() : text;
-    const indented = rawBody
-      .split('\n')
-      .map((ln) => (ln ? `  ${ln}` : ''))
-      .join('\n');
+    // v4.1.4 reply-quality polish — F1 detect-and-skip indent + wrap.
+    //
+    // Walks the rendered markdown line-by-line, but applies frame
+    // indent/wrap ONLY to plain prose lines. Lines that already carry
+    // structural chrome (code-block rail+bg, blockquote rail,
+    // pre-indented list bullets) pass through untouched — `renderCode-
+    // Block`, `renderBlockquote`, and the list override already own
+    // their own gutter + per-line wrap. Double-applying the gutter
+    // shifts content right by 3 cols; double-wrapping breaks the rail
+    // off the wrap-continuation row. See `isPreFramedLine` for the
+    // detection rules.
+    const indented = this.applyFrameToRendered(rawBody);
     const reasoning = opts.reasoning
-      ? `  ${sk.applyColors(opts.reasoning.trim(), 'muted')}\n`
+      ? `${frameGetIndent(0)}${sk.applyColors(opts.reasoning.trim(), 'muted')}\n`
       : '';
     return `${this.agentHeader()}${reasoning}${indented}\n`;
+  }
+
+  /**
+   * v4.1.4 reply-quality polish — F1 shared helper.
+   *
+   * Apply frame indent + soft-wrap to the prose lines of a rendered
+   * markdown body, but pass structural lines (code-block rail+bg,
+   * blockquote rail, pre-indented list bullets) through unchanged.
+   *
+   * Shared by `agentTurn` (one-shot reply) and `tryRerenderInPlace`
+   * (post-stream rerender) so both paths produce identical output.
+   */
+  private applyFrameToRendered(rawBody: string): string {
+    const indent = frameGetIndent(0);
+    const bw     = frameGetBodyWidth(this.out);
+    return rawBody
+      .split('\n')
+      .map((ln) => {
+        if (ln.length === 0) return '';
+        // F1 detect-and-skip: pre-framed lines (code-block chrome, list
+        // bullets, blockquote rails) own their own gutter + wrap. Don't
+        // re-indent or re-wrap them — that double-applies the gutter
+        // and breaks the rail off wrap-continuation rows.
+        if (isPreFramedLine(ln)) return ln;
+        // Plain prose: indent + wrap to bodyWidth. wrap-ansi handles
+        // ANSI-aware width counting so bold/heading paint survives.
+        const wrapped = frameWrap(ln, bw, { trim: false, hard: true });
+        return wrapped
+          .split('\n')
+          .map((vln) => `${indent}${vln}`)
+          .join('\n');
+      })
+      .join('\n');
   }
 
   /**
@@ -1279,6 +1529,33 @@ export class Display {
   private streamLineCount = 0;
 
   /**
+   * v4.1.4 reply-quality polish (Q-ResizeReflow Option B): zero the
+   * per-chunk row counter when the terminal resizes mid-stream.
+   *
+   * Why: the resize guard hard-clears the viewport (`\x1b[2J\x1b[H`)
+   * which removes ALL rows from the screen — but our `streamLineCount`
+   * still believes those rows are there. The next `tryRerenderInPlace`
+   * would walk the cursor back N rows that no longer exist, leaving a
+   * ghost gap at the top of the new viewport. Zeroing the count makes
+   * the next eraser a no-op (which is correct — there's nothing left
+   * to erase).
+   *
+   * Idempotent: no-op when no stream is active. Safe to call from a
+   * resize callback that fires unconditionally on every viewport
+   * change. Also resets `streamBuffer` so the next commit doesn't try
+   * to rerender content that was already wiped.
+   */
+  resetStreamFrameForResize(): void {
+    if (!this.streamHeaderShown) return;
+    this.streamLineCount = 0;
+    this.streamBuffer = '';
+    // Header was wiped by the hard-clear too — let the next
+    // streamPartial / agentTurn write a fresh one.
+    this.streamHeaderShown = false;
+    this.streamLastEndedNewline = false;
+  }
+
+  /**
    * Append a streamed text fragment. Writes a styled "Aiden" header on
    * the first call of a turn, then writes raw text directly via the
    * underlying `write` so token boundaries remain visible. Markdown
@@ -1301,10 +1578,81 @@ export class Display {
     this.out.write(text);
     this.streamLastEndedNewline = text.endsWith('\n');
     // Phase v4.1-reply-formatting: track buffer + line count for the
-    // post-stream re-render. We count newlines in the OUTGOING bytes
-    // so the eraser later knows how many rows to clear.
+    // post-stream re-render.
     this.streamBuffer += text;
-    for (let i = 0; i < text.length; i += 1) if (text[i] === '\n') this.streamLineCount += 1;
+    // v4.1.4 reply-quality polish — F-B1 wrap-aware row count.
+    //
+    // Prior counter just `streamLineCount += text.match(/\n/g)?.length`
+    // — counted `\n` chars only. When the model emits a long single
+    // line (e.g. a 100-char bullet on an 80-col terminal), the terminal
+    // naturally wraps it across multiple screen rows, but the old
+    // counter would still think it's 1 row. At streamComplete the
+    // eraser walked back N rows that didn't match the wrapped row
+    // count → raw `**markup**` from the streaming phase remained
+    // visible above the rerendered output.
+    //
+    // Confirmed undercount via scripts/smoke-stream-wrap-count.ts:
+    // 3 long bullets on 80-col counted 3, actually 6. Multi-chunk
+    // preamble + bullets on 40-col counted 4, actually 8.
+    //
+    // Fix: count `ceil(visibleWidth / cols)` rows per `\n`-delimited
+    // segment, then add 1 for the `\n` itself (cursor advances to
+    // next row when newline is emitted). Visible width strips ANSI.
+    this.streamLineCount += this.countStreamRows(text);
+  }
+
+  /**
+   * v4.1.4 reply-quality polish — F-B1 helper.
+   *
+   * Estimate how many screen rows `text` consumes when written to a
+   * terminal of width `this.out.columns`. Counts terminal-natural-wrap
+   * rows for each logical line, plus one row per `\n`.
+   *
+   * Falls back to a sane count when columns is undefined (non-TTY or
+   * pre-resize): in that case the eraser won't fire anyway
+   * (`tryRerenderInPlace` gates on `out.isTTY`), so the count is
+   * effectively ignored. We still compute a defensible value so any
+   * future TTY-detection change doesn't silently regress.
+   *
+   * Pure with respect to ANSI: escape sequences pass through
+   * `visibleLength` and don't inflate the row count.
+   *
+   * Edge cases:
+   *   - Empty text → 0 rows (consistent with the prior counter).
+   *   - Text without `\n` → ceil(visibleLen / cols) rows.
+   *   - Trailing `\n` → counts the prior content row + 1 for the
+   *     newline. Cursor is now at the start of the next row, which is
+   *     correct screen-state — the next streamPartial extends from
+   *     col 0 of that row.
+   */
+  private countStreamRows(text: string): number {
+    if (text.length === 0) return 0;
+    const cols = (typeof this.out.columns === 'number' && this.out.columns >= 1)
+      ? this.out.columns
+      : 80;
+    // Semantics: counter tracks ROW BOUNDARIES CROSSED during
+    // emission, not "rows occupied". The eraser uses `\x1b[<N>F`
+    // which moves the cursor up N rows; if N matches the number of
+    // boundaries crossed from start-of-stream to current-cursor, the
+    // eraser lands at the start row and `\x1b[J` clears the rest.
+    //
+    // For a segment of visible width V on a terminal of width C:
+    //   - V == 0       → 0 wrap boundaries
+    //   - V <= C       → 0 wrap boundaries (single row)
+    //   - C < V <= 2C  → 1 wrap boundary
+    //   - General      → floor((V - 1) / C) wrap boundaries
+    //
+    // Each `\n` between segments crosses one boundary regardless of
+    // visible width — that's the newline advancing the cursor.
+    let rows = 0;
+    const segments = text.split('\n');
+    for (let i = 0; i < segments.length; i += 1) {
+      const seg = segments[i] ?? '';
+      const visible = visibleLength(seg);
+      if (visible > 0) rows += Math.floor((visible - 1) / cols);
+      if (i < segments.length - 1) rows += 1;
+    }
+    return rows;
   }
 
   /**
@@ -1360,10 +1708,13 @@ export class Display {
       // \x1b[J   = erase from cursor to end of screen.
       this.out.write(`\x1b[${lines}F\x1b[J`);
       const formatted = this.markdown(buffered).trimEnd();
-      const indented = formatted
-        .split('\n')
-        .map((ln) => (ln ? `  ${ln}` : ''))
-        .join('\n');
+      // v4.1.4 reply-quality polish: same detect-and-skip indent + wrap
+      // as agentTurn so streamed and one-shot replies share the visible
+      // frame. wrap-ansi handles ANSI-aware width counting for prose;
+      // structural lines (code-block chrome, list bullets, blockquote
+      // rails) pass through unchanged so their own gutter + wrap stays
+      // intact.
+      const indented = this.applyFrameToRendered(formatted);
       this.out.write(indented + '\n');
     } catch {
       // Eraser already ran. v4.1.3-essentials: write the raw buffered
@@ -1684,6 +2035,105 @@ function truncToolArg(s: string): string {
   const flat = s.replace(/\s+/g, ' ').trim();
   if (flat.length <= TOOL_ROW_ARG_CAP) return flat;
   return flat.slice(0, TOOL_ROW_ARG_CAP - 1) + '…';
+}
+
+/**
+ * v4.1.4 reply-quality polish — Part 1.6 tool-aware verb mapper.
+ *
+ * Picks the activity-indicator verb for the gap that follows a given
+ * tool's completion. The verb reflects "what the model is likely doing
+ * next" rather than "what just happened" — so a `file_read` completing
+ * leads to "reading" (model is digesting the contents) rather than
+ * "drafted" (which would imply done). Tested in display.test.ts.
+ *
+ * Categories (matches against the tool-name substring, lowercased):
+ *   - read/list/view/get/inspect    → 'reading'
+ *   - search/web/fetch_url/scrape   → 'searching'
+ *   - shell/exec/run/compute/system → 'analyzing'
+ *   - write/edit/patch/save         → 'drafting'
+ *   - everything else (or undefined) → 'thinking'
+ *
+ * Special caller-supplied phase override:
+ *   - When the caller knows "all tools are done, reply about to start"
+ *     they pass `phase: 'post-all'` → verb defaults to 'drafting'
+ *     regardless of the last tool name.
+ *
+ * Pure; exported for unit-test access.
+ */
+export function verbForActivity(
+  toolName: string | undefined,
+  phase: 'pre-tools' | 'post-tool' | 'post-all' = 'post-tool',
+): string {
+  if (phase === 'pre-tools') return 'thinking';
+  if (phase === 'post-all')  return 'drafting';
+  const t = (toolName ?? '').toLowerCase();
+  if (t.length === 0) return 'thinking';
+  // Match in priority order so 'web_search' hits 'searching' (search)
+  // before 'reading' (a hypothetical 'web_search_read' would still
+  // map to 'searching' since search hits first).
+  if (/(^|_)(search|web|fetch_url|scrape|crawl)(_|$)/.test(t)) return 'searching';
+  if (/(^|_)(read|list|view|get|inspect|info|status)(_|$)/.test(t)) return 'reading';
+  if (/(^|_)(write|edit|patch|save|create|append|delete|remove)(_|$)/.test(t)) return 'drafting';
+  if (/(^|_)(shell|exec|execute|run|compute|process|system|launch)(_|$)/.test(t)) return 'analyzing';
+  return 'thinking';
+}
+
+/**
+ * v4.1.4 reply-quality polish — F1 detect-and-skip predicate.
+ *
+ * Returns true when `line` is a structural / pre-framed line emitted
+ * by replyRenderer (code-block chrome, blockquote rail, indented list
+ * bullet, fence rules). These lines OWN their own gutter and per-line
+ * wrap; `agentTurn` and `tryRerenderInPlace` MUST pass them through
+ * unchanged so the post-render indent+wrap pass doesn't:
+ *   - Double the gutter (content drifts 3 cols right per pass)
+ *   - Re-wrap an already-wrapped code line (rail/bg breaks across
+ *     the new wrap continuation row)
+ *
+ * Detection rules (all on the ANSI-bearing line as emitted by marked
+ * via our renderer overrides):
+ *   - Contains `\x1b[48;` anywhere → 24-bit bg paint = code-block
+ *     line. Always pre-framed (renderCodeBlock applies gutter + rail).
+ *   - Starts with `   │ ` or `   ┃ ` → explicit pre-framed rail
+ *     (code or blockquote at the frame gutter).
+ *   - Matches `^\s{2,}(•|▸|\d+\.)\s` (depth-indented list bullet) →
+ *     the list override already applied the per-depth indent.
+ *   - Matches `^\s{0,4}─{8,}` (horizontal-rule run or fence) → render-
+ *     specific divider already styled.
+ *
+ * Pure; exported for unit-test access.
+ */
+export function isPreFramedLine(line: string): boolean {
+  if (line.length === 0) return false;
+  // eslint-disable-next-line no-control-regex
+  const stripped = line.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+  // v4.1.4 reply-quality polish — Fix D (tightened predicate).
+  //
+  // Code-block body lines start with the frame gutter + rail. The
+  // 24-bit bg paint (`\x1b[48;…`) also appears on these lines, but
+  // we MUST NOT use bg-presence alone as the trigger: the `codespan`
+  // renderer wraps inline `` `code` `` with the same bg envelope, so
+  // any prose line containing inline code would be wrongly classified
+  // as a code-block line and would bypass the indent + wrap pass
+  // (Issue D from visual smoke — prose with inline codespans
+  // terminal-natural-wrapped past bodyWidth).
+  //
+  // Rail prefix (after ANSI strip) is the reliable signal: only
+  // `renderCodeBlock` emits `   │ ` and only `renderBlockquote` emits
+  // `┃ ` at line start (with display-layer gutter prepended).
+  if (/^   │ /.test(stripped)) return true;
+  if (/^   ┃ /.test(stripped) || /^┃ /.test(stripped)) return true;
+  // Depth-indented list bullets emitted by the renderer.list override:
+  //   `  • prose…`        (depth 1, 2-space indent)
+  //   `    ▸ prose…`      (depth 2, 4-space indent)
+  //   `  1. prose…`       (numbered, depth 1)
+  if (/^\s{2,}(•|▸|\d+\.)\s/.test(stripped)) return true;
+  // Code-block fence rules (long runs of `─` with optional leading
+  // gutter + optional language label from renderCodeBlock). Match
+  // ANYWHERE in the line so the language-tagged top rule
+  // (`   ── lang ──────…──`) trips alongside the unlabeled bottom rule.
+  if (/─{8,}/.test(stripped)) return true;
+  return false;
 }
 
 /**

@@ -21,7 +21,11 @@
 
 import type { AidenAgent } from '../../core/v4/aidenAgent';
 import type { Display } from './display';
-import { summarizeChannelState } from './display';
+import { summarizeChannelState, verbForActivity } from './display';
+// v4.1.4 Part 1.6 — per-turn token progress bar. Fed by `onProgress`
+// events from the streaming adapter; hidden when the adapter doesn't
+// emit progress (honest degradation).
+import { createProgressBar } from './display/progressBar';
 import type { TelegramAdapter } from '../../core/channels/telegram';
 import type {
   CommandRegistry,
@@ -558,9 +562,21 @@ export class ChatSession implements ChatSessionLike {
     // Tier-3-essentials: hard-clear the screen on terminal resize so
     // dropdown re-renders + previous prompt frames don't ghost into
     // the new viewport. No-op on non-TTY / MCP serve mode.
+    //
+    // v4.1.4 reply-quality polish: also drop the per-chunk stream row
+    // counter so a mid-stream resize doesn't try to erase rows that
+    // the hard-clear already removed. See `resetStreamFrameForResize`
+    // in display.ts for the rationale.
     const restoreResizeGuard = this.opts.promptApi
       ? (): void => { /* test prompt API: skip */ }
-      : installResizeGuard();
+      : installResizeGuard({
+          onCleared: () => {
+            try {
+              (this.opts.display as { resetStreamFrameForResize?: () => void })
+                .resetStreamFrameForResize?.();
+            } catch { /* defensive — never break the resize listener */ }
+          },
+        });
     try {
       while (iter < max) {
         iter += 1;
@@ -1102,43 +1118,107 @@ export class ChatSession implements ChatSessionLike {
       ? [...this.history, ...newHistory, userMsg]
       : [...this.history, userMsg];
 
-    // Phase 16c: streaming gated on display.streaming config (default off).
-    // Defensive: tests sometimes pass partial config stubs without the
-    // ConfigManager API; treat that as "streaming disabled".
+    // Phase 16c: streaming gated on display.streaming config.
+    // v4.1.4 Part 1.6: PRODUCTION DEFAULT FLIPPED FROM FALSE TO TRUE.
+    // Streaming delivers the activity indicator, tool-row live tick,
+    // and token progress bar that the user feedback ("after prompt i
+    // just see output") was specifically asking for. Users who
+    // explicitly set `display.streaming: false` in config still opt
+    // out; the change affects only the default for users who never
+    // touched the flag.
+    //
+    // Test-stub fallback (no ConfigManager) stays at `false` so
+    // existing tests that depended on the non-streaming code path
+    // don't have to be rewritten in this slice — they exercise the
+    // batch-call path that production users on Ollama / non-streaming
+    // adapters still hit naturally.
     const streamingEnabled =
       typeof this.opts.config?.getValue === 'function'
-        ? this.opts.config.getValue<boolean>('display.streaming', false) === true
+        ? this.opts.config.getValue<boolean>('display.streaming', true) === true
         : false;
 
-    // Phase 26.2.6 — random thinking phrase per turn, already wrapped
-    // in brand orange by Display.thinkingPhrase().
-    const spinner = this.opts.display.startSpinner(this.opts.display.thinkingPhrase());
-    let spinnerStopped = false;
-    let streamingActive = false;
-    const stopSpinnerOnce = (): void => {
-      if (spinnerStopped) return;
-      spinnerStopped = true;
-      spinner.stop();
+    // v4.1.4 reply-quality polish — Part 1.6. Activity indicator
+    // replaces the prior single-shot spinner. Pause/resume hooks make
+    // the indicator cooperate with tool rows: it pauses before each
+    // tool row writes and resumes (with a tool-aware verb) in the
+    // gap that follows, so the user always sees activity feedback
+    // during model-thinking time — not just the pre-first-token gap.
+    //
+    // Initial verb is "thinking" (pre-tools phase). After each tool
+    // completes, `verbForActivity(toolName, 'post-tool')` picks a
+    // category-aware verb (reading / searching / analyzing / drafting).
+    // When the first stream delta arrives OR the final agentTurn is
+    // about to write, the indicator stops permanently.
+    const indicator = this.opts.display.activityIndicator('thinking');
+    let indicatorStopped = false;
+    let streamingActive  = false;
+    const stopIndicatorOnce = (): void => {
+      if (indicatorStopped) return;
+      indicatorStopped = true;
+      indicator.stop();
+      // Clear the per-turn pause/resume hooks so they don't fire
+      // against a stopped indicator on a subsequent turn. The next
+      // turn re-registers fresh hooks.
+      try {
+        this.opts.callbacks.setActivityIndicatorHooks?.({});
+      } catch { /* defensive */ }
     };
 
-    // Phase 23.5: stop the "thinking…" spinner the moment the first
-    // tool row prints. The event rows are the user-facing indicator
-    // from that point on; a spinner painting `\r` over the same line
-    // would corrupt our row-overwrite when the row mutates to its
-    // final bracket state.
-    this.opts.callbacks.setBeforeFirstToolHook?.(stopSpinnerOnce);
+    // Phase 23.5 carried forward: stop the indicator the moment the
+    // first tool row prints — the row itself is the activity surface
+    // during a tool. Part 1.6 then resumes via `afterEachTool` so the
+    // post-tool gap has its own indicator paint.
+    this.opts.callbacks.setBeforeFirstToolHook?.(stopIndicatorOnce);
+
+    // Part 1.6: pause/resume hooks around every tool row. The
+    // `beforeTool` hook fires before EACH tool row writes (not just
+    // the first), so multi-tool sequences also keep the indicator
+    // off the tool-row line. `afterEachTool` resumes with a verb
+    // chosen from the just-completed tool's category — best guess
+    // for "what the model is doing next". `lastToolName` is captured
+    // for tests / observability; the verb decision happens inline.
+    this.opts.callbacks.setActivityIndicatorHooks?.({
+      beforeTool: () => {
+        if (indicatorStopped) return;
+        indicator.pause();
+        // v4.1.4 Part 1.6: hide the progress bar while the tool row
+        // owns the screen. The bar paints below the indicator, so
+        // it'd otherwise sit between the tool row and any subsequent
+        // stream output — visual clutter for tool-heavy turns. The
+        // bar is per-turn, not per-stream-segment; once hidden it
+        // stays hidden until the next turn's bar is created.
+        progressBar?.hide();
+      },
+      afterEachTool: (toolName: string) => {
+        if (indicatorStopped) return;
+        indicator.resume(verbForActivity(toolName, 'post-tool'));
+      },
+    });
+
+    // v4.1.4 Part 1.6: per-turn progress bar. Created lazily on the
+    // first `onProgress` event from the streaming adapter so the bar
+    // line doesn't paint until there's something to show. Adapters
+    // that don't emit progress (Ollama, most OpenAI-compat) never
+    // trigger creation — honest degradation, no fake estimates.
+    let progressBar: ReturnType<typeof createProgressBar> | null = null;
 
     try {
       const result = await this.opts.agent.runConversation(baseHistory, {
         stream: streamingEnabled,
         onFirstDelta: streamingEnabled
           ? () => {
-              stopSpinnerOnce();
+              stopIndicatorOnce();
               streamingActive = true;
             }
           : undefined,
         onDelta: streamingEnabled
           ? (text: string) => {
+              // v4.1.4 Part 1.6: bar lives ABOVE streamed text. Hide
+              // it before each delta writes so the stream output
+              // doesn't land on the bar's line. The bar repaints on
+              // the next `onProgress` event (which Anthropic emits
+              // frequently enough that the bar stays usefully visible).
+              progressBar?.hide();
               this.opts.display.streamPartial(text);
             }
           : undefined,
@@ -1147,8 +1227,31 @@ export class ChatSession implements ChatSessionLike {
               this.opts.display.streamToolIndicator(call.name);
             }
           : undefined,
+        onProgress: streamingEnabled
+          ? (outputTokens: number, maxTokens?: number) => {
+              if (indicatorStopped === false) return;
+              // Lazy-create on first event. The indicator must already
+              // be stopped (first delta arrived) so the bar paints on
+              // its own line below where the indicator was. If the
+              // indicator is still up, skip — the bar would land on
+              // the indicator line and get clobbered by the next tick.
+              if (!progressBar) {
+                progressBar = createProgressBar(
+                  process.stdout as NodeJS.WriteStream,
+                  // Display exposes its skin via getter on the
+                  // implementation; cast to any to avoid widening
+                  // the public Display surface for one-shot use.
+                  (this.opts.display as unknown as { skin: import('./skinEngine').SkinEngine }).skin,
+                );
+              }
+              progressBar.update(outputTokens, maxTokens);
+            }
+          : undefined,
       });
-      stopSpinnerOnce();
+      stopIndicatorOnce();
+      // Hide the progress bar before any post-stream content
+      // (statusFooter, the next prompt) lands on its line.
+      progressBar?.hide();
       if (streamingActive) this.opts.display.streamComplete();
 
       this.history = result.messages;
@@ -1194,7 +1297,11 @@ export class ChatSession implements ChatSessionLike {
       this.opts.display.write(`  ${this.opts.display.rule()}\n`);
       this.renderStatusLine();
     } catch (err) {
-      stopSpinnerOnce();
+      stopIndicatorOnce();
+      // v4.1.4 Part 1.6: error path must also hide the progress bar
+      // so it doesn't leak across the boundary into the error chrome
+      // or the next prompt.
+      progressBar?.hide();
       if (streamingActive) this.opts.display.streamComplete();
       const msg = (err as Error)?.message ?? String(err);
       // v4.1.3-prebump: classify the error so the suggestion below

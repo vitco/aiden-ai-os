@@ -102,6 +102,16 @@ export class CliCallbacks {
   private beforeFirstToolHook?: () => void;
   private firstToolFiredThisTurn = false;
 
+  // v4.1.4 reply-quality polish — Part 1.6 activity indicator hooks.
+  //
+  // chatSession registers a pair of hooks per turn so the indicator
+  // pauses while a tool row owns the screen and resumes (with a fresh
+  // verb derived from the just-completed tool) in the gap that
+  // follows. Both are optional — non-streaming non-indicator callers
+  // get the v4.1.3 behaviour unchanged.
+  private beforeToolHook?:    () => void;
+  private afterEachToolHook?: (toolName: string) => void;
+
   constructor(opts: CliCallbacksOptions) {
     this.display = opts.display;
     this.auxiliaryClient = opts.auxiliaryClient;
@@ -128,6 +138,25 @@ export class CliCallbacks {
   }
 
   /**
+   * v4.1.4 reply-quality polish — Part 1.6.
+   *
+   * Register paired hooks so chatSession can pause the activity
+   * indicator while a tool row writes, and resume it (with a fresh
+   * verb derived from the just-completed tool) in the gap before the
+   * next tool fires or the final reply arrives.
+   *
+   * Both fire for EVERY tool, not just the first. Either can be
+   * omitted independently. Cleared between turns by passing `undefined`.
+   */
+  setActivityIndicatorHooks(opts: {
+    beforeTool?:    () => void;
+    afterEachTool?: (toolName: string) => void;
+  }): void {
+    this.beforeToolHook    = opts.beforeTool;
+    this.afterEachToolHook = opts.afterEachTool;
+  }
+
+  /**
    * Phase 23.5 — bound to AidenAgent.onToolCall. Emits one event row
    * per tool call: prints `[running]` on `before`, mutates the bracket
    * to `[ok N ms]` / `[fail N ms]` / `[blocked]` on `after`. Recognises
@@ -149,6 +178,12 @@ export class CliCallbacks {
         }
         this.beforeFirstToolHook = undefined;
       }
+      // v4.1.4 reply-quality polish — Part 1.6. Pause activity
+      // indicator BEFORE the tool row writes so the indicator's line
+      // is clean when the row lands. Fires for every tool, not just
+      // the first. Defensive try/catch — a misbehaving hook must not
+      // block tool dispatch.
+      try { this.beforeToolHook?.(); } catch { /* defensive */ }
       const handle = this.display.toolRow(call.name, call.arguments);
       this.toolRows.set(call.id, handle);
       this.toolStartTimes.set(call.id, Date.now());
@@ -159,11 +194,31 @@ export class CliCallbacks {
     const startedAt = this.toolStartTimes.get(call.id);
     this.toolRows.delete(call.id);
     this.toolStartTimes.delete(call.id);
-    if (!handle || startedAt === undefined) return;
+    if (!handle || startedAt === undefined) {
+      // Even if we lost the handle, the indicator may still need to
+      // be re-armed so the next gap shows activity. Tool-name-aware
+      // verb selection happens in the hook itself.
+      try { this.afterEachToolHook?.(call.name); } catch { /* defensive */ }
+      return;
+    }
     const ms = Date.now() - startedAt;
     const err = result?.error;
     if (typeof err === 'string' && err.includes('URL provenance gate')) {
       handle.blocked();
+      return;
+    }
+    // v4.1.4 reply-quality polish — Part 1.6. Helper used by ALL
+    // outcome branches below so the activity indicator gets re-armed
+    // for the gap that follows this tool (next tool, or final reply).
+    // Tool-name-aware verb selection happens in the hook (chatSession
+    // wires it through `verbForActivity`).
+    const fireAfter = (): void => {
+      try { this.afterEachToolHook?.(call.name); } catch { /* defensive */ }
+    };
+
+    if (typeof err === 'string' && err.includes('URL provenance gate')) {
+      handle.blocked();
+      fireAfter();
       return;
     }
     if (err) {
@@ -177,15 +232,18 @@ export class CliCallbacks {
       if (result?.capabilityCard) {
         this.display.capabilityCard(result.capabilityCard);
       }
+      fireAfter();
       return;
     }
     // v4.1.3-repl-polish: degraded outcome — tool completed but with a
     // partial / best-effort result. Show in trail yellow instead of silent.
     if (result?.degraded) {
       handle.degraded(ms, result.degradedReason);
+      fireAfter();
       return;
     }
     handle.ok(ms);
+    fireAfter();
   };
 
   /** ApprovalEngine.callbacks.promptUser */
@@ -258,26 +316,29 @@ Reply with ONE word: safe, caution, or dangerous.`;
     }
   };
 
-  /** PlannerGuard sink. Quiet in compact mode. */
+  /**
+   * PlannerGuard sink. v4.1.4 Phase 3b' (Q-Planner): moved to
+   * verbose-only. The default `normal` mode previously emitted
+   * `[planner] kept N tools (reason)` mid-execution, which collided
+   * visually with the activity indicator's single-line paint and
+   * with streamed deltas. Users running with the default verbose
+   * level should see a clean execution surface — planner-guard
+   * decisions are useful for debugging but noise during normal use.
+   *
+   * `verbose` mode keeps the full breakdown for debugging. `compact`
+   * stays silent (unchanged).
+   */
   onPlannerGuardDecision = (decision: PlannerGuardDecision): void => {
     if (this.verboseMode === 'compact') return;
+    if (this.verboseMode !== 'verbose') return;
     if (decision.reason === 'no_filter') return;
-    if (this.verboseMode === 'verbose') {
-      const conf =
-        decision.confidence !== undefined
-          ? ` (conf ${decision.confidence.toFixed(2)})`
-          : '';
-      this.display.dim(
-        `[planner] ${decision.reason}${conf}: kept ${decision.selectedTools.length} / dropped ${decision.excludedTools.length}`,
-      );
-      return;
-    }
-    // normal
-    if (decision.excludedTools.length > 0) {
-      this.display.dim(
-        `[planner] kept ${decision.selectedTools.length} tools (${decision.reason})`,
-      );
-    }
+    const conf =
+      decision.confidence !== undefined
+        ? ` (conf ${decision.confidence.toFixed(2)})`
+        : '';
+    this.display.dim(
+      `[planner] ${decision.reason}${conf}: kept ${decision.selectedTools.length} / dropped ${decision.excludedTools.length}`,
+    );
   };
 
   /**

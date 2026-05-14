@@ -108,6 +108,53 @@ describe('ensureSoulMdSeeded', () => {
     expect(content).toMatch(/NEVER search verbatim "popular song"/);
   });
 
+  it('v4.1.4: silent-upgrades the v4.1.2 / v4.1.3 default to current', async () => {
+    // Reply-quality polish slice — Voice block rewritten to be
+    // conditional on user energy. The v4.1.2 default shipped through
+    // v4.1.3 unchanged, so any user installed across v4.1.0 → v4.1.3
+    // has identical SOUL on disk; silent-upgrade picks them up here.
+    const { PREVIOUS_BUNDLED_SOULS } = await import(
+      '../../cli/v4/defaultSoul'
+    );
+    expect(PREVIOUS_BUNDLED_SOULS.length).toBeGreaterThanOrEqual(4);
+    const root = await makeTempRoot();
+    const paths = resolveAidenPaths({ rootOverride: root });
+    await ensureAidenDirsExist(paths);
+    // Index 3 is the v4.1.2 (= v4.1.3) snapshot.
+    await fs.writeFile(paths.soulMd, PREVIOUS_BUNDLED_SOULS[3], 'utf8');
+    const result = await ensureSoulMdSeeded(paths);
+    expect(result.outcome).toBe('upgraded');
+    const content = await fs.readFile(paths.soulMd, 'utf8');
+    expect(content).toBe(DEFAULT_SOUL_MD);
+    // Sanity: new content has the conditional voice + reasoning line.
+    expect(content).toMatch(
+      /Match the user's energy\. When the user asks a thoughtful question/,
+    );
+    expect(content).toMatch(/engage thoughtfully/);
+    expect(content).toMatch(/transactionally, stay tight/);
+    expect(content).toMatch(
+      /share the reasoning before the answer/,
+    );
+    // The old unconditional Voice line is gone from the new bundled
+    // default (still present in the snapshot we wrote, naturally).
+    expect(content).not.toMatch(/^- Direct\. No fluff\./m);
+  });
+
+  it('v4.1.4: bundled default lacks the unconditional Voice line', () => {
+    // Regression sentinel — if we accidentally re-introduce the hard
+    // "Direct. No fluff." Voice line in DEFAULT_SOUL_MD, this fires
+    // before anything else does. The conditional rewrite is the
+    // whole point of the slice.
+    expect(DEFAULT_SOUL_MD).not.toMatch(/^- Direct\. No fluff\. Match/m);
+    // The new conditional pair must be intact.
+    expect(DEFAULT_SOUL_MD).toMatch(
+      /Match the user's energy\..*engage thoughtfully.*stay tight/s,
+    );
+    expect(DEFAULT_SOUL_MD).toMatch(
+      /share the reasoning before the answer/,
+    );
+  });
+
   it('Phase 16g: preserves user-edited content + emits notice', async () => {
     const root = await makeTempRoot();
     const paths = resolveAidenPaths({ rootOverride: root });

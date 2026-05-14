@@ -74,9 +74,15 @@ const DEFAULT_SKIN: SkinDefinition = {
     error: [0xf4, 0x47, 0x47],
     warn: [0xff, 0xc1, 0x07],
     success: [0x4c, 0xaf, 0x50],
-    // v4.1.3-repl-polish: muted is now true grey (#888) so it reads as
-    // genuinely secondary. The soft-cyan that was here moved to 'session'.
-    muted: [0x88, 0x88, 0x88],
+    // v4.1.4 reply-quality polish: muted shifts from neutral grey
+    // (#888888) to warm Aiden-tinted dim (#b8a89a). Mid-grey at +56
+    // brightness on red/green channels with a slight cool-down on
+    // blue, putting muted in the same warm family as brand orange
+    // (#FF6B35) without competing with it. Reads as "intentional
+    // dim" rather than washed-out terminal grey. Used by tool-trail
+    // gutter, status footer, code-block rail, blockquote rail, and
+    // display.dim() — surfaces the user reads constantly.
+    muted: [0xb8, 0xa8, 0x9a],
     heading: BRAND_ORANGE,
     // v4.1.3-repl-polish: session = soft cyan (ex-muted); used for IDs
     // and the session-end card header labels.
@@ -110,7 +116,12 @@ const LIGHT_SKIN: SkinDefinition = {
     error: [0xb0, 0x10, 0x10],
     warn: [0x80, 0x60, 0x00],
     success: [0x1b, 0x5e, 0x20],
-    muted: [0x60, 0x60, 0x60],
+    // v4.1.4 reply-quality polish: proportional warm-shift for the
+    // light skin too. Was neutral #606060; new value #7a6e5e keeps the
+    // dark-on-light contrast budget but adds the same warm tint as the
+    // default skin's muted so themed surfaces feel coherent across
+    // skin switches.
+    muted: [0x7a, 0x6e, 0x5e],
     heading: [0xc4, 0x42, 0x10],
     session: [0x00, 0x55, 0x88],
     degraded: [0x80, 0x60, 0x00],

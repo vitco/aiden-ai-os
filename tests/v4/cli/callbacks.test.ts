@@ -222,6 +222,35 @@ describe('CliCallbacks.onPlannerGuardDecision', () => {
     });
     expect(output()).toBe('');
   });
+
+  // v4.1.4 Phase 3b' Q-Planner — planner decisions are now
+  // verbose-only. The prior `normal` mode emitted
+  // `[planner] kept N tools (reason)` mid-execution which collided
+  // with the activity-indicator line. Sentinel asserts the default
+  // verbose level (`normal`) stays silent now.
+  it('normal mode is SILENT (Phase 3b\' Q-Planner)', () => {
+    const { display, output } = makeDisplay();
+    const cb = new CliCallbacks({ display, verboseMode: 'normal' });
+    cb.onPlannerGuardDecision({
+      selectedTools: ['a', 'b'],
+      excludedTools: ['c', 'd', 'e'],
+      reason: 'rule_match',
+    });
+    expect(output()).toBe('');
+  });
+
+  it('default mode (no verboseMode given) is SILENT for planner', () => {
+    const { display, output } = makeDisplay();
+    // CliCallbacks defaults verboseMode to 'normal' when not supplied.
+    const cb = new CliCallbacks({ display });
+    cb.onPlannerGuardDecision({
+      selectedTools: ['a'],
+      excludedTools: ['b'],
+      reason: 'llm_classification',
+      confidence: 0.82,
+    });
+    expect(output()).toBe('');
+  });
 });
 
 describe('CliCallbacks.onCompression', () => {

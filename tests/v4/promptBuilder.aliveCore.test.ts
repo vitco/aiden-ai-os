@@ -139,3 +139,55 @@ describe('PromptBuilder alive-core guidance slots', () => {
     expect(skillsIdx).toBeGreaterThan(memIdx);
   });
 });
+
+// ── v4.1.4 reply-quality polish — softened EXECUTION_DISCIPLINE_PROSE ──────
+//
+// The old prose ended with "Responses that only describe intentions without
+// acting are not acceptable." which biased the model toward action-mode
+// even on exploratory queries where no tool call applies. The v4.1.4 slice
+// rewrites the trailing sentence to a conditional: action on action
+// requests, discussion on discussion requests. The "must immediately make
+// the corresponding tool call" guard is preserved — anti-stalling is still
+// in scope; what changes is the framing for tool-less turns.
+
+describe('PromptBuilder execution-discipline conditional (v4.1.4)', () => {
+  it('softened prose: requests-action ⇄ requests-discussion pairing present', async () => {
+    const root = await makeTempRoot();
+    const paths = resolveAidenPaths({ rootOverride: root });
+    await ensureAidenDirsExist(paths);
+    const prompt = await (new PromptBuilder()).build({ paths });
+    // New conditional phrasing must appear.
+    expect(prompt).toMatch(
+      /When the user requests an action, take it\. When the user requests\s+discussion, discuss\./,
+    );
+  });
+
+  it('no longer hard-asserts "intentions without acting are not acceptable"', async () => {
+    const root = await makeTempRoot();
+    const paths = resolveAidenPaths({ rootOverride: root });
+    await ensureAidenDirsExist(paths);
+    const prompt = await (new PromptBuilder()).build({ paths });
+    expect(prompt).not.toContain(
+      'Responses that only describe intentions without acting are not acceptable.',
+    );
+  });
+
+  it('preserves the anti-stalling guard for action turns', async () => {
+    const root = await makeTempRoot();
+    const paths = resolveAidenPaths({ rootOverride: root });
+    await ensureAidenDirsExist(paths);
+    const prompt = await (new PromptBuilder()).build({ paths });
+    // The "you MUST immediately make the corresponding tool call in the
+    // same response" half is non-negotiable — softening must not erase it.
+    expect(prompt).toContain(
+      'you MUST immediately make the corresponding tool call in the same response',
+    );
+    expect(prompt).toContain('Never end your turn with a promise of future action');
+  });
+
+  it('predicate still injects the block by default (always-on)', () => {
+    expect(shouldInjectExecutionDiscipline('gpt-5.5')).toBe(true);
+    expect(shouldInjectExecutionDiscipline('llama3.1:8b')).toBe(true);
+    expect(shouldInjectExecutionDiscipline(undefined)).toBe(true);
+  });
+});

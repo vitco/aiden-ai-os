@@ -210,7 +210,7 @@ export class AnthropicAdapter implements ProviderAdapter {
       };
       return;
     }
-    yield* decodeStream(reply.body);
+    yield* decodeStream(reply.body, input.maxTokens ?? DEFAULT_MAX_TOKENS);
   }
 
   // ── Request body assembly ────────────────────────────────────────────────
@@ -568,6 +568,7 @@ interface BlockState {
 
 async function* decodeStream(
   body: ReadableStream<Uint8Array>,
+  maxTokens: number,
 ): AsyncGenerator<StreamEvent, void, void> {
   const blocks  = new Map<number, BlockState>();
   const toolCalls: ToolCallRequest[] = [];
@@ -575,6 +576,13 @@ async function* decodeStream(
   let usage: WireMessageBody['usage'] = undefined;
   // Stable text emission order: walk content blocks by index at end-of-stream.
   const textOrder: number[] = [];
+  // v4.1.4 Part 1.6: track the last-emitted output-token count so we
+  // only yield a `progress` event when the counter actually advances.
+  // Anthropic emits `message_delta.usage.output_tokens` as a running
+  // total — multiple deltas may carry the same value if no new tokens
+  // were produced between them. Deduping keeps the event stream
+  // proportional to real progress.
+  let lastProgressEmitted = -1;
 
   for await (const payload of parseSseStream(body)) {
     if (!payload || payload === '[DONE]') continue;
@@ -647,6 +655,22 @@ async function* decodeStream(
         if (evt.delta?.stop_reason) stopReason = evt.delta.stop_reason;
         if (evt.usage) {
           usage = { ...(usage ?? {}), ...evt.usage };
+          // v4.1.4 Part 1.6 — emit a `progress` event when the running
+          // output-token counter advances. The display layer uses these
+          // for the ▰▱ progress bar. Deduped via `lastProgressEmitted`
+          // so a stream of message_delta events with no real progress
+          // doesn't flood the consumer.
+          const outputTokens = typeof evt.usage.output_tokens === 'number'
+            ? evt.usage.output_tokens
+            : -1;
+          if (outputTokens > lastProgressEmitted) {
+            lastProgressEmitted = outputTokens;
+            yield {
+              type:         'progress',
+              outputTokens,
+              maxTokens,
+            };
+          }
         }
         break;
       }

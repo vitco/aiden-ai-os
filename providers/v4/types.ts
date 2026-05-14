@@ -228,6 +228,23 @@ export interface ProviderCallOutput {
 export type StreamEvent =
   | { type: 'delta'; content: string }
   | { type: 'tool_call'; toolCall: ToolCallRequest }
+  /**
+   * v4.1.4 Part 1.6 — incremental output-token counter. Optional;
+   * adapters opt in when they have the data (Anthropic emits
+   * `message_delta.usage.output_tokens` running counter, OpenAI-compat
+   * varies, Ollama has no mid-stream signal). When no `progress`
+   * events are emitted, the display layer's token progress bar stays
+   * hidden — honest degradation, no fake estimates.
+   *
+   * `outputTokens` is the CUMULATIVE count for the turn so far
+   * (not a delta between chunks). Adapters that report deltas should
+   * accumulate before emitting.
+   *
+   * `maxTokens` is the budget the turn was called with — display
+   * uses it for the bar's fill ratio. Adapters that don't know the
+   * budget can omit (display falls back to `?` denominator).
+   */
+  | { type: 'progress'; outputTokens: number; maxTokens?: number }
   | { type: 'done'; output: ProviderCallOutput };
 
 /**
