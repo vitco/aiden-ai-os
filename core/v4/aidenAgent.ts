@@ -84,6 +84,16 @@ import {
   buildDefaultClassifier,
   type ClassificationResult,
 } from './failureClassifier';
+// v4.2 Phase 3 — structured RecoveryReport. Built ONLY when the
+// recovery controller's surface stage fires (tool_loop); enriches the
+// existing surface card with summary + category breakdown + dominant
+// guidance. Implicitly gated by AIDEN_TCE=1 (surface only reachable
+// when TurnState is enabled).
+import {
+  buildRecoveryReport,
+  enrichCardWithReport,
+  extractGoal,
+} from './recoveryReport';
 import type { MemorySnapshot } from './memoryProvider';
 import {
   SkillEnforcementTracker,
@@ -869,6 +879,10 @@ export class AidenAgent {
     // off the same entry index.
     const fullTrace: Array<{ name: string; args: Record<string, unknown> }> = [];
     const totalUsage = { inputTokens: 0, outputTokens: 0 };
+    // v4.2 Phase 3 — turn start timestamp for RecoveryReport duration.
+    // Captured here so any code path (early-return / error / surface)
+    // can compute wallclock duration consistently.
+    const turnStartedAt = Date.now();
     let   turnCount         = 0;
     let   toolCallCount     = 0;
     let   fallbackActivated = false;
@@ -1150,7 +1164,22 @@ export class AidenAgent {
       // v4.1.6 spike (TCE) — terminal surface handling.
       if (surfaceDecision && surfaceDecision.kind === 'surface') {
         finishReason = 'tool_loop';
-        toolLoopCard = surfaceDecision.surfaceCard;
+        // v4.2 Phase 3 — enrich the base surface card with a
+        // structured RecoveryReport. Pure synthesis from TurnState's
+        // diagnostic snapshot + first-user-message goal + duration.
+        // Implicit gating: this branch is only reachable when
+        // TurnState is enabled, so AIDEN_TCE=0 never builds a report.
+        if (surfaceDecision.surfaceCard) {
+          const report = buildRecoveryReport({
+            snapshot:   turnState.getDiagnosticSnapshot(),
+            goal:       extractGoal(messages),
+            exitReason: 'tool_loop',
+            durationMs: Date.now() - turnStartedAt,
+          });
+          toolLoopCard = enrichCardWithReport(surfaceDecision.surfaceCard, report);
+        } else {
+          toolLoopCard = surfaceDecision.surfaceCard;
+        }
         // Push the partial tool messages we collected so honesty +
         // history downstream see the full sequence including the
         // loop-trigger call. No final assistant message — the

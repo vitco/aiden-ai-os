@@ -119,6 +119,20 @@ export interface CapabilityCardData {
   /** Single-sentence guidance — e.g. "Run /auth login chatgpt-plus"
    *  or "Open this skill on Windows for full functionality." */
   fix:             string;
+  /**
+   * v4.2 Phase 3 — optional one-line "what happened" summary surfaced
+   * above the canStill section. Reserved for failure-report context
+   * like "Tried 8 tool calls · 6 failed · 2 succeeded · 4.2s". Absent
+   * for v4.1.3-style capability cards.
+   */
+  whatHappened?:   string;
+  /**
+   * v4.2 Phase 3 — optional failure-category breakdown, rendered as a
+   * row of inline pills. Pure aggregation; renderer formats each
+   * entry as `<category>(<count>)`. Ordered by descending count then
+   * category priority. Absent for v4.1.3-style capability cards.
+   */
+  failuresByCategory?: Array<{ category: string; count: number }>;
 }
 
 export interface ToolCallResult {

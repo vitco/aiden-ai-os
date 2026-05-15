@@ -75,6 +75,27 @@ export function renderCapabilityCard(
   // CONTENT (no border) — boxSharp adds the side borders + padding.
   const rows: string[] = [];
 
+  // v4.2 Phase 3 — optional "what happened" one-liner above the
+  // canStill section. Rendered as a muted-tone line so it reads as
+  // context, not action. Skipped cleanly when absent → v4.1.3
+  // capability-card behaviour preserved for non-Phase-3 callers.
+  if (data.whatHappened) {
+    rows.push('');
+    rows.push(colorize(truncToContent(data.whatHappened), 'muted'));
+  }
+
+  // v4.2 Phase 3 — optional failure-category pill row. Each entry
+  // renders as `<category>(<count>)` separated by " · " bullets.
+  // Pre-sorted by the generator (desc count then category priority);
+  // renderer just formats. Skipped cleanly when absent.
+  if (data.failuresByCategory && data.failuresByCategory.length > 0) {
+    const pills = data.failuresByCategory
+      .map((p) => `${p.category}(${p.count})`)
+      .join(' · ');
+    const label = colorize('Failures:', 'error');
+    rows.push(`${label} ${truncToContent(pills)}`);
+  }
+
   if (data.canStill.length > 0) {
     rows.push('');
     rows.push(heading('Can still:'));
