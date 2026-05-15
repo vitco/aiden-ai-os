@@ -55,8 +55,13 @@
 
 import crypto from 'node:crypto';
 
+import type { Message } from '../../providers/v4/types';
 import type { VerificationResult } from './verifier';
 import type { ClassificationResult } from './failureClassifier';
+import type {
+  Checkpoint,
+  TurnStateInternalSnapshot,
+} from './checkpoint';
 
 // ── Public types ────────────────────────────────────────────────────────────
 
@@ -74,8 +79,22 @@ export interface CapturedCall {
  */
 export type RecoveryStage = 'none' | 'hinted' | 'cooldown' | 'surfaced';
 
-/** The action the agent loop should take after a tool call. */
-export type RecoveryKind = 'allow' | 'hint' | 'cooldown' | 'surface';
+/**
+ * The action the agent loop should take after a tool call.
+ *
+ * v4.2 Phase 4 added `cooldown_with_rollback` — same intent as
+ * `cooldown` (the looping tool is being pulled from the schema),
+ * but with an attached checkpoint that the agent loop should
+ * restore from. Fires only when the most-recent restorable
+ * checkpoint exists and contains no mutating tool calls (HARD
+ * BLOCK enforcement of the never-undo-side-effects rule).
+ */
+export type RecoveryKind =
+  | 'allow'
+  | 'hint'
+  | 'cooldown'
+  | 'cooldown_with_rollback'
+  | 'surface';
 
 /** Returned from `recordToolCall`. Agent inspects `kind` and acts. */
 export interface RecoveryDecision {
@@ -96,6 +115,23 @@ export interface RecoveryDecision {
     canStill:    string[];
     cannotReliably: string[];
     fix:         string;
+  };
+  /**
+   * v4.2 Phase 4 — present on `cooldown_with_rollback` only. The
+   * agent loop should:
+   *   1. Truncate its messages array to `checkpoint.messages.length`
+   *   2. Call `turnState.restoreInternalsFrom(checkpoint)`
+   *   3. Push a corrective system message (built via
+   *      `buildRollbackMessage` in core/v4/checkpoint.ts)
+   *   4. Break out of the current tool-dispatch batch
+   * `blockedBy` is always empty in Phase 4 (hard block means we
+   * never roll back when mutating tools ran); kept on the type so
+   * a Phase 5+ soft-rollback variant can populate it without a
+   * type change.
+   */
+  rollback?: {
+    checkpoint:  Checkpoint;
+    blockedBy:   ReadonlyArray<string>;
   };
 }
 
@@ -178,6 +214,17 @@ export interface TurnStateOptions {
    * a retry plus a third confirmation that it's not flakiness).
    */
   failedConsecThreshold?:    number;
+  /**
+   * v4.2 Phase 4 — checkpoint ring-buffer depth. Bounded number of
+   * per-iteration checkpoints held in memory. Default 3. The agent
+   * loop calls `captureCheckpoint(...)` at iteration entry; the ring
+   * buffer rolls over once depth is exceeded.
+   *
+   * Phase 4 only USES last-1 today (cooldown rolls back to the most
+   * recent restorable checkpoint); holding 3 prepares Phase 5+ where
+   * the task graph may want deeper rewinds for sub-step failures.
+   */
+  checkpointDepth?:          number;
 }
 
 // ── Implementation ──────────────────────────────────────────────────────────
@@ -189,6 +236,7 @@ export class TurnState {
   private readonly surfaceConsec:     number;
   private readonly cooldownIters:     number;
   private readonly failedConsec:      number;
+  private readonly checkpointDepth:   number;
 
   private stage:                      RecoveryStage = 'none';
   private toolCalls:                  CapturedCall[] = [];
@@ -228,6 +276,14 @@ export class TurnState {
   private classifications:            Array<{
     name: string; classification: ClassificationResult; ts: number;
   }> = [];
+  /**
+   * v4.2 Phase 4 — ring buffer of per-iteration checkpoints. Newest
+   * at the tail. Length is bounded by `checkpointDepth`; older
+   * entries are dropped from the head when capacity is exceeded.
+   * The "live" checkpoint (the one capturing the current iteration's
+   * mutation flag) is always `checkpoints[checkpoints.length - 1]`.
+   */
+  private checkpoints:                Checkpoint[] = [];
 
   constructor(opts: TurnStateOptions = {}) {
     this.enabled =
@@ -237,6 +293,10 @@ export class TurnState {
     this.surfaceConsec   = opts.surfaceConsecThreshold  ?? 11;
     this.cooldownIters   = opts.cooldownIterations      ?? 3;
     this.failedConsec    = opts.failedConsecThreshold   ?? 3;
+    // checkpointDepth = 0 disables the buffer entirely (useful for
+    // tests that want Phase 1-3 behavior with TCE enabled). Otherwise
+    // default 3 per Q-CP2 approval.
+    this.checkpointDepth = Math.max(0, opts.checkpointDepth ?? 3);
   }
 
   isEnabled(): boolean {
@@ -351,14 +411,32 @@ export class TurnState {
     ) {
       this.stage = 'cooldown';
       this.cooledDownTools.set(name, this.cooldownIters);
-      const decision: RecoveryDecision = {
+
+      // v4.2 Phase 4 — look for a restorable checkpoint. The cooldown
+      // stage benefits from rolling back to a clean baseline before
+      // the looping tool started failing, but ONLY when no mutating
+      // tools ran in the target iteration's window (HARD BLOCK per
+      // Q-CP3). Falls back gracefully to plain cooldown when no
+      // restorable checkpoint exists.
+      const restorable = this.findRestorableCheckpoint();
+      const baseDecision: RecoveryDecision = {
         kind:        'cooldown',
         toolName:    name,
         consecutive: this.consecName.count,
         cooldownMessage: buildCooldownMessage(name, this.cooldownIters),
       };
       this.recoveryEvents.push({ stage: 'cooldown', toolName: name, count: this.consecName.count, ts });
-      return decision;
+      if (restorable) {
+        return {
+          ...baseDecision,
+          kind: 'cooldown_with_rollback',
+          rollback: {
+            checkpoint: restorable,
+            blockedBy:  [],   // hard block means we only return checkpoints with zero mutations
+          },
+        };
+      }
+      return baseDecision;
     }
 
     // v4.2 Phase 1 — verifier-driven HINT. Fires faster than the
@@ -425,6 +503,173 @@ export class TurnState {
       }
     }
   }
+
+  // ── Phase 4 — checkpoint / restore API ─────────────────────────────────
+
+  /**
+   * Capture the state going INTO an iteration's tool dispatch. Called
+   * by the agent loop after the assistant message is pushed but
+   * before the for-each-tool dispatch loop begins. The captured
+   * `messages` argument is shallow-cloned (item references shared;
+   * the array reference is new — items are treated as immutable
+   * Message objects downstream).
+   *
+   * No-op when disabled (AIDEN_TCE=0) OR when `checkpointDepth === 0`.
+   * Ring-buffer rolls over once depth is exceeded.
+   */
+  captureCheckpoint(messages: ReadonlyArray<Message>, iteration: number): void {
+    if (!this.enabled || this.checkpointDepth === 0) return;
+    const checkpoint: Checkpoint = {
+      iteration,
+      ts: Date.now(),
+      messages: [...messages],
+      turnStateSnapshot: this.captureInternalSnapshot(),
+      containedMutations: false,
+      mutatingToolsSinceCheckpoint: [],
+    };
+    this.checkpoints.push(checkpoint);
+    while (this.checkpoints.length > this.checkpointDepth) {
+      this.checkpoints.shift();
+    }
+  }
+
+  /**
+   * Flag the LIVE checkpoint (the most recently captured one) as
+   * having seen a mutating tool dispatch. Called by the agent loop
+   * just before dispatching any tool with `ToolHandler.mutates ===
+   * true`. Sets `containedMutations` on the live checkpoint AND on
+   * every older checkpoint that's still in the ring buffer — those
+   * older checkpoints would otherwise be eligible for rollback even
+   * though the iterations between them contained mutating tools.
+   *
+   * No-op when disabled or when the ring buffer is empty.
+   */
+  markMutationOnLiveCheckpoint(toolName: string): void {
+    if (!this.enabled || this.checkpoints.length === 0) return;
+    // Mark every checkpoint currently in the buffer — rolling back to
+    // ANY of them would require un-doing this mutation.
+    for (const cp of this.checkpoints) {
+      if (!cp.containedMutations) {
+        // Re-assign with mutated copy; Checkpoint fields are typed
+        // readonly on the public type but we own them internally.
+        (cp as { containedMutations: boolean }).containedMutations = true;
+      }
+      const mutating = cp.mutatingToolsSinceCheckpoint as string[];
+      if (!mutating.includes(toolName)) {
+        mutating.push(toolName);
+      }
+    }
+  }
+
+  /**
+   * Find the most recent checkpoint that's safe to roll back to. A
+   * checkpoint is safe when `containedMutations === false` — no
+   * mutating tool has run since it was captured. Returns null when
+   * no such checkpoint exists (caller falls back to plain cooldown
+   * per Q-CP3 hard block).
+   *
+   * Walks the ring buffer from newest to oldest; the first restorable
+   * checkpoint is returned. Disabled / empty buffer → null.
+   */
+  findRestorableCheckpoint(): Checkpoint | null {
+    if (!this.enabled || this.checkpoints.length === 0) return null;
+    for (let i = this.checkpoints.length - 1; i >= 0; i -= 1) {
+      const cp = this.checkpoints[i];
+      if (!cp.containedMutations) return cp;
+    }
+    return null;
+  }
+
+  /**
+   * Restore TurnState internals from a previously-captured checkpoint.
+   * The caller is responsible for truncating the messages array to
+   * `checkpoint.messages.length`. After restore, the ring buffer is
+   * trimmed to remove the checkpoint AND every newer entry — those
+   * captures correspond to iterations that no longer happened from
+   * the controller's perspective.
+   *
+   * No-op when disabled. Safe to call with a checkpoint that's no
+   * longer in the buffer (e.g. dropped by the ring rollover) — the
+   * snapshot data is still valid; only the buffer-trimming step is
+   * skipped.
+   */
+  restoreInternalsFrom(checkpoint: Checkpoint): void {
+    if (!this.enabled) return;
+    const snap = checkpoint.turnStateSnapshot;
+    this.stage           = snap.stage;
+    this.consecName      = { ...snap.consecName };
+    this.consecSignature = { ...snap.consecSignature };
+    this.consecFailed    = { ...snap.consecFailed };
+    this.cooledDownTools = new Map(snap.cooledDownTools.map(([k, v]) => [k, v]));
+    this.toolCalls       = [...snap.toolCalls];
+    this.successfulTools = new Set(snap.successfulTools);
+    this.recoveryEvents  = [...snap.recoveryEvents];
+    this.verifications   = [...snap.verifications];
+    this.classifications = [...snap.classifications];
+    // Trim the ring buffer to remove `checkpoint` and everything newer.
+    const idx = this.checkpoints.indexOf(checkpoint);
+    if (idx >= 0) {
+      this.checkpoints = this.checkpoints.slice(0, idx);
+    }
+  }
+
+  /**
+   * Read-only view of the live ring buffer. Public for tests + future
+   * diagnostic surfaces. Returns a fresh array; mutation is harmless.
+   */
+  getCheckpoints(): ReadonlyArray<Checkpoint> {
+    return [...this.checkpoints];
+  }
+
+  /**
+   * v4.2 Phase 4 — re-apply a cooldown after a rollback. Called by
+   * the agent loop AFTER `restoreInternalsFrom`, because restore
+   * replaces `cooledDownTools` with the checkpoint's snapshot (which
+   * was captured BEFORE the cooldown decision was emitted).
+   *
+   * Without this re-apply, the cooldown intent of the recovery
+   * decision would be silently dropped post-rollback. We want the
+   * NEXT iteration to see the constrained tool schema, which is the
+   * whole point of cooldown_with_rollback.
+   *
+   * Also re-promotes the stage to 'cooldown' so subsequent calls
+   * within the same turn don't re-trigger the same recovery
+   * (monotonic stage discipline preserved).
+   *
+   * No-op when disabled.
+   */
+  reapplyCooldown(toolName: string): void {
+    if (!this.enabled) return;
+    this.cooledDownTools.set(toolName, this.cooldownIters);
+    if (this.stage === 'none' || this.stage === 'hinted') {
+      this.stage = 'cooldown';
+    }
+  }
+
+  /**
+   * Internal: capture the current mutable state into an immutable
+   * snapshot suitable for embedding in a Checkpoint. Deep-clones
+   * Maps + Sets; arrays are shallow-cloned because the items are
+   * treated as immutable downstream.
+   */
+  private captureInternalSnapshot(): TurnStateInternalSnapshot {
+    return {
+      stage:           this.stage,
+      consecName:      { ...this.consecName },
+      consecSignature: { ...this.consecSignature },
+      consecFailed:    { ...this.consecFailed },
+      cooledDownTools: [...this.cooledDownTools.entries()].map(
+        ([k, v]) => [k, v] as const,
+      ),
+      toolCalls:       [...this.toolCalls],
+      successfulTools: [...this.successfulTools],
+      recoveryEvents:  [...this.recoveryEvents],
+      verifications:   [...this.verifications],
+      classifications: [...this.classifications],
+    };
+  }
+
+  // ── Diagnostic snapshot ────────────────────────────────────────────────
 
   /** Diagnostic snapshot for tests + future debug surfacing. Pure read. */
   getDiagnosticSnapshot(): TurnStateDiagnosticSnapshot {

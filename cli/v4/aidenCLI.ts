@@ -1083,6 +1083,15 @@ export async function buildAgentRuntime(
   };
   const resolveToolset = (name: string) =>
     toolRegistry.get(name)?.toolset;
+  // v4.2 Phase 4 — checkpoint/restore mutability resolver. The agent's
+  // Phase 4 hook calls this before dispatching each tool to decide
+  // whether to flag the live checkpoint as having mutated state. Same
+  // registry source as resolveToolset; closure captures the live
+  // registry reference so newly-registered tools are seen. Unknown
+  // tools return undefined → agent treats them as non-mutating (no
+  // checkpoint flag); plugin authors must declare `mutates` honestly.
+  const resolveMutates = (name: string) =>
+    toolRegistry.get(name)?.mutates;
 
   // ── Phase 16b.4: assemble system-prompt context ─────────────────────
   // PromptBuilder needs SOUL.md (read at build time from `paths.soulMd`),
@@ -1203,6 +1212,7 @@ export async function buildAgentRuntime(
     skillTeacherCallbacks: { promptUser: callbacks.promptSkillProposal },
     resolveVerifiedFlag,
     resolveToolset,
+    resolveMutates,
     providerId,
     modelId,
     // Phase 16b.4: wire PromptBuilder so SOUL.md actually reaches the LLM.

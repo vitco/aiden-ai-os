@@ -94,6 +94,13 @@ import {
   enrichCardWithReport,
   extractGoal,
 } from './recoveryReport';
+// v4.2 Phase 4 — checkpoint / restore. Lets the recovery controller
+// roll conversation messages + TurnState internals back to before a
+// looping tool started failing, so the model retries from a clean
+// baseline. Hard-blocked on iterations containing mutating tools
+// (never claim to undo executed side effects). All-no-op when
+// AIDEN_TCE=0 — capture / mark / find / restore all short-circuit.
+import { buildRollbackMessage } from './checkpoint';
 import type { MemorySnapshot } from './memoryProvider';
 import {
   SkillEnforcementTracker,
@@ -189,6 +196,17 @@ export interface AidenAgentOptions {
   resolveVerifiedFlag?:    (result: ToolCallResult) => boolean | undefined;
   /** Resolves a tool name to its toolset, used by SkillTeacher. */
   resolveToolset?:         (toolName: string) => string | undefined;
+  /**
+   * v4.2 Phase 4 — resolves a tool name to its `mutates` flag, used
+   * by the checkpoint/restore subsystem to decide whether an
+   * iteration is rollback-safe. The CLI wires this via the same
+   * ToolRegistry reference as `resolveToolset`. Returns undefined
+   * for unknown tools — the agent treats undefined as "potentially
+   * mutating" only in the sense that it doesn't FLAG the checkpoint
+   * (so unknown tools remain rollback-eligible). Plugin authors
+   * should ensure their tools declare `mutates` honestly.
+   */
+  resolveMutates?:         (toolName: string) => boolean | undefined;
   // ── Context layers ───────────────────────────────────────────────────
   promptBuilder?:          PromptBuilder;
   promptBuilderOptions?:   PromptBuilderOptions;
@@ -340,6 +358,7 @@ export class AidenAgent {
   private skillMinerTurnIdx                  =  0;
   private readonly resolveVerifiedFlag?:        AidenAgentOptions['resolveVerifiedFlag'];
   private readonly resolveToolset?:             AidenAgentOptions['resolveToolset'];
+  private readonly resolveMutates?:             AidenAgentOptions['resolveMutates'];
   private readonly promptBuilder?:              PromptBuilder;
   private          promptBuilderOptions?:       PromptBuilderOptions;
   private readonly contextCompressor?:          ContextCompressor;
@@ -411,6 +430,7 @@ export class AidenAgent {
     this.onSkillCandidate         = opts.onSkillCandidate;
     this.resolveVerifiedFlag      = opts.resolveVerifiedFlag;
     this.resolveToolset           = opts.resolveToolset;
+    this.resolveMutates           = opts.resolveMutates;
     this.promptBuilder            = opts.promptBuilder;
     this.promptBuilderOptions     = opts.promptBuilderOptions;
     this.contextCompressor        = opts.contextCompressor;
@@ -1043,14 +1063,40 @@ export class AidenAgent {
         continue;
       }
 
+      // v4.2 Phase 4 — capture the state going INTO this iteration's
+      // tool dispatch. After the assistant message is in `messages`
+      // but before any tool result lands. Rollback-eligible only
+      // when no mutating tools run between this capture and the
+      // next iteration's capture (Q-CP3 hard block). No-op when
+      // AIDEN_TCE=0 or when checkpointDepth=0.
+      turnState.captureCheckpoint(messages, turnCount);
+
       // ── Dispatch tools sequentially ──────────────────────────────────
       const turnToolMessages: Message[] = [];
       // v4.1.6 spike (TCE) — set when TurnState surfaces a tool_loop
       // mid-batch. The agent stops dispatching remaining calls in the
       // batch and breaks out of the outer iteration loop cleanly.
       let surfaceDecision: RecoveryDecision | null = null;
+      // v4.2 Phase 4 — set when TurnState's recovery controller asks
+      // for a rollback. The agent loop truncates messages + restores
+      // TurnState internals + pushes a corrective system message,
+      // then continues the outer iteration loop from a clean baseline.
+      let rollbackDecision: RecoveryDecision | null = null;
       for (const call of output.toolCalls) {
         this.onToolCall?.(call, 'before');
+        // v4.2 Phase 4 — mark any active checkpoints as containing a
+        // mutating call BEFORE dispatch. Done pre-dispatch (not post)
+        // so that even if the tool throws / errors / produces a
+        // partial side effect, the mutation flag is set — rollback
+        // safety errs on the side of "this iteration mutated state".
+        // The mutability resolver is wired from the CLI's tool
+        // registry (`resolveMutates`); unknown tools return undefined,
+        // which we treat as non-mutating (leave the flag alone).
+        // Plugin authors should declare `mutates` honestly on their
+        // tool handlers — this is the structural enforcement point.
+        if (turnState.isEnabled() && this.resolveMutates?.(call.name) === true) {
+          turnState.markMutationOnLiveCheckpoint(call.name);
+        }
         let result: ToolCallResult;
         try {
           result = await this.toolExecutor(call);
@@ -1142,6 +1188,14 @@ export class AidenAgent {
             role:    'system',
             content: recovery.hintMessage,
           });
+        } else if (recovery.kind === 'cooldown_with_rollback' && recovery.rollback) {
+          // v4.2 Phase 4 — controller asks us to roll back. Capture
+          // the decision; we apply it AFTER the inner dispatch loop
+          // exits so we don't leave partial turnToolMessages in a
+          // half-state. Break out of dispatch immediately — no point
+          // running more tools whose results we're about to drop.
+          rollbackDecision = recovery;
+          break;
         } else if (recovery.kind === 'cooldown' && recovery.cooldownMessage) {
           // Stage 2: cooldown has already been recorded internally
           // (next iteration's schema-filter step excludes this tool).
@@ -1159,6 +1213,53 @@ export class AidenAgent {
           surfaceDecision = recovery;
           break;
         }
+      }
+
+      // v4.2 Phase 4 — apply rollback if the controller asked for it.
+      // Truncate messages to the captured snapshot length, restore
+      // TurnState internals, then push a corrective system message
+      // and continue the OUTER iteration loop. We deliberately drop
+      // any partial `turnToolMessages` collected before the rollback
+      // trigger — those are the noise we're trying to undo.
+      //
+      // Hard-block invariant: TurnState only emits
+      // `cooldown_with_rollback` when the target checkpoint has
+      // `containedMutations === false`, so we never get here for an
+      // iteration that ran a mutating tool. The optional
+      // `rollback.blockedBy` is empty in Phase 4 (kept on the type
+      // for a Phase 5+ soft-rollback variant).
+      if (rollbackDecision && rollbackDecision.rollback) {
+        const { checkpoint, blockedBy } = rollbackDecision.rollback;
+        // Truncate messages array to the captured length. The captured
+        // items are immutable Message references; we keep them as-is
+        // and just shorten the live array.
+        messages.length = checkpoint.messages.length;
+        // Restore TurnState mutable internals (stage / streaks /
+        // cooledDownTools / arrays). The cooled-down tools map is
+        // preserved as it was at checkpoint time — but the controller
+        // already added the looping tool to `cooledDownTools` before
+        // emitting the decision, so we need to RE-apply that cooldown
+        // after restore to honour the cooldown intent.
+        turnState.restoreInternalsFrom(checkpoint);
+        // Re-cool the tool that triggered the rollback so the next
+        // provider call sees the constrained schema.
+        if (rollbackDecision.toolName) {
+          turnState.reapplyCooldown(rollbackDecision.toolName);
+        }
+        // Inject corrective system message so the model sees what
+        // happened and why the tool just disappeared from its menu.
+        messages.push({
+          role:    'system',
+          content: buildRollbackMessage({
+            iteration: checkpoint.iteration,
+            toolName:  rollbackDecision.toolName,
+            blockedBy,
+          }),
+        });
+        // Continue the outer iteration loop from the restored
+        // baseline. The next provider call gets the filtered tool
+        // schema (cooldown applied) and the corrective message.
+        continue;
       }
 
       // v4.1.6 spike (TCE) — terminal surface handling.

@@ -145,10 +145,15 @@ describe('TCE end-to-end recovery (v4.1.6 spike)', () => {
     const result = await agent.runConversation(
       [{ role: 'user', content: 'explore skills' }] as Message[],
     );
-    // Cooldown message present.
+    // v4.2 Phase 4 — cooldown stage now emits either a plain
+    // "disabled" cooldown message OR a "Rolled back" message
+    // (depending on rollback eligibility). Substantive behavior is
+    // the same: the looping tool is cooled down and a corrective
+    // system message lands in history. Accept either phrasing.
     const cdMsgs = result.messages.filter(
       (m) => m.role === 'system' && typeof m.content === 'string' &&
-             m.content.startsWith('[tce]') && m.content.includes('disabled'),
+             m.content.startsWith('[tce]') &&
+             (m.content.includes('disabled') || m.content.includes('Rolled back')),
     );
     expect(cdMsgs.length).toBeGreaterThanOrEqual(1);
     expect(cdMsgs[0]!.content).toMatch(/skill_view/);
@@ -188,8 +193,13 @@ describe('TCE end-to-end recovery (v4.1.6 spike)', () => {
       loopCount:     15,
       honorCooldown: false,
     });
+    // v4.2 Phase 4 — declare every tool as mutating so rollback is
+    // never eligible and the surface stage fires deterministically.
+    // This preserves the test's original intent (assert surface card
+    // contents) without coupling it to Phase 4 rollback semantics.
     const agent = new AidenAgent({
       provider, tools: STUB_TOOLS, toolExecutor: STUB_EXECUTOR, maxTurns: 30,
+      resolveMutates: () => true,
     });
     const result = await agent.runConversation(
       [{ role: 'user', content: 'mixed then loop' }] as Message[],
@@ -222,10 +232,14 @@ describe('TCE end-to-end recovery (v4.1.6 spike)', () => {
     // After cooldown, mock returns terminal text → finishReason === 'stop'.
     // Surface should NOT fire because cooldown took the tool away early.
     expect(result.finishReason).toBe('stop');
-    // But the cooldown SYSTEM message must have landed.
+    // v4.2 Phase 4 — cooldown system message can be either the plain
+    // "disabled" form (Phase 1 behavior) OR the "Rolled back" form
+    // (Phase 4 with restorable checkpoint). Substantive contract is
+    // the same: a corrective `[tce]` system message lands in history.
     const cdMsgs = result.messages.filter(
       (m) => m.role === 'system' && typeof m.content === 'string' &&
-             m.content.startsWith('[tce]') && m.content.includes('disabled'),
+             m.content.startsWith('[tce]') &&
+             (m.content.includes('disabled') || m.content.includes('Rolled back')),
     );
     expect(cdMsgs.length).toBeGreaterThanOrEqual(1);
   });
