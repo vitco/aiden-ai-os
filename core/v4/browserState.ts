@@ -153,6 +153,38 @@ export interface ActionResult {
    * `maybe_noop` OR `progress_score < 0.3`.
    */
   needs_verifier:   boolean;
+  /**
+   * v4.3 Phase 2 — present when the HOC attempted a stale-ref retry.
+   *
+   * The observer HOC (`tools/v4/browser/_observer.ts`) attempts ONE
+   * automatic retry when an interactive browser tool fails with a
+   * resolution-class error (element not found / not visible / not
+   * attached / timeout / target closed). The retry uses the same
+   * args, on the hypothesis that the page was mid-render or a SPA
+   * route change settled between the original attempt and the retry.
+   *
+   * Phase 5 classifier reads `succeeded` to map a failed-retry case
+   * to the `stale_ref` FailureCategory. The `state_delta` field is
+   * purely diagnostic — it captures what changed in the page state
+   * between the original attempt and the resnapshot (URL change,
+   * DOM hash change, etc.).
+   *
+   * Absent when:
+   *   - The flag was off (AIDEN_BROWSER_DEPTH=0)
+   *   - The tool is not in `STALE_REF_RETRYABLE` (only browser_click /
+   *     browser_type / browser_fill qualify)
+   *   - The tool succeeded on the first attempt
+   *   - The tool failed but the error didn't match a stale-ref pattern
+   *     (e.g. "Permission denied" — clearly not a transient race)
+   */
+  staleRefRetry?: {
+    attempted:    true;
+    succeeded:    boolean;
+    /** The first stale-ref pattern that matched (short string). */
+    reason:       string;
+    /** Evidence between pre and resnapshot — same shape as `evidence`. */
+    state_delta:  string[];
+  };
 }
 
 // ── Helpers (exported for tests + ElementLease lifecycle in Phase 2) ───────
@@ -346,6 +378,26 @@ export class BrowserState {
       maybe_noop,
       needs_verifier,
     };
+  }
+
+  /**
+   * v4.3 Phase 2 — compute evidence-array delta between two snapshots.
+   * Public so the observer HOC can record `state_delta` on a
+   * stale-ref retry without re-deriving from `buildActionResult`
+   * (which expects a pair representing one action, not a pair across
+   * a failed attempt + resnapshot).
+   *
+   * Returns the same set of evidence strings produced by
+   * `buildActionResult`: `url_changed`, `normalized_url_changed`,
+   * `title_changed`, `dom_hash_changed`, `frame_tree_changed`.
+   * Returns `[]` when either snapshot is null.
+   */
+  computeStateDelta(
+    pre:  BrowserStateSnapshot | null,
+    post: BrowserStateSnapshot | null,
+  ): string[] {
+    if (!pre || !post) return [];
+    return computeEvidence(pre, post);
   }
 
   /** Public for tests + ElementLease text-hash construction in Phase 2. */
