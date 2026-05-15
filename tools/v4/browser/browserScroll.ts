@@ -16,8 +16,9 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwScroll } from '../../../core/playwrightBridge';
+import { withBrowserState } from './_observer';
 
-export const browserScrollTool: ToolHandler = {
+const _browserScrollTool: ToolHandler = {
   schema: {
     name: 'browser_scroll',
     description:
@@ -59,3 +60,6 @@ export const browserScrollTool: ToolHandler = {
     return { success: false, error: r.error };
   },
 };
+
+// v4.3 Phase 1 — observer HOC.
+export const browserScrollTool = withBrowserState(_browserScrollTool);

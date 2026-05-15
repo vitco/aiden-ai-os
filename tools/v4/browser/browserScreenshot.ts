@@ -21,8 +21,9 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwScreenshot } from '../../../core/playwrightBridge';
+import { withBrowserState } from './_observer';
 
-export const browserScreenshotTool: ToolHandler = {
+const _browserScreenshotTool: ToolHandler = {
   schema: {
     name: 'browser_screenshot',
     description:
@@ -41,3 +42,6 @@ export const browserScreenshotTool: ToolHandler = {
     return { success: false, error: r.error };
   },
 };
+
+// v4.3 Phase 1 — observer HOC.
+export const browserScreenshotTool = withBrowserState(_browserScreenshotTool);

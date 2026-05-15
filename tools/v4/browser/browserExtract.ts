@@ -17,8 +17,9 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwSnapshot } from '../../../core/playwrightBridge';
+import { withBrowserState } from './_observer';
 
-export const browserExtractTool: ToolHandler = {
+const _browserExtractTool: ToolHandler = {
   schema: {
     name: 'browser_extract',
     description:
@@ -37,3 +38,6 @@ export const browserExtractTool: ToolHandler = {
     return { success: false, error: r.error };
   },
 };
+
+// v4.3 Phase 1 — observer HOC.
+export const browserExtractTool = withBrowserState(_browserExtractTool);

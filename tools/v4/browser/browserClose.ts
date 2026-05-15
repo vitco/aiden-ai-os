@@ -15,8 +15,9 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwClose } from '../../../core/playwrightBridge';
+import { withBrowserState } from './_observer';
 
-export const browserCloseTool: ToolHandler = {
+const _browserCloseTool: ToolHandler = {
   schema: {
     name: 'browser_close',
     description:
@@ -36,3 +37,9 @@ export const browserCloseTool: ToolHandler = {
     }
   },
 };
+
+// v4.3 Phase 1 — observer HOC. After close the post-snapshot will
+// either spin up a fresh context (and return null on the first call
+// since the page is blank) or fail cleanly — either way the sidecar
+// just doesn't embed. Tiny overhead, uniform pattern.
+export const browserCloseTool = withBrowserState(_browserCloseTool);

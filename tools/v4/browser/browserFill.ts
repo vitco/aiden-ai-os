@@ -16,8 +16,9 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwType } from '../../../core/playwrightBridge';
+import { withBrowserState } from './_observer';
 
-export const browserFillTool: ToolHandler = {
+const _browserFillTool: ToolHandler = {
   schema: {
     name: 'browser_fill',
     description:
@@ -59,3 +60,6 @@ export const browserFillTool: ToolHandler = {
     return { success: true, filled, count: filled.length };
   },
 };
+
+// v4.3 Phase 1 — observer HOC.
+export const browserFillTool = withBrowserState(_browserFillTool);

@@ -12,6 +12,7 @@
 
 import path   from 'path'
 import fs     from 'fs'
+import crypto from 'crypto'
 import { getUserDataDir } from './paths'
 
 // ── Lazy-import Playwright so the server boots even if playwright
@@ -351,6 +352,59 @@ export async function pwSnapshot(): Promise<{ ok: boolean; text?: string; error?
     // eslint-disable-next-line no-undef
     const text = await page.evaluate(() => (globalThis as any).document.body.innerText) as string
     return { ok: true, text: text.slice(0, 3000) }
+  } catch (e: any) { return { ok: false, error: e.message } }
+}
+
+/**
+ * v4.3 Phase 1 — structured page-state snapshot used by the BrowserState
+ * observer. Captures URL + title + body-text hash + recursive iframe-tree
+ * hash in a single in-page evaluate. Truncates body innerText to 5 000
+ * chars before hashing so cost stays bounded for large pages.
+ *
+ * Cross-origin iframe srcs are surfaced (URL is visible); attempting to
+ * read `iframe.contentDocument` on a cross-origin frame throws — the
+ * recursive walker catches and skips, recording only the iframe's src.
+ *
+ * Returns `ok: false` when the browser is closed or evaluate fails.
+ * Caller (BrowserState.captureState) treats `ok: false` as "snapshot
+ * unavailable, embed no sidecar this call".
+ */
+export async function pwSnapshotHash(): Promise<{
+  ok:               boolean;
+  url?:             string;
+  title?:           string;
+  dom_text_hash?:   string;
+  frame_tree_hash?: string;
+  error?:           string;
+}> {
+  try {
+    const page  = await ensurePage()
+    const url   = page.url() as string
+    const title = await page.title() as string
+    // eslint-disable-next-line no-undef
+    const data  = await page.evaluate(() => {
+      const doc = (globalThis as any).document
+      const text = (doc?.body?.innerText ?? '') as string
+      // Recursive iframe URL walk. Cross-origin iframes throw on
+      // contentDocument access — catch and record just the src.
+      const urls: string[] = []
+      function walk(d: any): void {
+        try {
+          const iframes = Array.from(d.querySelectorAll('iframe')) as any[]
+          for (const f of iframes) {
+            urls.push(String(f.src ?? ''))
+            try { if (f.contentDocument) walk(f.contentDocument) } catch { /* cross-origin */ }
+          }
+        } catch { /* defensive */ }
+      }
+      walk(doc)
+      return { text, frame_urls: urls.join('|') }
+    }) as { text: string; frame_urls: string }
+
+    const dom_text_hash   = crypto.createHash('sha256').update(data.text.slice(0, 5000)).digest('hex')
+    const frame_tree_hash = crypto.createHash('sha256').update(data.frame_urls).digest('hex')
+
+    return { ok: true, url, title, dom_text_hash, frame_tree_hash }
   } catch (e: any) { return { ok: false, error: e.message } }
 }
 

@@ -15,8 +15,9 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwGetUrl } from '../../../core/playwrightBridge';
+import { withBrowserState } from './_observer';
 
-export const browserGetUrlTool: ToolHandler = {
+const _browserGetUrlTool: ToolHandler = {
   schema: {
     name: 'browser_get_url',
     description:
@@ -35,3 +36,6 @@ export const browserGetUrlTool: ToolHandler = {
     return { success: false, error: r.error };
   },
 };
+
+// v4.3 Phase 1 — observer HOC.
+export const browserGetUrlTool = withBrowserState(_browserGetUrlTool);

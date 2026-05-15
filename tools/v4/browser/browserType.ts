@@ -14,8 +14,9 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwType } from '../../../core/playwrightBridge';
+import { withBrowserState } from './_observer';
 
-export const browserTypeTool: ToolHandler = {
+const _browserTypeTool: ToolHandler = {
   schema: {
     name: 'browser_type',
     description:
@@ -43,3 +44,6 @@ export const browserTypeTool: ToolHandler = {
     return { success: false, error: r.error, selector };
   },
 };
+
+// v4.3 Phase 1 — observer HOC captures pre/post page state.
+export const browserTypeTool = withBrowserState(_browserTypeTool);

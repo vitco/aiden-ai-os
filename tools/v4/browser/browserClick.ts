@@ -16,8 +16,9 @@
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwClick, pwClickFirstResult } from '../../../core/playwrightBridge';
+import { withBrowserState } from './_observer';
 
-export const browserClickTool: ToolHandler = {
+const _browserClickTool: ToolHandler = {
   schema: {
     name: 'browser_click',
     description:
@@ -49,3 +50,8 @@ export const browserClickTool: ToolHandler = {
     return { success: false, error: r.error, target };
   },
 };
+
+// v4.3 Phase 1 — observer HOC captures pre/post page state when
+// AIDEN_BROWSER_DEPTH=1 and embeds it as a `browserState` sidecar.
+// No-op when disabled (default in Phase 1).
+export const browserClickTool = withBrowserState(_browserClickTool);

@@ -17,8 +17,9 @@
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { pwNavigate, pwSnapshot } from '../../../core/playwrightBridge';
 import { detectCaptchaMarkers } from './captchaCheck';
+import { withBrowserState } from './_observer';
 
-export const browserNavigateTool: ToolHandler = {
+const _browserNavigateTool: ToolHandler = {
   schema: {
     name: 'browser_navigate',
     description:
@@ -74,3 +75,6 @@ export const browserNavigateTool: ToolHandler = {
     return { success: true, url: r.url };
   },
 };
+
+// v4.3 Phase 1 — observer HOC.
+export const browserNavigateTool = withBrowserState(_browserNavigateTool);
