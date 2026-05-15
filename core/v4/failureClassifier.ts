@@ -62,7 +62,8 @@ import type { VerificationResult } from './verifier';
  *
  * The first ten are v4.2 Phase 2 — generic tool-call failure modes.
  * The last two are v4.3 Phase 5 — browser-specific failure modes
- * that can only be detected when AIDEN_BROWSER_DEPTH=1 surfaces
+ * that can only be detected when state-aware browser depth is
+ * enabled (default ON; opt-out via AIDEN_BROWSER_DEPTH=0) and surfaces
  * `result.browserState.staleRefRetry` / `.blocker` sidecars.
  *
  * Generic categories continue to route via `defaultClassifier` for
@@ -666,7 +667,8 @@ export function buildDefaultClassifier(): FailureClassifier {
   // v4.3 Phase 5 — browser-tool overrides that read the
   // BrowserState sidecars (staleRefRetry from Phase 2, blocker from
   // Phase 3). Fall through to defaultClassifier when sidecars are
-  // absent (AIDEN_BROWSER_DEPTH=0 → no sidecar → generic patterns).
+  // absent (browser depth opt'd out via AIDEN_BROWSER_DEPTH=0 →
+  // no sidecar → generic patterns).
   reg.register('browser_click',    browserInteractiveClassifier);
   reg.register('browser_type',     browserInteractiveClassifier);
   reg.register('browser_fill',     browserInteractiveClassifier);

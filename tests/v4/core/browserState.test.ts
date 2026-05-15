@@ -71,27 +71,39 @@ describe('BrowserState — gating', () => {
   beforeEach(() => { delete process.env.AIDEN_BROWSER_DEPTH; });
   afterEach(()  => { delete process.env.AIDEN_BROWSER_DEPTH; });
 
-  it('AIDEN_BROWSER_DEPTH unset (default): isEnabled === false (regression sentinel)', () => {
+  it('v4.3 Phase 6 — default ON: env unset → isEnabled === true', () => {
+    // New default-on sentinel. Phase 6 flipped the env-var semantic
+    // from `=== '1'` (strict opt-in) to `!== '0'` (strict opt-out).
+    delete process.env.AIDEN_BROWSER_DEPTH;
     const bs = new BrowserState();
-    expect(bs.isEnabled()).toBe(false);
+    expect(bs.isEnabled()).toBe(true);
   });
 
-  it('AIDEN_BROWSER_DEPTH=0: disabled', () => {
+  it('AIDEN_BROWSER_DEPTH=0: disabled (opt-out)', () => {
     process.env.AIDEN_BROWSER_DEPTH = '0';
     const bs = new BrowserState();
     expect(bs.isEnabled()).toBe(false);
   });
 
-  it('AIDEN_BROWSER_DEPTH=1: enabled', () => {
+  it('AIDEN_BROWSER_DEPTH=1: enabled (idempotent with new default)', () => {
     process.env.AIDEN_BROWSER_DEPTH = '1';
     const bs = new BrowserState();
     expect(bs.isEnabled()).toBe(true);
   });
 
-  it('junk values: disabled (Phase 1 strict opt-in)', () => {
+  it('junk values: enabled (Phase 6 strict-0 opt-out)', () => {
+    // Phase 6 flipped — anything that ISN'T `'0'` now enables. Junk
+    // values, empty strings, typos all enable. Strict `'0'` is the
+    // only opt-out value.
     process.env.AIDEN_BROWSER_DEPTH = 'yes';
     const bs = new BrowserState();
-    expect(bs.isEnabled()).toBe(false);
+    expect(bs.isEnabled()).toBe(true);
+  });
+
+  it('empty string: enabled (anything ≠ "0" enables)', () => {
+    process.env.AIDEN_BROWSER_DEPTH = '';
+    const bs = new BrowserState();
+    expect(bs.isEnabled()).toBe(true);
   });
 
   it('opts.enabled override wins over env var', () => {

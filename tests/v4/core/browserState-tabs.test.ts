@@ -63,15 +63,17 @@ describe('BrowserState — Phase 4 reconciliation', () => {
   beforeEach(() => { delete process.env.AIDEN_BROWSER_DEPTH; });
   afterEach(()  => { delete process.env.AIDEN_BROWSER_DEPTH; });
 
-  it('AIDEN_BROWSER_DEPTH unset (default): no reconciliation', async () => {
+  it('v4.3 Phase 6 — default ON: env unset → reconciliation fires', async () => {
+    // New default-on sentinel. Phase 6 flipped the env-var semantic;
+    // a constructed BrowserState with no env var now ENABLES.
+    delete process.env.AIDEN_BROWSER_DEPTH;
     const bs = new BrowserState();
     bs.setBridgeLoader(stubBridge(['h1'], [[mkTab()]]));
     await bs.captureState();
-    expect(bs.getTabs()).toEqual([]);
-    expect(bs.getActiveTab()).toBeNull();
+    expect(bs.getTabs()).toHaveLength(1);
   });
 
-  it('AIDEN_BROWSER_DEPTH=0: no reconciliation', async () => {
+  it('AIDEN_BROWSER_DEPTH=0: no reconciliation (opt-out)', async () => {
     process.env.AIDEN_BROWSER_DEPTH = '0';
     const bs = new BrowserState();
     bs.setBridgeLoader(stubBridge(['h1'], [[mkTab()]]));

@@ -63,7 +63,9 @@ function mkClickHandler(): ToolHandler {
 }
 
 describe('withBrowserState HOC', () => {
-  it('AIDEN_BROWSER_DEPTH unset: inner result returned verbatim (no sidecar)', async () => {
+  it('opts.enabled=false (opt-out path): inner result returned verbatim (no sidecar)', async () => {
+    // v4.3 Phase 6 — env unset now ENABLES by default. Use the
+    // explicit opts.enabled=false override to assert the disabled path.
     const state = new BrowserState({ enabled: false });
     state.setBridgeLoader(mkStubBridge());
     const wrapped = withBrowserState(mkClickHandler(), state, safeFetcher);

@@ -52,6 +52,6 @@ const _browserClickTool: ToolHandler = {
 };
 
 // v4.3 Phase 1 — observer HOC captures pre/post page state when
-// AIDEN_BROWSER_DEPTH=1 and embeds it as a `browserState` sidecar.
-// No-op when disabled (default in Phase 1).
+// browser depth is enabled (default ON; opt-out via
+// AIDEN_BROWSER_DEPTH=0) and embeds it as a `browserState` sidecar.
 export const browserClickTool = withBrowserState(_browserClickTool);

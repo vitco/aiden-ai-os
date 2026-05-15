@@ -29,11 +29,11 @@
  *     returning success:true AND maybe_noop:true is the structural
  *     signal for "click executed but nothing changed".
  *
- * Gated by `AIDEN_BROWSER_DEPTH=1` — strict opt-in for Phases 1-5,
- * default-on flip in Phase 6 (symmetric with v4.2 Phase 6's TCE flip).
- * When disabled, `captureState()` returns null and the HOC wrapper
+ * **Default ON** as of v4.3 Phase 6 — set `AIDEN_BROWSER_DEPTH=0`
+ * to disable. Symmetric with v4.2 Phase 6's TCE flip. When disabled,
+ * `captureState()` returns null and the HOC wrapper
  * (`tools/v4/browser/_observer.ts`) skips snapshot work entirely.
- * Zero overhead on the v4.2.5 path.
+ * Zero behavioural change vs v4.2.5 when disabled.
  *
  * Pure module — types + class + helpers. No I/O on the disabled path;
  * two `page.evaluate()` calls per action when enabled (URL + title +
@@ -122,7 +122,8 @@ export interface ElementLease {
 /**
  * Result of one browser action with full observer context. Embedded
  * as the `browserState` sidecar on the tool result envelope when
- * AIDEN_BROWSER_DEPTH=1; absent when disabled.
+ * TCE is enabled (default ON; opt-out via AIDEN_BROWSER_DEPTH=0);
+ * absent when disabled.
  */
 export interface ActionResult {
   /** State at action start (null when capture failed / disabled). */
@@ -170,7 +171,7 @@ export interface ActionResult {
    * DOM hash change, etc.).
    *
    * Absent when:
-   *   - The flag was off (AIDEN_BROWSER_DEPTH=0)
+   *   - The flag was opt'd out (AIDEN_BROWSER_DEPTH=0)
    *   - The tool is not in `STALE_REF_RETRYABLE` (only browser_click /
    *     browser_type / browser_fill qualify)
    *   - The tool succeeded on the first attempt
@@ -350,8 +351,10 @@ const NEEDS_VERIFIER_THRESHOLD = 0.3;
 export interface BrowserStateOptions {
   /**
    * Override the env-var gate. Default: read `process.env.AIDEN_BROWSER_DEPTH`
-   * at construct time; `'1'` enables, anything else disables. Phase 6
-   * will flip this to `!== '0'` for the default-on transition.
+   * at construct time; **state-aware browser depth is ON by default**
+   * as of v4.3 Phase 6. Set `AIDEN_BROWSER_DEPTH=0` to disable. Any
+   * other value (unset, `'1'`, junk) enables — strict-`'0'` opt-out
+   * keeps the contract unambiguous.
    */
   enabled?: boolean;
 }
@@ -401,10 +404,13 @@ export class BrowserState {
   private activeTabId: string | null = null;
 
   constructor(opts: BrowserStateOptions = {}) {
-    // Phase 1: strict opt-in via `=== '1'`. Phase 6 will flip the
-    // semantic to `!== '0'` for default-on (matches v4.2 Phase 6's
-    // TCE flip pattern).
-    this.enabled = opts.enabled ?? (process.env.AIDEN_BROWSER_DEPTH === '1');
+    // v4.3 Phase 6 — state-aware browser depth is ON by default.
+    // Strict `'0'` opt-out semantic: env var must be literally the
+    // string `'0'` to disable; everything else (unset, `'1'`, empty
+    // string, junk) enables. Mirrors v4.2 Phase 6's TCE flip exactly.
+    // The opts.enabled override still wins when explicitly passed
+    // by callers (test fixtures, embedded usage).
+    this.enabled = opts.enabled ?? (process.env.AIDEN_BROWSER_DEPTH !== '0');
   }
 
   isEnabled(): boolean {
@@ -421,7 +427,7 @@ export class BrowserState {
 
   /**
    * Capture current page state. Returns null when:
-   *   - disabled (AIDEN_BROWSER_DEPTH=0 or unset)
+   *   - opt'd out (AIDEN_BROWSER_DEPTH=0)
    *   - bridge loader missing
    *   - underlying pwSnapshotHash fails (browser not open, page error, etc.)
    *
@@ -477,7 +483,7 @@ export class BrowserState {
    * for tests + future v4.4 multi-tab dispatch flows.
    *
    * No-op when:
-   *   - disabled (AIDEN_BROWSER_DEPTH=0)
+   *   - disabled (opt-out via AIDEN_BROWSER_DEPTH=0)
    *   - bridge loader missing pwSnapshotTabs (older test fixtures)
    *   - bridge returns ok:false (browser closed, page error)
    *

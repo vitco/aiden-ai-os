@@ -464,7 +464,8 @@ export const browserInteractiveVerifier: VerifierFn = (toolName, args, result) =
   const base = defaultVerifier(toolName, args, result);
   if (!base.ok) return base;
 
-  // Read the v4.3 sidecar. Absent when AIDEN_BROWSER_DEPTH=0 — in
+  // Read the v4.3 sidecar. Absent when browser depth is opt'd out
+  // (AIDEN_BROWSER_DEPTH=0) — in
   // that case the verifier falls back to the default-passing result.
   const inner = result.result;
   if (!inner || typeof inner !== 'object') return base;
@@ -507,7 +508,7 @@ export function buildDefaultRegistry(): VerifierRegistry {
   // sidecar (`needs_verifier` / `maybe_noop`) and demotes
   // success-but-no-progress cases so the classifier routes them to
   // `stale_ref` recovery. Falls back to defaultVerifier when sidecar
-  // absent (AIDEN_BROWSER_DEPTH=0).
+  // absent (opt-out via AIDEN_BROWSER_DEPTH=0).
   reg.register('browser_click',    browserInteractiveVerifier);
   reg.register('browser_type',     browserInteractiveVerifier);
   reg.register('browser_fill',     browserInteractiveVerifier);

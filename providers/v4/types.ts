@@ -138,7 +138,7 @@ export interface CapabilityCardData {
    * below the canStill section. Populated by `enrichCardWithReport`
    * from a RecoveryReport's `browserContext` field (active tab URL,
    * blocker kind, other-tab count, stale-ref retry count). Renderer
-   * prints as a muted "Browser:" line; absent when AIDEN_BROWSER_DEPTH
+   * prints as a muted "Browser:" line; absent when browser depth
    * is off OR when no browser activity occurred this turn.
    */
   browserContext?: string;

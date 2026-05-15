@@ -15,7 +15,8 @@
  *
  * Phase 1 — observer captures pre/post snapshots and embeds them as
  * a `browserState` sidecar on the tool result when
- * AIDEN_BROWSER_DEPTH=1. No-op when disabled.
+ * browser depth is enabled (default ON; opt-out via
+ * AIDEN_BROWSER_DEPTH=0). No-op when disabled.
  *
  * Phase 2 — stale-ref recovery. When an interactive browser tool
  * (browser_click / browser_type / browser_fill) returns a
@@ -119,7 +120,8 @@ function isSuccessResult(result: unknown): boolean {
 
 /**
  * Wrap a browser ToolHandler so its execute() captures pre/post
- * BrowserStateSnapshots when AIDEN_BROWSER_DEPTH=1, embedding the
+ * BrowserStateSnapshots when browser depth is enabled (default ON;
+ * opt-out via AIDEN_BROWSER_DEPTH=0), embedding the
  * resulting ActionResult on the tool's return value as a
  * `browserState` sidecar field. Phase 2 extends this with reactive
  * stale-ref retry for interactive tools.
@@ -162,7 +164,7 @@ export function withBrowserState(
    * Optional page-text fetcher. Production code uses pwSnapshot;
    * tests inject a stub returning canned text for the blocker
    * detection tier. The fetcher is called ONCE per action when
-   * AIDEN_BROWSER_DEPTH=1 — disabled path skips entirely.
+   * browser depth is enabled — disabled path skips entirely.
    */
   pageTextFetcher: PageTextFetcher = defaultPageTextFetcher,
 ): ToolHandler {

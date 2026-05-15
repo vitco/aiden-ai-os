@@ -85,8 +85,9 @@ export interface RecoveryReport {
   guidance: string;
   /**
    * v4.3 Phase 5 — browser-specific context populated when the
-   * BrowserState observer has tab data (i.e. AIDEN_BROWSER_DEPTH=1
-   * AND at least one browser tool fired this turn). Absent otherwise.
+   * BrowserState observer has tab data (i.e. state-aware browser
+   * depth is enabled — default ON — AND at least one browser tool
+   * fired this turn). Absent otherwise.
    *
    * Surfaced into the recovery card as a muted "Browser:" line right
    * below the whatHappened summary so the user sees what the browser
@@ -208,7 +209,7 @@ export interface BuildRecoveryReportInput {
    * enrichment. When provided AND it reports any tabs, the report
    * gets a `browserContext` field populated with active tab info +
    * blocker + other-tab count. Absent when not passed, or when the
-   * observer has no tabs (AIDEN_BROWSER_DEPTH=0).
+   * observer has no tabs (opt-out via AIDEN_BROWSER_DEPTH=0).
    */
   browserState?: BrowserStateLike;
 }
@@ -298,7 +299,8 @@ export function buildRecoveryReport(
 /**
  * v4.3 Phase 5 — build the `browserContext` sidecar from an optional
  * BrowserStateLike + diagnostic snapshot. Returns null when no tabs
- * exist (AIDEN_BROWSER_DEPTH=0 or no browser action this turn) so
+ * exist (opt-out via AIDEN_BROWSER_DEPTH=0 or no browser action
+ * this turn) so
  * the caller can decide whether to include the field.
  *
  * Stale-ref retry count derives from classifications with category
