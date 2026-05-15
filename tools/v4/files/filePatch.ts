@@ -42,6 +42,7 @@ export const filePatchTool: ToolHandler = {
   category: 'write',
   mutates: true,
   toolset: 'files',
+  riskTier: 'caution',   // v4.4 Phase 1
   async execute(args, ctx) {
     const raw = String(args.path ?? args.file ?? '').trim();
     if (!raw) return { success: false, error: 'No path provided' };

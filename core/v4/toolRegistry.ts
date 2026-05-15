@@ -107,6 +107,23 @@ export interface ToolHandler {
   mutates: boolean;
   /** Group label — `web`, `files`, `browser`, `sessions`, `skills`, etc. */
   toolset?: string;
+  /**
+   * v4.4 Phase 1 — per-tool risk tier. Optional for backward compat.
+   * Tools without an explicit annotation default via
+   * `inferDefaultRiskTier(mutates)` from `core/v4/sandboxConfig.ts`:
+   * `mutates: true → 'caution'`, `mutates: false → 'safe'`.
+   *
+   * Phase 5 ApprovalEngine integration treats this as a FLOOR —
+   * DANGEROUS_PATTERNS can escalate (e.g. shell_exec annotated
+   * `dangerous` matches `rm -rf` → still `dangerous`; shell_exec
+   * annotated `caution` matches `rm -rf` → escalates to `dangerous`)
+   * but never demote below the annotation.
+   *
+   *   - `safe`      — read-only, no side effects, low information disclosure
+   *   - `caution`   — mutates filesystem in user-scoped paths or minor state
+   *   - `dangerous` — arbitrary shell, irreversible state, self-modification
+   */
+  riskTier?: import('./sandboxConfig').RiskTier;
 }
 
 export class ToolRegistry {

@@ -40,6 +40,7 @@ export const skillViewTool: ToolHandler = {
   category: 'read',
   mutates: false,
   toolset: 'skills',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute(args, ctx) {
     if (!ctx.skillLoader) {
       return { success: false, error: 'No skill loader configured' };

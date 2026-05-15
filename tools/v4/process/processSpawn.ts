@@ -33,6 +33,7 @@ export const processSpawnTool: ToolHandler = {
   category: 'execute',
   mutates: true,
   toolset: 'process',
+  riskTier: 'dangerous',   // v4.4 Phase 1
   async execute(args, ctx) {
     if (!ctx.processes) {
       return { success: false, error: 'process registry not configured' };

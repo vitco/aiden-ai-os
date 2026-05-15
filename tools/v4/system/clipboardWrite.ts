@@ -65,6 +65,7 @@ export const clipboardWriteTool: ToolHandler = {
   category: 'execute',
   mutates: true,
   toolset: 'system',
+  riskTier: 'caution',   // v4.4 Phase 1
   async execute(args, _ctx) {
     if (!isWindows()) return windowsOnlyError('clipboard_write');
     const text = typeof args.text === 'string' ? args.text : '';

@@ -38,6 +38,7 @@ export const memoryAddTool: ToolHandler = {
   category: 'write',
   mutates: true,
   toolset: 'memory',
+  riskTier: 'caution',   // v4.4 Phase 1
   async execute(args, ctx) {
     if (!ctx.memoryGuard) {
       return { success: false, error: 'memory guard not configured' };

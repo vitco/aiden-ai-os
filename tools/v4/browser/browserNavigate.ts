@@ -37,6 +37,7 @@ const _browserNavigateTool: ToolHandler = {
   category: 'browser',
   mutates: true,
   toolset: 'browser',
+  riskTier: 'caution',   // v4.4 Phase 1
   async execute(args) {
     const url = String(args.url ?? '').trim();
     if (!url) return { success: false, error: 'No URL provided' };

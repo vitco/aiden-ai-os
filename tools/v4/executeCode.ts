@@ -74,6 +74,7 @@ export const executeCodeTool: ToolHandler = {
   category: 'execute',
   mutates: false,
   toolset: 'execute',
+  riskTier: 'caution',   // v4.4 Phase 1
   async execute(args) {
     const code = String(args.code ?? '');
     if (!code.trim()) {

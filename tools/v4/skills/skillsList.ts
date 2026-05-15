@@ -32,6 +32,7 @@ export const skillsListTool: ToolHandler = {
   category: 'read',
   mutates: false,
   toolset: 'skills',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute(_args, ctx) {
     if (!ctx.skillLoader) {
       return {

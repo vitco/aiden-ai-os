@@ -43,6 +43,7 @@ export const sessionListTool: ToolHandler = {
   category: 'read',
   mutates: false,
   toolset: 'sessions',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute(args, ctx) {
     if (!ctx.sessions) {
       return {

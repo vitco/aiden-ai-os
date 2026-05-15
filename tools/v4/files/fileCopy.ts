@@ -36,6 +36,7 @@ export const fileCopyTool: ToolHandler = {
   category: 'write',
   mutates: true,
   toolset: 'files',
+  riskTier: 'caution',   // v4.4 Phase 1
   async execute(args, ctx) {
     const fromRaw = String(args.from ?? args.source ?? '').trim();
     const toRaw = String(args.to ?? args.dest ?? args.destination ?? '').trim();

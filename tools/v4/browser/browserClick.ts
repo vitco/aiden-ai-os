@@ -37,6 +37,7 @@ const _browserClickTool: ToolHandler = {
   category: 'browser',
   mutates: true,
   toolset: 'browser',
+  riskTier: 'caution',   // v4.4 Phase 1
   async execute(args) {
     const target = String(args.target ?? args.selector ?? '').trim();
     if (!target) return { success: false, error: 'No target provided' };

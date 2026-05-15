@@ -32,6 +32,7 @@ const _browserExtractTool: ToolHandler = {
   category: 'browser',
   mutates: false,
   toolset: 'browser',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute() {
     const r = await pwSnapshot();
     if (r.ok) return { success: true, text: r.text ?? '' };

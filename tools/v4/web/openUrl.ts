@@ -79,6 +79,7 @@ export const openUrlTool: ToolHandler = {
   category: 'network',
   mutates: false,
   toolset: 'web',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute(args) {
     const url = String(args.url ?? '').trim();
     if (!isLaunchableUrl(url)) {

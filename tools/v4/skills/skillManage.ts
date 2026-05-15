@@ -79,6 +79,7 @@ export const skillManageTool: ToolHandler = {
   category: 'write',
   mutates: true,
   toolset: 'skills',
+  riskTier: 'caution',   // v4.4 Phase 1
   async execute(args, ctx) {
     if (!ctx.skillLoader || !ctx.paths) {
       return { success: false, error: 'No skill loader configured' };

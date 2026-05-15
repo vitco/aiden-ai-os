@@ -63,6 +63,7 @@ export const screenshotTool: ToolHandler = {
   category: 'read',
   mutates: false,
   toolset: 'system',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute(_args, ctx) {
     if (!isWindows()) return windowsOnlyError('screenshot');
     if (!ctx.paths) {

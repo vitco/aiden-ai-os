@@ -30,6 +30,7 @@ const _browserGetUrlTool: ToolHandler = {
   category: 'browser',
   mutates: false,
   toolset: 'browser',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute() {
     const r = await pwGetUrl();
     if (r.ok) return { success: true, url: r.url ?? '' };

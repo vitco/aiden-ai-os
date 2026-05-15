@@ -71,6 +71,7 @@ export const fileReadTool: ToolHandler = {
   category: 'read',
   mutates: false,
   toolset: 'files',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute(args, ctx) {
     const raw = String(args.path ?? args.file ?? '').trim();
     if (!raw) return { success: false, error: 'No path provided' };

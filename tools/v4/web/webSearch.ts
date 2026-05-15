@@ -36,6 +36,7 @@ export const webSearchTool: ToolHandler = {
   category: 'network',
   mutates: false,
   toolset: 'web',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute(args) {
     const query = String(args.query ?? '').trim();
     if (!query) {

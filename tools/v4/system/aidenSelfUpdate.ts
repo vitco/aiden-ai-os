@@ -70,6 +70,7 @@ export const aidenSelfUpdateTool: ToolHandler = {
   category: 'write',
   mutates: true,
   toolset: 'system',
+  riskTier: 'dangerous',   // v4.4 Phase 1
   async execute(args, ctx) {
     if (!ctx.paths) {
       return {

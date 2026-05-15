@@ -36,6 +36,7 @@ const _browserTypeTool: ToolHandler = {
   category: 'browser',
   mutates: true,
   toolset: 'browser',
+  riskTier: 'caution',   // v4.4 Phase 1
   async execute(args) {
     const selector = String(args.selector ?? 'input').trim();
     const text = String(args.text ?? '');

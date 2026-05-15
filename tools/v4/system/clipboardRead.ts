@@ -33,6 +33,7 @@ export const clipboardReadTool: ToolHandler = {
   category: 'read',
   mutates: false,
   toolset: 'system',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute(_args, _ctx) {
     if (!isWindows()) return windowsOnlyError('clipboard_read');
     try {

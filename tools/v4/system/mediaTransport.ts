@@ -147,6 +147,7 @@ export const mediaTransportTool: ToolHandler = {
   category: 'execute',
   mutates: true,
   toolset: 'system',
+  riskTier: 'caution',   // v4.4 Phase 1
   async execute(args, _ctx) {
     if (!isWindows()) {
       // v4.1.3-essentials: tailored capability card for non-Windows.

@@ -42,6 +42,7 @@ export const naturalEventsTool: ToolHandler = {
   category: 'network',
   mutates: false,
   toolset: 'system',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute(args) {
     const limit =
       typeof args.limit === 'number' && args.limit > 0

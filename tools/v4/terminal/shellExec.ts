@@ -44,6 +44,7 @@ export const shellExecTool: ToolHandler = {
   category: 'execute',
   mutates: true,
   toolset: 'terminal',
+  riskTier: 'dangerous',   // v4.4 Phase 1 — arbitrary shell command
   async execute(args, ctx) {
     const command = String(args.command ?? args.cmd ?? '').trim();
     if (!command) return { success: false, error: 'No command provided' };

@@ -27,6 +27,7 @@ const _browserCloseTool: ToolHandler = {
   category: 'browser',
   mutates: true,
   toolset: 'browser',
+  riskTier: 'caution',   // v4.4 Phase 1
   async execute() {
     try {
       await pwClose();

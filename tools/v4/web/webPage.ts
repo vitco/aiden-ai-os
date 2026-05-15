@@ -41,6 +41,7 @@ export const webPageTool: ToolHandler = {
   category: 'network',
   mutates: false,
   toolset: 'web',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute(args) {
     const url = String(args.url ?? '').trim();
     if (!url) return { success: false, error: 'No URL provided' };

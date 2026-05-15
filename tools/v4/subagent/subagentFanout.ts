@@ -168,6 +168,7 @@ export function makeSubagentFanoutTool(
     category: 'network',
     mutates: false,
     toolset: 'subagent',
+  riskTier: 'caution',   // v4.4 Phase 1
     async execute(args, _ctx) {
       const logger = factory.logger ?? noopLogger();
 

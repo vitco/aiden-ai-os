@@ -45,6 +45,7 @@ const _browserScrollTool: ToolHandler = {
   category: 'browser',
   mutates: true,
   toolset: 'browser',
+  riskTier: 'caution',   // v4.4 Phase 1
   async execute(args) {
     const directionRaw = String(args.direction ?? 'down').toLowerCase();
     const direction = (

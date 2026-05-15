@@ -46,6 +46,7 @@ export function makeLookupToolSchema(registry: ToolRegistry): ToolHandler {
     category: 'read',
     mutates: false,
     toolset: 'skills',
+  riskTier: 'safe',   // v4.4 Phase 1
     async execute(args) {
       const name = String(args.toolName ?? args.name ?? '').trim();
       if (!name) return { success: false, error: 'No toolName provided' };
@@ -63,6 +64,7 @@ export function makeLookupToolSchema(registry: ToolRegistry): ToolHandler {
         category: handler.category,
         mutates: handler.mutates,
         toolset: handler.toolset,
+  riskTier: 'safe',   // v4.4 Phase 1
       };
     },
   };

@@ -50,6 +50,7 @@ export const fileListTool: ToolHandler = {
   category: 'read',
   mutates: false,
   toolset: 'files',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute(args, ctx) {
     const raw = String(args.path ?? args.dir ?? ctx.cwd).trim();
     const resolved = expandPath(raw || ctx.cwd, ctx.cwd);

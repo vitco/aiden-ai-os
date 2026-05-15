@@ -33,6 +33,7 @@ export const nowPlayingTool: ToolHandler = {
   category: 'read',
   mutates: false,
   toolset: 'system',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute() {
     try {
       const result = await getNowPlaying();

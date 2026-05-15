@@ -67,6 +67,7 @@ export const osProcessListTool: ToolHandler = {
   category: 'read',
   mutates: false,
   toolset: 'system',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute(args, _ctx) {
     if (!isWindows()) return windowsOnlyError('os_process_list');
     const nameArg = typeof args.name === 'string' ? args.name : undefined;

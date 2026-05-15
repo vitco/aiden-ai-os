@@ -22,6 +22,7 @@ export const processListTool: ToolHandler = {
   category: 'read',
   mutates: false,
   toolset: 'process',
+  riskTier: 'safe',   // v4.4 Phase 1
   async execute(_args, ctx) {
     if (!ctx.processes) {
       return { success: false, error: 'process registry not configured' };

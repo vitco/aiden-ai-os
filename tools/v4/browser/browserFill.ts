@@ -38,6 +38,7 @@ const _browserFillTool: ToolHandler = {
   category: 'browser',
   mutates: true,
   toolset: 'browser',
+  riskTier: 'caution',   // v4.4 Phase 1
   async execute(args) {
     const fields = (args.fields ?? {}) as Record<string, unknown>;
     if (!fields || typeof fields !== 'object' || Array.isArray(fields)) {
