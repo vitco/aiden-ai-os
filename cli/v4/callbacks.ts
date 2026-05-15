@@ -41,6 +41,17 @@ export interface CliCallbacksOptions {
   verboseMode?: VerboseMode;
   /** Injectable inquirer module for tests. */
   promptModule?: PromptApi;
+  /**
+   * v4.1.6 Polish 2 — optional SkillTeacher reference so the
+   * `handleSkillProposal` callback can finalize an accepted
+   * proposal (build markdown + persist via skillManager). When
+   * absent, `handleSkillProposal` returns `{created: false}` —
+   * the proposal is announced via dim notice only, no save path.
+   *
+   * AidenCLI wires this; test harnesses that don't construct a
+   * real SkillTeacher can omit it.
+   */
+  skillTeacher?: import('../../moat/skillTeacher').SkillTeacher;
 }
 
 export interface PromptApi {
@@ -131,6 +142,13 @@ export class CliCallbacks {
   private toolTraceBeforeHook?: (id: string, name: string) => void;
   private toolTraceAfterHook?:  (id: string, name: string, args: unknown) => void;
 
+  // v4.1.6 Polish 2 — optional SkillTeacher reference for the
+  // post-render `handleSkillProposal` flow (see method below).
+  // NOT readonly: aidenCLI sets it post-construction via
+  // `setSkillTeacher(...)` because the teacher is built AFTER the
+  // CliCallbacks instance during boot.
+  private skillTeacher?: import('../../moat/skillTeacher').SkillTeacher;
+
   constructor(opts: CliCallbacksOptions) {
     this.display = opts.display;
     this.auxiliaryClient = opts.auxiliaryClient;
@@ -138,6 +156,19 @@ export class CliCallbacks {
     this.promptsPromise = opts.promptModule
       ? Promise.resolve(opts.promptModule)
       : defaultPrompts();
+    this.skillTeacher = opts.skillTeacher;
+  }
+
+  /**
+   * v4.1.6 Polish 2 — late-wire the SkillTeacher reference. aidenCLI
+   * constructs CliCallbacks early (the approval engine needs it
+   * stitched in), but SkillTeacher is built later in the boot
+   * sequence after skillLoader / skillManager are ready. Call this
+   * once after both exist so `handleSkillProposal` can persist
+   * accepted proposals.
+   */
+  setSkillTeacher(teacher: import('../../moat/skillTeacher').SkillTeacher): void {
+    this.skillTeacher = teacher;
   }
 
   /** Update verbose mode at runtime (wired to /verbose). */
@@ -495,6 +526,67 @@ Reply with ONE word: safe, caution, or dangerous.`;
     // the full sorted set of dirty files (SOUL.md joined the rotation).
     const label = files.length > 0 ? files.join(', ') : 'none';
     this.display.dim(`[memory] refreshed system prompt (${label})`);
+  };
+
+  /**
+   * v4.1.6 Polish 2 — post-turn skill-proposal handler.
+   *
+   * chatSession calls this AFTER `agentTurn` has rendered the agent's
+   * reply on screen. Internally:
+   *   1. Reuses `promptSkillProposal` (the existing inquirer modal)
+   *      to ask the user "Save this as a reusable skill? Yes/No".
+   *   2. If accepted AND a SkillTeacher reference is wired, calls
+   *      `skillTeacher.handleProposal({...skipPrompt})` to build
+   *      the markdown + persist via skillManager.
+   *   3. Returns the result so chatSession can surface a confirmation
+   *      line if needed.
+   *
+   * Decoupled from the agent's `runConversation` so the inquirer no
+   * longer fires mid-turn (the v4.1.5 visual-smoke regression).
+   *
+   * Defensive — exceptions in any step return `{created: false,
+   * reason: 'error'}` so a misbehaving prompt or save can't break
+   * the chat loop. The inquirer modal itself catches input-stream
+   * exceptions via the existing try/catch in promptSkillProposal.
+   */
+  handleSkillProposal = async (
+    proposal: SkillProposal,
+  ): Promise<{ created: boolean; skillName?: string; reason?: string }> => {
+    // Step 1: ask the user (reuses existing modal).
+    let accept: boolean;
+    try {
+      accept = await this.promptSkillProposal(proposal);
+    } catch {
+      return { created: false, reason: 'prompt_error' };
+    }
+    if (!accept) {
+      return { created: false, reason: 'declined' };
+    }
+    // Step 2: persist via SkillTeacher when available. Test harnesses
+    // that don't wire a teacher just get the prompt without the save.
+    if (!this.skillTeacher) {
+      return { created: false, reason: 'no_skill_teacher_wired' };
+    }
+    try {
+      // Pass `promptUser: undefined` to bypass the modal in
+      // `handleProposal` (we already showed it above). The teacher
+      // sees tier === 'tier_3_propose' WITHOUT a prompt callback,
+      // which it interprets as `no_prompt_callback` and skips the
+      // save — so we need to call the create branch directly.
+      //
+      // SkillTeacher's tier-4 (auto) branch creates without
+      // prompting; we reuse that path by passing a stub that always
+      // returns true (user already accepted above).
+      const result = await this.skillTeacher.handleProposal(proposal, {
+        promptUser: async () => true,
+      });
+      return result;
+    } catch (err) {
+      return {
+        created: false,
+        reason:  `create_failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
   };
 }
 

@@ -274,7 +274,25 @@ describe('AidenAgent — SkillTeacher wiring', () => {
     expect(skillManager.execute).toHaveBeenCalledOnce();
   });
 
-  it('8. skillTeacherCallbacks.promptUser fires correctly in tier_3', async () => {
+  it('8. skillTeacherCallbacks.promptUser wiring surfaces proposal to caller (v4.1.6 Polish 2)', async () => {
+    // v4.1.6 Polish 2 — architectural pull-out.
+    //
+    // BEFORE: when `promptUser` callback was wired, the agent loop
+    // synchronously called `handleProposal` (which invoked promptUser
+    // and then skillManager.execute) IN-LINE before returning. This
+    // fired the inquirer prompt mid-render, clobbering the agent reply
+    // (visual smoke regression).
+    //
+    // AFTER: the agent detects a wired promptUser, sets
+    // `result.skillProposal` to the proposal, and SKIPS the inline
+    // handleProposal call. The caller (chatSession) renders the reply
+    // first, then drives the prompt/save flow via
+    // `callbacks.handleSkillProposal`.
+    //
+    // Contract:
+    //   - promptUser is NOT called by the agent
+    //   - skillManager.execute is NOT called by the agent
+    //   - result.skillProposal IS defined (surfaced for the caller)
     const provider = new MockProviderAdapter([
       MockProviderAdapter.toolUse([
         tc('1', 'file_read', {}),
@@ -303,12 +321,16 @@ describe('AidenAgent — SkillTeacher wiring', () => {
       resolveToolset: (n) =>
         REGISTRY_HANDLERS.find((h) => h.schema.name === n)?.toolset,
     });
-    await agent.runConversation([
+    const result = await agent.runConversation([
       userMsg('research the topic and save the findings to a note'),
       userMsg('continue please'),
     ]);
-    expect(promptUser).toHaveBeenCalledOnce();
-    expect(skillManager.execute).toHaveBeenCalledOnce();
+    // promptUser stays untouched — the caller drives that flow now.
+    expect(promptUser).not.toHaveBeenCalled();
+    // skillManager.execute is deferred until the caller decides to save.
+    expect(skillManager.execute).not.toHaveBeenCalled();
+    // The proposal IS surfaced for chatSession's post-render handler.
+    expect(result.skillProposal).toBeDefined();
   });
 });
 

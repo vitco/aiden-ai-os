@@ -1396,15 +1396,58 @@ export class ChatSession implements ChatSessionLike {
         this.sessionToolTrace.push(...result.toolCallTrace);
       }
 
-      // When streaming was active and emitted the final content already,
-      // skip the markdown re-render — we'd otherwise duplicate text.
-      if (result.finalContent && !streamingActive) {
+      // v4.1.6 spike (TCE) — tool-loop terminal surface. When the
+      // agent ended the turn via the recovery controller's surface
+      // stage, render a structured-failure card instead of the
+      // (empty) reply. Same chrome as auth / platform capability
+      // cards — fits the established Aiden UX language for
+      // "the action you wanted didn't happen, here's why and what
+      // you can do." Surface BEFORE the tool→reply separator path
+      // below because there's no agent reply to introduce.
+      if (result.finishReason === 'tool_loop' && result.toolLoopCard) {
+        // Emit the muted rule so the card visually separates from
+        // the tool trail above it.
+        emitToolReplySeparator();
+        this.opts.display.capabilityCard(result.toolLoopCard);
+      } else if (result.finalContent && !streamingActive) {
+        // When streaming was active and emitted the final content
+        // already, skip the markdown re-render — we'd otherwise
+        // duplicate text.
+        //
         // v4.1.5 Issue O — non-streaming reply path. Emit the muted
         // rule between the tool trail and the agent header before
         // the one-shot reply lands. Idempotent + tool-gated by
         // `emitToolReplySeparator`.
         emitToolReplySeparator();
         this.opts.display.write(this.opts.display.agentTurn(result.finalContent));
+      }
+
+      // v4.1.6 Polish 2 — post-render skill-proposal handler.
+      // The agent loop now SKIPS the inquirer prompt when a
+      // prompt callback is wired, surfacing the SkillProposal
+      // here instead. We fire the prompt AFTER the agent reply
+      // has rendered so the user sees the answer before being
+      // asked "save this as a reusable skill?" — fixing the
+      // v4.1.5 visual-smoke regression where the prompt fired
+      // mid-turn and clobbered the reply.
+      //
+      // Wrapped in try/catch so a buggy proposal flow never
+      // breaks the chat loop. A successful save surfaces a
+      // dim confirmation line that fits the established
+      // memory-confirmation chrome.
+      if (result.skillProposal && this.opts.callbacks?.handleSkillProposal) {
+        try {
+          const saveResult = await this.opts.callbacks.handleSkillProposal(
+            result.skillProposal,
+          );
+          if (saveResult?.created && saveResult.skillName) {
+            this.opts.display.dim(
+              `  ✓ Saved as skill: ${saveResult.skillName}`,
+            );
+          }
+        } catch {
+          /* defensive — never let proposal flow break the chat loop */
+        }
       }
 
       if (this.sessionId) {

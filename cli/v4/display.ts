@@ -1146,20 +1146,23 @@ export class Display {
     };
 
     const eraseLine = (): void => {
-      // Walk up to the indicator's row(s) + erase. Cursor lands at
-      // col 0 of the (now empty) verb row. NO trailing newline here:
-      // the caller is about to write content on this row, and
-      // whatever they write will include their own `\n` to flush
-      // the buffer. If we emitted `\n` here, we'd leave a phantom
-      // blank row before the caller's content.
+      // Walk up to the indicator's row(s) + erase, then drop ONE
+      // newline so the cursor lands on a blank line BELOW the
+      // indicator's old footprint. v4.1.6 polish: previous behavior
+      // left the cursor at col 0 of the just-erased row so caller
+      // writes (agentHeader, tool row, etc.) sat tight against where
+      // the indicator had been. v4.1.5 visual smoke flagged the
+      // wave-bar→`┃ Aiden` proximity as feeling cramped. The
+      // trailing `\n` gains one visible blank row of breathing space
+      // AND adds another Windows ConPTY flush trigger (Issue M).
       //
       // v4.1.5 Issue K — with wave bar enabled, walk up 2 rows (two
       // up-1+erase sequences). Without the bar, walk up 1 row.
       if (!isTty || !printed) return;
       if (waveBarEnabled) {
-        out.write(`${ANSI_UP_ERASE}${ANSI_UP_ERASE}`);
+        out.write(`${ANSI_UP_ERASE}${ANSI_UP_ERASE}\n`);
       } else {
-        out.write(ANSI_UP_ERASE);
+        out.write(`${ANSI_UP_ERASE}\n`);
       }
     };
 

@@ -346,6 +346,47 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     expect(occurrences).toBe(2);
   });
 
+  it('v4.1.6 Polish 1: erase output ends with newline (breathing-space gutter)', () => {
+    // Prior behaviour: erase = `\x1b[1A\x1b[2K\x1b[1A\x1b[2K` (no
+    // trailing newline) → cursor parked at col 0 of the just-erased
+    // verb row → next write (agentHeader, tool row, etc.) sat tight
+    // against where the indicator had been. v4.1.5 visual smoke
+    // flagged the wave-bar → "┃ Aiden" proximity as feeling cramped.
+    //
+    // Polish 1: erase now ends with `\n`, leaving cursor on a blank
+    // row below the indicator's old footprint. One visible blank
+    // row of breathing space. Also adds another Windows ConPTY flush
+    // trigger (Issue M).
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking');
+    chunks.length = 0;
+    handle.stop();
+    const after = chunks.join('');
+    expect(after.endsWith('\n')).toBe(true);
+  });
+
+  it('v4.1.6 Polish 1: single-row (waveBar: false) erase also ends with newline', () => {
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking', { waveBar: false });
+    chunks.length = 0;
+    handle.stop();
+    const after = chunks.join('');
+    expect(after.endsWith('\n')).toBe(true);
+    // Only one walk-up-erase (single-row path).
+    const occurrences = (after.match(/\x1b\[1A\x1b\[2K/g) ?? []).length;
+    expect(occurrences).toBe(1);
+  });
+
+  it('v4.1.6 Polish 1: pause() erase also includes the breathing gutter', () => {
+    const { d, chunks } = makeDisplay({ tty: true });
+    const handle = d.activityIndicator('thinking');
+    chunks.length = 0;
+    handle.pause();
+    const after = chunks.join('');
+    expect(after.endsWith('\n')).toBe(true);
+    handle.stop();
+  });
+
   it('wave-bar setVerb mutates verb row, bar continues animating', () => {
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking');

@@ -59,6 +59,7 @@ import type {
 } from '../../moat/honestyEnforcement';
 import type {
   SkillTeacher,
+  SkillProposal,
   SkillProposalCallbacks,
 } from '../../moat/skillTeacher';
 import type { SkillMiner } from './skillMining/skillMiner';
@@ -67,6 +68,10 @@ import type { PromptBuilder, PromptBuilderOptions } from './promptBuilder';
 import type { ContextCompressor, CompressionResult } from './contextCompressor';
 import type { AuxiliaryClient } from './auxiliaryClient';
 import type { PromptCaching } from './promptCaching';
+// v4.1.6 spike — Task Completion Engine (TCE) per-turn loop detector
+// + recovery controller. Default OFF via AIDEN_TCE env var; zero
+// behavioral change when unset. See core/v4/turnState.ts.
+import { TurnState, type RecoveryDecision } from './turnState';
 import type { MemorySnapshot } from './memoryProvider';
 import {
   SkillEnforcementTracker,
@@ -217,16 +222,47 @@ export interface AidenAgentResult {
   turnCount:           number;
   toolCallCount:       number;
   fallbackActivated:   boolean;
-  finishReason:        'stop' | 'budget_exhausted' | 'error';
+  finishReason:        'stop' | 'budget_exhausted' | 'error' | 'tool_loop';
   totalUsage:          { inputTokens: number; outputTokens: number };
   toolCallTrace:       HonestyTraceEntry[];
   honestyFindings?:    HonestyFinding[];
   skillCreated?:       string;
+  /**
+   * v4.1.6 Polish 2 — when SkillTeacher's `observeTurn` returns a
+   * non-null proposal AND its tier requires user confirmation,
+   * the proposal is returned here instead of being handled inline
+   * during `runConversation`. Inline handling caused the inquirer
+   * modal ("Save this as a reusable skill?") to fire BEFORE the
+   * user saw the agent's reply on screen — visually it looked like
+   * a mid-turn interruption. chatSession now renders the reply
+   * first, then awaits the prompt + creation via
+   * `callbacks.handleSkillProposal` post-render.
+   *
+   * Undefined when:
+   *   - SkillTeacher is `tier: 'off'` (no proposal generated)
+   *   - SkillTeacher is `tier: 'tier_4_auto'` (handled inline, no prompt needed)
+   *   - observeTurn returned null (heuristics didn't fire)
+   *   - the SkillTeacher block itself threw (silently swallowed by the
+   *     existing try/catch so the turn doesn't break over a teacher fault)
+   */
+  skillProposal?:      SkillProposal;
   compressionEvents:   number;
   auxiliaryUsage:      Record<string, { inputTokens: number; outputTokens: number; calls: number }>;
   skillEnforcement:    { recovered: number; failed: number; armed: number; preArmed: number };
   urlProvenance:       { recovered: number; failed: number; blocked: number };
   emptyResponse:       { detected: number; retried: number; recovered: number };
+  /**
+   * v4.1.6 spike (TCE): populated when `finishReason === 'tool_loop'`.
+   * Carries the structured-failure payload the chat layer renders as
+   * a capability-card-style surface. Undefined on all other terminal
+   * paths.
+   */
+  toolLoopCard?: {
+    title:          string;
+    canStill:       string[];
+    cannotReliably: string[];
+    fix:            string;
+  };
 }
 
 export interface RunConversationOptions {
@@ -597,7 +633,21 @@ export class AidenAgent {
     }
 
     // 10. SkillTeacher post-loop observation + proposal.
-    let skillCreated: string | undefined;
+    //
+    // v4.1.6 Polish 2 — `handleProposal` previously ran INLINE here,
+    // awaiting `callbacks.promptUser` (an inquirer modal) before
+    // `runConversation` returned. That made the modal fire BEFORE
+    // chatSession rendered the agent's reply on screen, so users
+    // saw "Save this as a reusable skill?" pop up mid-turn — feels
+    // like an interruption.
+    //
+    // New flow: agent ONLY observes here. When a proposal needs user
+    // confirmation (tier_3_propose with a promptUser callback), the
+    // proposal is surfaced in `AidenAgentResult.skillProposal` and
+    // chatSession handles the prompt + create dance AFTER rendering
+    // the reply. Tier_4_auto still runs inline (no prompt needed).
+    let skillCreated:  string | undefined;
+    let skillProposal: SkillProposal | undefined;
     if (this.skillTeacher) {
       try {
         const traceForTeacher = loopResult.toolCallTrace.map((entry, i) => ({
@@ -613,12 +663,23 @@ export class AidenAgent {
           loopResult.finishReason !== 'stop',
         );
         if (proposal) {
-          const result = await this.skillTeacher.handleProposal(
-            proposal,
-            this.skillTeacherCallbacks,
-          );
-          if (result.created && result.skillName) {
-            skillCreated = result.skillName;
+          // Defer to chatSession only when there's a prompt callback
+          // wired (tier_3_propose path). Otherwise run inline to
+          // preserve tier_4_auto and tier_off behaviour.
+          const hasPromptCallback =
+            typeof this.skillTeacherCallbacks?.promptUser === 'function';
+          if (hasPromptCallback) {
+            // Surface the proposal back to chatSession; do NOT call
+            // handleProposal here.
+            skillProposal = proposal;
+          } else {
+            const result = await this.skillTeacher.handleProposal(
+              proposal,
+              this.skillTeacherCallbacks,
+            );
+            if (result.created && result.skillName) {
+              skillCreated = result.skillName;
+            }
           }
         }
       } catch {
@@ -670,11 +731,20 @@ export class AidenAgent {
       toolCallTrace:      loopResult.toolCallTrace,
       honestyFindings,
       skillCreated,
+      // v4.1.6 Polish 2 — deferred to chatSession's post-render
+      // handler when the SkillTeacher proposal needs user
+      // confirmation. Undefined when no proposal, when tier auto-
+      // handled inline, or when the teacher's observation faulted.
+      skillProposal,
       compressionEvents:  this.compressionEvents,
       auxiliaryUsage:     this.auxiliaryClient?.getUsage() ?? {},
       skillEnforcement:   { ...this.skillEnforcementMetrics },
       urlProvenance:      { ...this.urlProvenanceMetrics },
       emptyResponse:      { ...this.emptyResponseMetrics },
+      // v4.1.6 spike (TCE) — surfaced when TurnState hit the surface
+      // threshold mid-turn. chatSession reads this to render the
+      // structured-failure card; undefined on all other finishReasons.
+      toolLoopCard:       loopResult.toolLoopCard,
     };
   }
 
@@ -773,10 +843,12 @@ export class AidenAgent {
     turnCount:          number;
     toolCallCount:      number;
     fallbackActivated:  boolean;
-    finishReason:       'stop' | 'budget_exhausted' | 'error';
+    finishReason:       'stop' | 'budget_exhausted' | 'error' | 'tool_loop';
     totalUsage:         { inputTokens: number; outputTokens: number };
     toolCallTrace:      HonestyTraceEntry[];
     fullTrace:          Array<{ name: string; args: Record<string, unknown> }>;
+    /** v4.1.6 spike (TCE) — populated when finishReason === 'tool_loop'. */
+    toolLoopCard?:      AidenAgentResult['toolLoopCard'];
   }> {
     const messages: Message[]              = [...initialMessages];
     const toolCallTrace: HonestyTraceEntry[] = [];
@@ -791,10 +863,20 @@ export class AidenAgent {
     let   cautionFired      = false;
     let   warningFired      = false;
     let   emptyRetriesUsed  = 0;
-    let   finishReason: 'stop' | 'budget_exhausted' | 'error' = 'stop';
+    let   finishReason: 'stop' | 'budget_exhausted' | 'error' | 'tool_loop' = 'stop';
     let   finalContent      = '';
+    // v4.1.6 spike (TCE) — per-turn loop detection + recovery state.
+    // Default OFF via AIDEN_TCE env var; zero behavioural change when
+    // unset (TurnState.recordToolCall short-circuits with `allow`).
+    const turnState = new TurnState();
+    let toolLoopCard: AidenAgentResult['toolLoopCard'] = undefined;
 
     while (true) {
+      // v4.1.6 spike — decrement cooldown counters once per iteration
+      // so cooled-down tools eventually return to the schemas. No-op
+      // when TCE is disabled.
+      turnState.advanceIteration();
+
       if (turnCount >= this.maxTurns) {
         finishReason = 'budget_exhausted';
         break;
@@ -814,9 +896,23 @@ export class AidenAgent {
       }
 
       // ── Provider call (stream or non-stream) ──────────────────────────
+      //
+      // v4.1.6 spike (TCE) — filter cooled-down tools out of the
+      // schemas we send to the provider. The model literally cannot
+      // see (and therefore cannot request) a cooled-down tool until
+      // its cooldown counter decrements to zero via
+      // `turnState.advanceIteration()`. No-op when TCE disabled
+      // (`getCooledDownTools()` returns []).
+      let effectiveTools: ToolSchema[] = tools;
+      const cooledDown = turnState.getCooledDownTools();
+      if (cooledDown.length > 0) {
+        const cdSet = new Set(cooledDown);
+        effectiveTools = tools.filter((t) => !cdSet.has(t.name));
+      }
+
       let output: ProviderCallOutput;
       try {
-        output = await this.callProvider(messages, tools, runOptions);
+        output = await this.callProvider(messages, effectiveTools, runOptions);
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         if (this.fallback && !fallbackActivated) {
@@ -914,6 +1010,10 @@ export class AidenAgent {
 
       // ── Dispatch tools sequentially ──────────────────────────────────
       const turnToolMessages: Message[] = [];
+      // v4.1.6 spike (TCE) — set when TurnState surfaces a tool_loop
+      // mid-batch. The agent stops dispatching remaining calls in the
+      // batch and breaks out of the outer iteration loop cleanly.
+      let surfaceDecision: RecoveryDecision | null = null;
       for (const call of output.toolCalls) {
         this.onToolCall?.(call, 'before');
         let result: ToolCallResult;
@@ -951,6 +1051,48 @@ export class AidenAgent {
             ? `[error] ${result.error}`
             : stringifyToolResult(result.result),
         });
+        // v4.1.6 spike (TCE) — after the tool result lands in the
+        // message history, consult the recovery controller. Returns
+        // `allow` immediately when TCE disabled (zero overhead).
+        const recovery = turnState.recordToolCall(call.name, call.arguments);
+        if (recovery.kind === 'hint' && recovery.hintMessage) {
+          // Stage 1: append a corrective system message so the model
+          // sees it on the next provider call. Same pattern as the
+          // existing skill-enforcement + URL-provenance correctives.
+          turnToolMessages.push({
+            role:    'system',
+            content: recovery.hintMessage,
+          });
+        } else if (recovery.kind === 'cooldown' && recovery.cooldownMessage) {
+          // Stage 2: cooldown has already been recorded internally
+          // (next iteration's schema-filter step excludes this tool).
+          // Inject a system message announcing the cooldown so the
+          // model knows why the tool just disappeared from its menu.
+          turnToolMessages.push({
+            role:    'system',
+            content: recovery.cooldownMessage,
+          });
+        } else if (recovery.kind === 'surface' && recovery.surfaceCard) {
+          // Stage 3: structured failure. Stop dispatching the rest of
+          // the batch — anything else is throwing good budget after
+          // bad. The outer loop reads `surfaceDecision` below and
+          // exits cleanly.
+          surfaceDecision = recovery;
+          break;
+        }
+      }
+
+      // v4.1.6 spike (TCE) — terminal surface handling.
+      if (surfaceDecision && surfaceDecision.kind === 'surface') {
+        finishReason = 'tool_loop';
+        toolLoopCard = surfaceDecision.surfaceCard;
+        // Push the partial tool messages we collected so honesty +
+        // history downstream see the full sequence including the
+        // loop-trigger call. No final assistant message — the
+        // tool_loop card IS the user-facing surface.
+        messages.push(...turnToolMessages);
+        finalContent = '';
+        break;
       }
 
       // ── Iteration-budget injection on the LAST tool message ──────────
@@ -976,6 +1118,7 @@ export class AidenAgent {
       totalUsage,
       toolCallTrace,
       fullTrace,
+      toolLoopCard,
     };
   }
 

@@ -1056,6 +1056,11 @@ export async function buildAgentRuntime(
     (name) => toolRegistry.get(name),
     skillTeacherHealth,
   );
+  // v4.1.6 Polish 2 — late-wire the SkillTeacher reference so the
+  // post-render `handleSkillProposal` flow can persist accepted
+  // proposals. CliCallbacks was constructed earlier (line ~906) —
+  // before SkillTeacher existed — so we set it now.
+  callbacks.setSkillTeacher(skillTeacher);
 
   // ── Tool executor with full Phase 9 + 10 context ─────────────────────
   const toolExecutor = toolRegistry.buildExecutor({

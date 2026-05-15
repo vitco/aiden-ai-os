@@ -1,0 +1,298 @@
+/**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
+ * tests/v4/core/turnState.test.ts — v4.1.6 spike (TCE).
+ *
+ * Coverage for the per-turn loop-detection + recovery controller:
+ *   - Disabled by default (env var unset): all decisions = 'allow',
+ *     zero side effects
+ *   - Layered streak counters: signature vs name
+ *   - Stage 1 HINT: signature-streak threshold (precise — only on
+ *     genuine identical-call loops)
+ *   - Stage 2 COOLDOWN: name-streak threshold (broader — catches
+ *     "fishing through skills" with different args)
+ *   - Stage 3 SURFACE: name-streak threshold (strictest, terminal)
+ *   - Stage transitions are monotonic (no regression)
+ *   - Cooldown decrements via advanceIteration()
+ *   - getDiagnosticSnapshot() exposes full internal state for tests
+ *     and future debug surfacing
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { TurnState } from '../../../core/v4/turnState';
+
+describe('TurnState (v4.1.6 spike)', () => {
+  beforeEach(() => {
+    delete process.env.AIDEN_TCE;
+  });
+
+  afterEach(() => {
+    delete process.env.AIDEN_TCE;
+  });
+
+  it('disabled by default: all calls return allow, no side effects', () => {
+    const ts = new TurnState();
+    expect(ts.isEnabled()).toBe(false);
+    for (let i = 0; i < 30; i += 1) {
+      const d = ts.recordToolCall('skill_view', { name: 'demo' });
+      expect(d.kind).toBe('allow');
+    }
+    expect(ts.getCooledDownTools()).toEqual([]);
+    const snap = ts.getDiagnosticSnapshot();
+    expect(snap.enabled).toBe(false);
+    expect(snap.stage).toBe('none');
+    expect(snap.recoveryEvents).toHaveLength(0);
+  });
+
+  it('enabled via env var: hint stage fires at signature-streak 5', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    expect(ts.isEnabled()).toBe(true);
+    const args = { name: 'nse-scanner' };
+    // Calls 1-4: allow.
+    for (let i = 0; i < 4; i += 1) {
+      expect(ts.recordToolCall('skill_view', args).kind).toBe('allow');
+    }
+    // Call 5: hint triggers (signature-streak === 5).
+    const d5 = ts.recordToolCall('skill_view', args);
+    expect(d5.kind).toBe('hint');
+    expect(d5.toolName).toBe('skill_view');
+    expect(d5.consecutive).toBe(5);
+    expect(d5.hintMessage).toMatch(/skill_view/);
+    expect(d5.hintMessage).toMatch(/5 times/);
+  });
+
+  it('hint does NOT fire when same TOOL but DIFFERENT args (legitimate exploration)', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    // 5 different skill_view calls — signature changes each time.
+    const decisions = [
+      ts.recordToolCall('skill_view', { name: 'nse-scanner' }),
+      ts.recordToolCall('skill_view', { name: 'nse-options' }),
+      ts.recordToolCall('skill_view', { name: 'zerodha-kite' }),
+      ts.recordToolCall('skill_view', { name: 'upstox' }),
+      ts.recordToolCall('skill_view', { name: 'archon-bridge' }),
+    ];
+    // None of these are hints — the signature-streak resets each time.
+    for (const d of decisions) {
+      expect(d.kind).toBe('allow');
+    }
+    // But the name-streak is still 5 (same tool).
+    const snap = ts.getDiagnosticSnapshot();
+    expect(snap.consecName).toEqual({ name: 'skill_view', count: 5 });
+    expect(snap.consecSignature.count).toBe(1); // last call, fresh signature
+  });
+
+  it('cooldown stage fires at name-streak 8 (different args, same tool)', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    // 7 different-arg calls — none trigger hint (signature varies).
+    for (let i = 0; i < 7; i += 1) {
+      const d = ts.recordToolCall('skill_view', { name: `skill_${i}` });
+      expect(d.kind).toBe('allow');
+    }
+    // 8th call → cooldown (name-streak crossed 8 threshold).
+    const d8 = ts.recordToolCall('skill_view', { name: 'skill_7' });
+    expect(d8.kind).toBe('cooldown');
+    expect(d8.toolName).toBe('skill_view');
+    expect(d8.consecutive).toBe(8);
+    expect(d8.cooldownMessage).toMatch(/skill_view/);
+    expect(d8.cooldownMessage).toMatch(/disabled/);
+    // Tool is in cooldown list.
+    expect(ts.getCooledDownTools()).toEqual(['skill_view']);
+  });
+
+  it('surface stage fires at name-streak 11', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    // 10 different-arg same-tool calls — should hit cooldown at 8.
+    for (let i = 0; i < 10; i += 1) {
+      ts.recordToolCall('skill_view', { name: `s${i}` });
+    }
+    // 11th → surface.
+    const d11 = ts.recordToolCall('skill_view', { name: 's10' });
+    expect(d11.kind).toBe('surface');
+    expect(d11.toolName).toBe('skill_view');
+    expect(d11.consecutive).toBe(11);
+    expect(d11.surfaceCard).toBeDefined();
+    expect(d11.surfaceCard!.title).toMatch(/Stuck on repeated tool calls/i);
+    expect(d11.surfaceCard!.cannotReliably[0]).toMatch(/skill_view/);
+    expect(d11.surfaceCard!.cannotReliably[0]).toMatch(/11/);
+    expect(d11.surfaceCard!.fix).toBeTruthy();
+  });
+
+  it('stages are monotonic: surface absorbs further calls without re-firing', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    for (let i = 0; i < 11; i += 1) {
+      ts.recordToolCall('skill_view', { name: `s${i}` });
+    }
+    // We're now in surfaced stage. Further calls return allow
+    // (or at least don't re-emit surface decisions).
+    const d12 = ts.recordToolCall('skill_view', { name: 's11' });
+    expect(d12.kind).not.toBe('hint');
+    expect(d12.kind).not.toBe('cooldown');
+    // Stays surfaced.
+    expect(ts.getDiagnosticSnapshot().stage).toBe('surfaced');
+  });
+
+  it('different tool resets BOTH name and signature streaks', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    // Build up a 4-call name-streak.
+    for (let i = 0; i < 4; i += 1) {
+      ts.recordToolCall('skill_view', { name: `s${i}` });
+    }
+    // Different tool resets everything.
+    ts.recordToolCall('web_search', { query: 'foo' });
+    const snap = ts.getDiagnosticSnapshot();
+    expect(snap.consecName).toEqual({ name: 'web_search', count: 1 });
+    expect(snap.consecSignature.count).toBe(1);
+  });
+
+  it('successfulTools captures distinct tools that ran before surface', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    ts.recordToolCall('web_search',   { q: 'foo' });
+    ts.recordToolCall('fetch_page',   { url: 'http://x' });
+    ts.recordToolCall('execute_code', { code: '1+1' });
+    // Then a skill_view loop.
+    for (let i = 0; i < 11; i += 1) {
+      ts.recordToolCall('skill_view', { name: `s${i}` });
+    }
+    const snap = ts.getDiagnosticSnapshot();
+    // All three pre-loop tools captured.
+    expect(snap.successfulTools).toContain('web_search');
+    expect(snap.successfulTools).toContain('fetch_page');
+    expect(snap.successfulTools).toContain('execute_code');
+  });
+
+  it('surfaceCard.canStill lists earlier successful tools', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    ts.recordToolCall('web_search',   { q: 'foo' });
+    ts.recordToolCall('execute_code', { code: '1+1' });
+    for (let i = 0; i < 10; i += 1) {
+      ts.recordToolCall('skill_view', { name: `s${i}` });
+    }
+    const surface = ts.recordToolCall('skill_view', { name: 's10' });
+    expect(surface.kind).toBe('surface');
+    // canStill should mention web_search + execute_code, NOT skill_view.
+    const text = surface.surfaceCard!.canStill.join('\n');
+    expect(text).toMatch(/web_search/);
+    expect(text).toMatch(/execute_code/);
+    expect(text).not.toMatch(/`skill_view`/);
+  });
+
+  it('cooldown decrements via advanceIteration; tool returns to schemas after N', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState({ cooldownIterations: 3 });
+    for (let i = 0; i < 8; i += 1) {
+      ts.recordToolCall('skill_view', { name: `s${i}` });
+    }
+    expect(ts.getCooledDownTools()).toEqual(['skill_view']);
+    // 3 iterations to expire.
+    ts.advanceIteration();
+    expect(ts.getCooledDownTools()).toEqual(['skill_view']);
+    ts.advanceIteration();
+    expect(ts.getCooledDownTools()).toEqual(['skill_view']);
+    ts.advanceIteration();
+    expect(ts.getCooledDownTools()).toEqual([]);
+  });
+
+  it('configurable thresholds', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState({
+      hintConsecThreshold:     2,
+      cooldownConsecThreshold: 3,
+      surfaceConsecThreshold:  4,
+    });
+    expect(ts.recordToolCall('x', { a: 1 }).kind).toBe('allow');
+    expect(ts.recordToolCall('x', { a: 1 }).kind).toBe('hint');
+    expect(ts.recordToolCall('x', { a: 1 }).kind).toBe('cooldown');
+    expect(ts.recordToolCall('x', { a: 1 }).kind).toBe('surface');
+  });
+
+  it('canonical args hash: key-order independent', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    // Same logical args, different key orders → same signature.
+    ts.recordToolCall('t', { a: 1, b: 2 });
+    ts.recordToolCall('t', { b: 2, a: 1 });
+    const snap = ts.getDiagnosticSnapshot();
+    expect(snap.consecSignature.count).toBe(2);
+  });
+
+  it('explicit enabled:false overrides env var', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState({ enabled: false });
+    expect(ts.isEnabled()).toBe(false);
+    for (let i = 0; i < 20; i += 1) {
+      expect(ts.recordToolCall('x', {}).kind).toBe('allow');
+    }
+  });
+
+  it('recovery events appended in order (hint → cooldown → surface)', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    const sameArgs = { x: 1 };
+    // 5 identical → hint event.
+    for (let i = 0; i < 5; i += 1) ts.recordToolCall('t', sameArgs);
+    // Continue with diff args to 8 → cooldown event.
+    for (let i = 0; i < 3; i += 1) ts.recordToolCall('t', { x: i + 2 });
+    // Continue to 11 → surface event.
+    for (let i = 0; i < 3; i += 1) ts.recordToolCall('t', { x: i + 100 });
+
+    const events = ts.getDiagnosticSnapshot().recoveryEvents;
+    expect(events.map((e) => e.stage)).toEqual(['hinted', 'cooldown', 'surfaced']);
+    // Counts should be monotonic.
+    expect(events[0]!.count).toBe(5);
+    expect(events[1]!.count).toBe(8);
+    expect(events[2]!.count).toBe(11);
+  });
+
+  it('diagnostic snapshot exposes full internal state', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    ts.recordToolCall('web_search', { q: 'foo' });
+    ts.recordToolCall('skill_view', { name: 's1' });
+    ts.recordToolCall('skill_view', { name: 's2' });
+    const snap = ts.getDiagnosticSnapshot();
+    expect(snap).toMatchObject({
+      enabled: true,
+      stage:   'none',
+      toolCalls: expect.arrayContaining([
+        expect.objectContaining({ name: 'web_search' }),
+        expect.objectContaining({ name: 'skill_view' }),
+      ]),
+      thresholds: expect.objectContaining({
+        hintConsec:     5,
+        cooldownConsec: 8,
+        surfaceConsec:  11,
+        cooldownIters:  3,
+      }),
+    });
+    expect(snap.consecName.name).toBe('skill_view');
+    expect(snap.consecName.count).toBe(2);
+  });
+
+  it('args hash handles null/undefined gracefully', () => {
+    process.env.AIDEN_TCE = '1';
+    const ts = new TurnState();
+    expect(() => ts.recordToolCall('t', null)).not.toThrow();
+    expect(() => ts.recordToolCall('t', undefined)).not.toThrow();
+    expect(() => ts.recordToolCall('t', { circular: undefined })).not.toThrow();
+  });
+
+  it('disabled tracer: getDiagnosticSnapshot still works (returns disabled state)', () => {
+    const ts = new TurnState();
+    const snap = ts.getDiagnosticSnapshot();
+    expect(snap.enabled).toBe(false);
+    expect(snap.stage).toBe('none');
+    expect(snap.toolCalls).toHaveLength(0);
+    expect(snap.cooledDownTools).toHaveLength(0);
+  });
+});
