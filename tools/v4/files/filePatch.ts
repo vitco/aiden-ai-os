@@ -18,7 +18,8 @@
 import { promises as fs } from 'node:fs';
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
-import { expandPath, isProtectedPath } from '../utils/paths';
+import { isProtectedPath } from '../utils/paths';
+import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
 
 export const filePatchTool: ToolHandler = {
   schema: {
@@ -49,11 +50,20 @@ export const filePatchTool: ToolHandler = {
     if (isProtectedPath(raw)) {
       return { success: false, error: 'Access denied: protected path' };
     }
+    // v4.4 Phase 2 — sandbox preflight (no-op when AIDEN_SANDBOX!=1).
+    const policy = isPathAllowed(raw, 'write', ctx.cwd);
+    if (!policy.allowed) {
+      return {
+        success: false,
+        error: policy.violation!.message,
+        sandbox_violation: violationEnvelope(policy),
+      };
+    }
     const find = typeof args.find === 'string' ? args.find : '';
     const replace = typeof args.replace === 'string' ? args.replace : '';
     if (!find) return { success: false, error: 'Empty find string' };
     const replaceAll = args.replace_all === true;
-    const resolved = expandPath(raw, ctx.cwd);
+    const resolved = policy.resolvedPath;
 
     try {
       const original = await fs.readFile(resolved, 'utf-8');

@@ -19,6 +19,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
+import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
 
 function expandPath(input: string, cwd: string): string {
   const home = os.homedir();
@@ -53,7 +54,16 @@ export const fileListTool: ToolHandler = {
   riskTier: 'safe',   // v4.4 Phase 1
   async execute(args, ctx) {
     const raw = String(args.path ?? args.dir ?? ctx.cwd).trim();
-    const resolved = expandPath(raw || ctx.cwd, ctx.cwd);
+    // v4.4 Phase 2 — sandbox preflight (no-op when AIDEN_SANDBOX!=1).
+    const policy = isPathAllowed(raw || ctx.cwd, 'read', ctx.cwd);
+    if (!policy.allowed) {
+      return {
+        success: false,
+        error: policy.violation!.message,
+        sandbox_violation: violationEnvelope(policy),
+      };
+    }
+    const resolved = policy.resolvedPath;
     try {
       const entries = await fs.readdir(resolved, { withFileTypes: true });
       const items = entries.map((e) => ({

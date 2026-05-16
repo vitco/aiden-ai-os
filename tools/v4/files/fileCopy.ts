@@ -17,7 +17,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
-import { expandPath, isProtectedPath } from '../utils/paths';
+import { isProtectedPath } from '../utils/paths';
+import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
 
 export const fileCopyTool: ToolHandler = {
   schema: {
@@ -46,8 +47,25 @@ export const fileCopyTool: ToolHandler = {
     if (isProtectedPath(fromRaw) || isProtectedPath(toRaw)) {
       return { success: false, error: 'Access denied: protected path' };
     }
-    const from = expandPath(fromRaw, ctx.cwd);
-    const to = expandPath(toRaw, ctx.cwd);
+    // v4.4 Phase 2 — sandbox preflight (source = read, dest = write).
+    const srcPolicy = isPathAllowed(fromRaw, 'read', ctx.cwd);
+    if (!srcPolicy.allowed) {
+      return {
+        success: false,
+        error: srcPolicy.violation!.message,
+        sandbox_violation: violationEnvelope(srcPolicy),
+      };
+    }
+    const dstPolicy = isPathAllowed(toRaw, 'write', ctx.cwd);
+    if (!dstPolicy.allowed) {
+      return {
+        success: false,
+        error: dstPolicy.violation!.message,
+        sandbox_violation: violationEnvelope(dstPolicy),
+      };
+    }
+    const from = srcPolicy.resolvedPath;
+    const to   = dstPolicy.resolvedPath;
     try {
       await fs.mkdir(path.dirname(to), { recursive: true });
       await fs.cp(from, to, { recursive: true });

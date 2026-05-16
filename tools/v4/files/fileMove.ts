@@ -18,7 +18,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
-import { expandPath, isProtectedPath } from '../utils/paths';
+import { isProtectedPath } from '../utils/paths';
+import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
 
 export const fileMoveTool: ToolHandler = {
   schema: {
@@ -47,8 +48,28 @@ export const fileMoveTool: ToolHandler = {
     if (isProtectedPath(fromRaw) || isProtectedPath(toRaw)) {
       return { success: false, error: 'Access denied: protected path' };
     }
-    const from = expandPath(fromRaw, ctx.cwd);
-    const to = expandPath(toRaw, ctx.cwd);
+    // v4.4 Phase 2 — sandbox preflight. Move = read source + write dest;
+    // since the source is also being deleted, this could arguably be
+    // 'delete' on source — but delete and write share the same allowlist
+    // semantics in the policy. 'read' on source matches copy's shape.
+    const srcPolicy = isPathAllowed(fromRaw, 'write', ctx.cwd);
+    if (!srcPolicy.allowed) {
+      return {
+        success: false,
+        error: srcPolicy.violation!.message,
+        sandbox_violation: violationEnvelope(srcPolicy),
+      };
+    }
+    const dstPolicy = isPathAllowed(toRaw, 'write', ctx.cwd);
+    if (!dstPolicy.allowed) {
+      return {
+        success: false,
+        error: dstPolicy.violation!.message,
+        sandbox_violation: violationEnvelope(dstPolicy),
+      };
+    }
+    const from = srcPolicy.resolvedPath;
+    const to   = dstPolicy.resolvedPath;
     try {
       await fs.mkdir(path.dirname(to), { recursive: true });
       try {

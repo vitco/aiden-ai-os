@@ -19,7 +19,8 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
-import { expandPath, isProtectedPath } from '../utils/paths';
+import { isProtectedPath } from '../utils/paths';
+import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
 
 export const fileWriteTool: ToolHandler = {
   schema: {
@@ -45,8 +46,17 @@ export const fileWriteTool: ToolHandler = {
     if (isProtectedPath(raw)) {
       return { success: false, error: 'Access denied: protected path' };
     }
+    // v4.4 Phase 2 — sandbox preflight (no-op when AIDEN_SANDBOX!=1).
+    const policy = isPathAllowed(raw, 'write', ctx.cwd);
+    if (!policy.allowed) {
+      return {
+        success: false,
+        error: policy.violation!.message,
+        sandbox_violation: violationEnvelope(policy),
+      };
+    }
     const content = typeof args.content === 'string' ? args.content : '';
-    const resolved = expandPath(raw, ctx.cwd);
+    const resolved = policy.resolvedPath;
     try {
       await fs.mkdir(path.dirname(resolved), { recursive: true });
       await fs.writeFile(resolved, content, 'utf-8');

@@ -1,0 +1,257 @@
+/**
+ * v4.4 Phase 2 — sandboxFs.ts unit tests.
+ *
+ * Coverage:
+ *   1. Short-circuit when sandbox disabled
+ *   2. Denylist wins for read AND write
+ *   3. Allowlist gates write/delete only
+ *   4. Read passes after clearing denylist (no allowlist requirement)
+ *   5. Symlink-escape detection (real fs symlink)
+ *   6. realpathWithFallback walks up to first existing ancestor
+ *   7. isWithin boundary correctness (no `/home/user-evil` false hit)
+ *   8. violationEnvelope shape & required keys
+ *   9. AIDEN_SANDBOX_ALLOW extension reaches the policy
+ */
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import {
+  isPathAllowed,
+  isWithin,
+  realpathWithFallback,
+  violationEnvelope,
+} from '../../../core/v4/sandboxFs';
+import {
+  readSandboxConfig,
+  _clearRealPathCacheForTests,
+} from '../../../core/v4/sandboxConfig';
+
+function tmpDir(prefix: string): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), `aiden-sbx-${prefix}-`));
+  return fs.realpathSync(dir);
+}
+
+function cleanup(dir: string): void {
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* noop */ }
+}
+
+describe('isWithin — boundary correctness', () => {
+  it('child strictly inside parent', () => {
+    expect(isWithin('/home/user/x', '/home/user')).toBe(true);
+  });
+
+  it('child === parent', () => {
+    expect(isWithin('/home/user', '/home/user')).toBe(true);
+  });
+
+  it('sibling prefix collision (the classic startsWith bug)', () => {
+    expect(isWithin('/home/user-evil', '/home/user')).toBe(false);
+  });
+
+  it('parent of child returns false', () => {
+    expect(isWithin('/home', '/home/user')).toBe(false);
+  });
+
+  it('empty strings return false', () => {
+    expect(isWithin('', '/home')).toBe(false);
+    expect(isWithin('/home', '')).toBe(false);
+  });
+});
+
+describe('realpathWithFallback', () => {
+  let root: string;
+  beforeEach(() => { _clearRealPathCacheForTests(); root = tmpDir('rpf'); });
+  afterEach(() => { cleanup(root); });
+
+  it('existing path: returns realpath directly', () => {
+    const real = realpathWithFallback(root);
+    expect(real).toBe(fs.realpathSync(root));
+  });
+
+  it('non-existent leaf under existing parent: parent-realpath + basename', () => {
+    const target = path.join(root, 'does-not-exist.txt');
+    const real = realpathWithFallback(target);
+    expect(real).toBe(path.join(fs.realpathSync(root), 'does-not-exist.txt'));
+  });
+
+  it('non-existent nested path: walks up to first existing ancestor', () => {
+    const target = path.join(root, 'a', 'b', 'c', 'leaf.txt');
+    const real = realpathWithFallback(target);
+    expect(real).toBe(path.join(fs.realpathSync(root), 'a', 'b', 'c', 'leaf.txt'));
+  });
+});
+
+describe('isPathAllowed — sandbox disabled (default)', () => {
+  beforeEach(() => { _clearRealPathCacheForTests(); });
+
+  it('returns allowed=true regardless of path when AIDEN_SANDBOX unset', () => {
+    const cfg = readSandboxConfig({});
+    const d = isPathAllowed('/etc/passwd', 'read', process.cwd(), cfg);
+    expect(d.allowed).toBe(true);
+    expect(d.violation).toBeUndefined();
+  });
+
+  it('still resolves the path (so callers can use resolvedPath uniformly)', () => {
+    const cfg = readSandboxConfig({});
+    const d = isPathAllowed('./relative/path', 'write', process.cwd(), cfg);
+    expect(d.allowed).toBe(true);
+    expect(path.isAbsolute(d.resolvedPath)).toBe(true);
+  });
+});
+
+describe('isPathAllowed — denylist (read & write)', () => {
+  beforeEach(() => { _clearRealPathCacheForTests(); });
+
+  it('refuses read of /etc when enabled', () => {
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '1' });
+    const d = isPathAllowed('/etc/hosts', 'read', process.cwd(), cfg);
+    expect(d.allowed).toBe(false);
+    expect(d.violation?.code).toBe('fs.sensitive_path');
+  });
+
+  it('refuses write of ~/.ssh/key when enabled', () => {
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '1' });
+    const target = path.join(os.homedir(), '.ssh', 'id_rsa');
+    const d = isPathAllowed(target, 'write', process.cwd(), cfg);
+    expect(d.allowed).toBe(false);
+    expect(d.violation?.code).toBe('fs.sensitive_path');
+  });
+
+  it('denylist wins even when path is also in allowlist', () => {
+    // Custom allow that includes /etc, but denylist still wins.
+    const cfg = readSandboxConfig({
+      AIDEN_SANDBOX: '1',
+      AIDEN_SANDBOX_ALLOW: '/etc',
+    });
+    const d = isPathAllowed('/etc/passwd', 'write', process.cwd(), cfg);
+    expect(d.allowed).toBe(false);
+    expect(d.violation?.code).toBe('fs.sensitive_path');
+  });
+});
+
+describe('isPathAllowed — allowlist (write/delete only)', () => {
+  let workspace: string;
+  beforeEach(() => {
+    _clearRealPathCacheForTests();
+    workspace = tmpDir('ws');
+  });
+  afterEach(() => { cleanup(workspace); });
+
+  it('write inside cwd (in default allowlist) permitted', () => {
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '1' });
+    const target = path.join(process.cwd(), 'aiden-test-write.txt');
+    const d = isPathAllowed(target, 'write', process.cwd(), cfg);
+    expect(d.allowed).toBe(true);
+  });
+
+  it('write outside any allowlist root refused', () => {
+    // /opt is not in default allowlist on most systems.
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '1' });
+    const d = isPathAllowed('/opt/aiden-test.txt', 'write', process.cwd(), cfg);
+    expect(d.allowed).toBe(false);
+    expect(d.violation?.code).toBe('fs.write_outside_allowlist');
+  });
+
+  it('delete outside any allowlist root refused', () => {
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '1' });
+    const d = isPathAllowed('/opt/aiden-test.txt', 'delete', process.cwd(), cfg);
+    expect(d.allowed).toBe(false);
+    expect(d.violation?.code).toBe('fs.write_outside_allowlist');
+  });
+
+  it('read outside allowlist permitted (denylist not hit)', () => {
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '1' });
+    // /opt is outside both default allowlist and denylist — read OK.
+    const d = isPathAllowed('/opt/some-file.txt', 'read', process.cwd(), cfg);
+    expect(d.allowed).toBe(true);
+  });
+
+  it('AIDEN_SANDBOX_ALLOW extension permits writes there', () => {
+    const cfg = readSandboxConfig({
+      AIDEN_SANDBOX: '1',
+      AIDEN_SANDBOX_ALLOW: workspace,
+    });
+    const target = path.join(workspace, 'out.txt');
+    const d = isPathAllowed(target, 'write', process.cwd(), cfg);
+    expect(d.allowed).toBe(true);
+  });
+});
+
+// Symlink test is OS-conditional: Windows requires elevated rights to
+// create symlinks. Skip on Windows where we can't reliably set one up.
+const symlinkable = process.platform !== 'win32';
+const symdescribe = symlinkable ? describe : describe.skip;
+
+symdescribe('isPathAllowed — symlink escape', () => {
+  let allow: string;
+  let outside: string;
+  beforeEach(() => {
+    _clearRealPathCacheForTests();
+    allow   = tmpDir('allow');
+    outside = tmpDir('outside');
+  });
+  afterEach(() => { cleanup(allow); cleanup(outside); });
+
+  it('symlink inside allowlist pointing outside → fs.symlink_escape', () => {
+    const linkPath = path.join(allow, 'escape');
+    fs.symlinkSync(outside, linkPath, 'dir');
+    const cfg = readSandboxConfig({
+      AIDEN_SANDBOX: '1',
+      AIDEN_SANDBOX_ALLOW: allow,
+    });
+    const target = path.join(linkPath, 'pwned.txt');
+    const d = isPathAllowed(target, 'write', process.cwd(), cfg);
+    expect(d.allowed).toBe(false);
+    expect(d.violation?.code).toBe('fs.symlink_escape');
+  });
+
+  it('symlink inside allowlist pointing inside same allowlist → permitted', () => {
+    const sub = path.join(allow, 'sub');
+    fs.mkdirSync(sub);
+    const linkPath = path.join(allow, 'inside-link');
+    fs.symlinkSync(sub, linkPath, 'dir');
+    const cfg = readSandboxConfig({
+      AIDEN_SANDBOX: '1',
+      AIDEN_SANDBOX_ALLOW: allow,
+    });
+    const target = path.join(linkPath, 'ok.txt');
+    const d = isPathAllowed(target, 'write', process.cwd(), cfg);
+    expect(d.allowed).toBe(true);
+  });
+});
+
+describe('violationEnvelope', () => {
+  beforeEach(() => { _clearRealPathCacheForTests(); });
+
+  it('produces the structured wire-format shape on denied decisions', () => {
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '1' });
+    const d = isPathAllowed('/etc/hosts', 'read', process.cwd(), cfg);
+    const env = violationEnvelope(d);
+    expect(env.code).toBe('fs.sensitive_path');
+    expect(env.category).toBe('sandbox_violation');
+    expect(env.retryable).toBe(false);
+    expect(env.requested_path).toBe('/etc/hosts');
+    expect(typeof env.resolved_path).toBe('string');
+    expect(typeof env.matched_policy).toBe('string');
+  });
+
+  it('throws when called on an allowed decision (defensive)', () => {
+    const cfg = readSandboxConfig({});
+    const d = isPathAllowed('/tmp/x', 'read', process.cwd(), cfg);
+    expect(() => violationEnvelope(d)).toThrow();
+  });
+});
+
+describe('isPathAllowed — decision shape', () => {
+  beforeEach(() => { _clearRealPathCacheForTests(); });
+
+  it('always carries requestedPath, expandedPath, resolvedPath, op', () => {
+    const cfg = readSandboxConfig({ AIDEN_SANDBOX: '1' });
+    const d = isPathAllowed('~/Documents/x.txt', 'write', process.cwd(), cfg);
+    expect(d.requestedPath).toBe('~/Documents/x.txt');
+    expect(path.isAbsolute(d.expandedPath)).toBe(true);
+    expect(path.isAbsolute(d.resolvedPath)).toBe(true);
+    expect(d.op).toBe('write');
+  });
+});

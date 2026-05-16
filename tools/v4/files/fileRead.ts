@@ -21,6 +21,7 @@ import path from 'node:path';
 import os from 'node:os';
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
+import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
 
 const MAX_OUTPUT = 5000;
 
@@ -81,7 +82,16 @@ export const fileReadTool: ToolHandler = {
         error: 'Access denied: protected path (credentials/keys/.env)',
       };
     }
-    const resolved = expandPath(raw, ctx.cwd);
+    // v4.4 Phase 2 — sandbox preflight (no-op when AIDEN_SANDBOX!=1).
+    const policy = isPathAllowed(raw, 'read', ctx.cwd);
+    if (!policy.allowed) {
+      return {
+        success: false,
+        error: policy.violation!.message,
+        sandbox_violation: violationEnvelope(policy),
+      };
+    }
+    const resolved = policy.resolvedPath;
     try {
       const content = await fs.readFile(resolved, 'utf-8');
       return {

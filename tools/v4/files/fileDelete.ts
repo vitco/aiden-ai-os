@@ -18,7 +18,8 @@
 import { promises as fs } from 'node:fs';
 
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
-import { expandPath, isProtectedPath, isFilesystemRoot } from '../utils/paths';
+import { isProtectedPath, isFilesystemRoot } from '../utils/paths';
+import { isPathAllowed, violationEnvelope } from '../../../core/v4/sandboxFs';
 
 export const fileDeleteTool: ToolHandler = {
   schema: {
@@ -47,7 +48,16 @@ export const fileDeleteTool: ToolHandler = {
     if (isProtectedPath(raw)) {
       return { success: false, error: 'Access denied: protected path' };
     }
-    const resolved = expandPath(raw, ctx.cwd);
+    // v4.4 Phase 2 — sandbox preflight (no-op when AIDEN_SANDBOX!=1).
+    const policy = isPathAllowed(raw, 'delete', ctx.cwd);
+    if (!policy.allowed) {
+      return {
+        success: false,
+        error: policy.violation!.message,
+        sandbox_violation: violationEnvelope(policy),
+      };
+    }
+    const resolved = policy.resolvedPath;
     if (isFilesystemRoot(resolved)) {
       return { success: false, error: 'Refusing to delete filesystem root' };
     }
