@@ -56,6 +56,13 @@ import type { ResourceRegistry } from './resourceRegistry';
 import { startEventLoopLagSampler, stopEventLoopLagSampler } from './eventLoopLag';
 import { mountHealthEndpoints } from './health';
 import { installDaemonSignalHandlers } from './signals';
+// v4.5 Phase 2 — file watcher trigger.
+import { createFileObservationsStore } from './triggers/fileObservationsStore';
+import { createFileWatcher } from './triggers/fileWatcher';
+import type { FileWatcherHandle } from './triggers/fileWatcher';
+import { reconcileFileWatcher } from './triggers/reconcile';
+import { parseFileWatcherSpec } from './triggers/fileWatcherSpec';
+import type { TriggerRowSql } from './db/schema/v1.spec';
 import { pwClose } from '../../playwrightBridge';
 import { VERSION } from '../../version';
 
@@ -79,6 +86,8 @@ export interface DaemonBootstrapHandle {
   markerPath:        string | null;
   /** Optional: own HTTP server for CLI path. */
   httpServer:        http.Server | null;
+  /** v4.5 Phase 2 — active file watcher handles. */
+  fileWatchers:      ReadonlyArray<FileWatcherHandle>;
 }
 
 const NOOP_HANDLE: DaemonBootstrapHandle = Object.freeze({
@@ -95,6 +104,7 @@ const NOOP_HANDLE: DaemonBootstrapHandle = Object.freeze({
   dbPath:                null,
   markerPath:            null,
   httpServer:            null,
+  fileWatchers:          Object.freeze([] as FileWatcherHandle[]),
 });
 
 // Process-wide singleton — the second call returns the same handle.
@@ -257,6 +267,40 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       log('info', '[daemon] boot state: first boot / no prior daemon detected');
     }
 
+    // ── v4.5 Phase 2 — load enabled file-watcher triggers ────────────────
+    const fileWatchers: FileWatcherHandle[] = [];
+    try {
+      const obsStore = createFileObservationsStore({ db });
+      const rows = db
+        .prepare(
+          `SELECT * FROM triggers WHERE source = 'file' AND enabled = 1 ORDER BY name`,
+        )
+        .all() as TriggerRowSql[];
+      for (const t of rows) {
+        try {
+          const spec = parseFileWatcherSpec(t.spec_json);
+          // Boot-time reconciliation BEFORE the watcher starts so
+          // the policy decision is deterministic.
+          reconcileFileWatcher({
+            watcherId: t.id, spec, triggerBus, obsStore, log,
+          });
+          const handle = createFileWatcher({
+            watcherId: t.id, spec, triggerBus, obsStore,
+            registry:  resourceRegistry, log,
+          });
+          fileWatchers.push(handle);
+          log('info', `[file-watcher] active: ${t.name} (${t.id}) paths=${spec.paths.length}`);
+        } catch (e) {
+          log('error', `[file-watcher] failed to start ${t.name}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+      if (rows.length === 0) {
+        log('info', '[file-watcher] no file triggers registered');
+      }
+    } catch (e) {
+      log('error', `[file-watcher] trigger registry scan failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+
     _singleton = {
       active:                true,
       instanceId:            tracker.instanceId,
@@ -271,6 +315,7 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       dbPath,
       markerPath,
       httpServer,
+      fileWatchers,
     };
     return _singleton;
   } catch (e) {

@@ -123,6 +123,41 @@ export {
 } from './bootstrap';
 export type { DaemonBootstrapHandle, BootstrapOptions } from './bootstrap';
 
+// ── v4.5 Phase 2 — file-watcher trigger ──────────────────────────────────
+export {
+  createFileWatcher,
+} from './triggers/fileWatcher';
+export type { FileWatcherHandle, FileWatcherStats } from './triggers/fileWatcher';
+export {
+  parseFileWatcherSpec,
+  DEFAULT_FILE_WATCHER_SPEC,
+} from './triggers/fileWatcherSpec';
+export type {
+  FileWatcherSpec,
+  FileEventType,
+  ReconcilePolicy,
+} from './triggers/fileWatcherSpec';
+export {
+  createFileObservationsStore,
+} from './triggers/fileObservationsStore';
+export type {
+  FileObservation,
+  FileObservationsStore,
+} from './triggers/fileObservationsStore';
+export {
+  reconcileFileWatcher,
+} from './triggers/reconcile';
+export {
+  compileGlobMatcher,
+  DEFAULT_IGNORE_PATTERNS,
+} from './triggers/globMatcher';
+export {
+  settleStat,
+} from './triggers/settleStat';
+export {
+  computeFileKey,
+} from './triggers/fsIdentity';
+
 export {
   startEventLoopLagSampler,
   stopEventLoopLagSampler,

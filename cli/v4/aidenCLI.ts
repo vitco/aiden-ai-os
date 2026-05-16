@@ -396,6 +396,51 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       await runSkillsSubcommand(action, arg, opts);
     });
 
+  // v4.5 Phase 2 — file watcher trigger management.
+  program
+    .command('trigger <action> [args...]')
+    .description('Manage daemon triggers. Actions: add, list, show, remove, enable, disable, test.')
+    .option('--name <name>', 'Trigger name (for add).')
+    .option('--path <paths...>', 'Path(s) to watch (for add file). Repeatable.')
+    .option('--include <globs...>', 'Include glob patterns. Repeatable.')
+    .option('--exclude <globs...>', 'Exclude glob patterns. Repeatable.')
+    .option('--event <events...>', 'Event types: add|change|unlink. Repeatable.')
+    .option('--debounce-ms <n>', 'Per-path debounce in ms (default 750).', (v: string) => Number.parseInt(v, 10))
+    .option('--settle-ms <n>', 'Stable-stat settle in ms (default 1000).', (v: string) => Number.parseInt(v, 10))
+    .option('--max-settle-ms <n>', 'Max settle time before giving up (default 30000).', (v: string) => Number.parseInt(v, 10))
+    .option('--max-queue-depth <n>', 'Max per-watcher queue depth (default 100).', (v: string) => Number.parseInt(v, 10))
+    .option('--no-ignore-temp', 'Disable default ignore for editor temps + .git + node_modules.')
+    .option('--content-hash', 'Compute sha256 per change (opt-in; slower).')
+    .option('--reconcile <policy>', 'skip_existing | process_new_since_last_seen | full_rescan (default skip_existing).')
+    .option('--polling', 'Force polling mode (network FS / WSL bind mount).')
+    .option('--prompt-template <text>', 'Phase 5 — agent prompt template.')
+    .option('--disabled', 'Create trigger in disabled state.')
+    .action(async (action: string, posArgs: string[] | undefined, cmd: Command) => {
+      const { runTriggerSubcommand } = await import('./commands/trigger');
+      const cliOpts = cmd.opts() as Record<string, unknown>;
+      const argv = {
+        name:           cliOpts.name as string | undefined,
+        paths:          cliOpts.path as string[] | undefined,
+        include:        cliOpts.include as string[] | undefined,
+        exclude:        cliOpts.exclude as string[] | undefined,
+        events:         cliOpts.event as string[] | undefined,
+        debounceMs:     cliOpts.debounceMs as number | undefined,
+        settleMs:       cliOpts.settleMs as number | undefined,
+        maxSettleMs:    cliOpts.maxSettleMs as number | undefined,
+        maxQueueDepth:  cliOpts.maxQueueDepth as number | undefined,
+        noIgnoreTemp:   cliOpts.ignoreTemp === false,
+        contentHash:    cliOpts.contentHash === true,
+        reconcile:      cliOpts.reconcile as string | undefined,
+        polling:        cliOpts.polling === true,
+        promptTemplate: cliOpts.promptTemplate as string | undefined,
+        disabled:       cliOpts.disabled === true,
+      };
+      const code = await runTriggerSubcommand(action, posArgs ?? [], argv, {
+        writeOut: opts.writeOut,
+      });
+      process.exit(code);
+    });
+
   program
     .command('mcp <action>')
     .description(

@@ -242,6 +242,7 @@
     "better-sqlite3": "^12.9.0",
     "blessed": "^0.1.81",
     "chalk": "^5.6.2",
+    "chokidar": "^4.0.3",
     "chrome-remote-interface": "^0.34.0",
     "commander": "^5.1.0",
     "cors": "^2.8.5",
