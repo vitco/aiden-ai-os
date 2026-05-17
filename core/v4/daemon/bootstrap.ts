@@ -633,3 +633,70 @@ export function _resetDaemonBootstrapForTests(): void {
 export function getDaemonHandle(): DaemonBootstrapHandle | null {
   return _singleton;
 }
+
+/**
+ * v4.5 Phase 7c — boot the daemon foundation without any agent
+ * builder. Drop-in replacement for `bootstrapDaemon()` callers that
+ * want the rails (file watchers, webhook routes, email triggers,
+ * cron emitter, dispatcher with placeholder runner) up immediately,
+ * with the real-agent runner installed later via
+ * `installDaemonAgentBuilder()`.
+ *
+ * Use this at the top of REPL boot (before `buildAgentRuntime`)
+ * so the daemon foundation comes up regardless of whether the user
+ * has a provider configured. Once `buildAgentRuntime` returns, call
+ * `installDaemonAgentBuilder(handle, builder, persistedDefaultModel)`
+ * to swap in the real runner.
+ *
+ * Idempotent — second call returns the existing singleton.
+ */
+export function bootstrapDaemonFoundation(
+  opts: Omit<BootstrapOptions, 'agentBuilder' | 'persistedDefaultModel'> = {},
+): DaemonBootstrapHandle {
+  return bootstrapDaemon(opts);
+}
+
+/**
+ * v4.5 Phase 7c — swap the dispatcher's placeholder runner for a
+ * real `AidenAgent`-backed one. Safe to call once the REPL's
+ * provider, toolRegistry, and prompt builder are constructed.
+ *
+ * Returns `false` when the foundation isn't active (AIDEN_DAEMON=0
+ * or `bootstrapDaemonFoundation` not called) — caller can decide
+ * what to do.
+ *
+ * Returns `true` when the swap succeeded. The dispatcher's next
+ * claim uses the new runner; any in-flight claim continues on the
+ * placeholder until completion (the placeholder's behavior is
+ * instant-stop, so this window is effectively zero).
+ */
+export function installDaemonAgentBuilder(
+  handle:                DaemonBootstrapHandle,
+  agentBuilder:          AgentBuilder,
+  persistedDefaultModel: { provider: string; model: string } | undefined,
+  log?:                  BootstrapOptions['log'],
+): boolean {
+  if (!handle.active || !handle.dispatcher || !handle.triggerBus || !handle.runStore) {
+    return false;
+  }
+  const logFn = log ?? ((level, msg) => {
+    if (level === 'error') console.error(msg);
+    else if (level === 'warn') console.warn(msg);
+    else                       console.log(msg);
+  });
+  try {
+    const realRunner = createRealAgentRunner({
+      db:               openDaemonDb(handle.dbPath!),
+      runStore:         handle.runStore,
+      resourceRegistry: handle.resourceRegistry ?? undefined,
+      log:              logFn,
+      agentBuilder,
+      persistedDefault: persistedDefaultModel,
+    });
+    handle.dispatcher.installRunner(realRunner);
+    return true;
+  } catch (e) {
+    logFn('error', `[daemon] installDaemonAgentBuilder failed: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+}

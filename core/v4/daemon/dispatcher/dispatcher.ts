@@ -129,6 +129,19 @@ export interface Dispatcher {
     misconfigured: number;
   };
   /**
+   * v4.5 Phase 7c — atomic runner swap. Called by
+   * `installDaemonAgentBuilder()` once the CLI's REPL agent is
+   * built. The dispatcher's poll loop reads `runner` on each
+   * `_pumpOnce` so the swap takes effect immediately on the next
+   * claim. In-flight claims continue on the previous runner.
+   */
+  installRunner(next: DaemonAgentRunner): void;
+  /**
+   * v4.5 Phase 7c — diagnostic. Reports which runner is currently
+   * active. Useful for `aiden daemon status` and tests.
+   */
+  runnerKind(): 'placeholder' | 'real' | 'none';
+  /**
    * Test-only — run a single claim/dispatch cycle synchronously.
    * Returns the event id processed (or null if nothing was claimed).
    * Lets tests assert behaviour without driving the poll loop.
@@ -147,6 +160,11 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
   const log         = opts.log         ?? (() => { /* silent */ });
 
   let runner:   DaemonAgentRunner | null = null;
+  // v4.5 Phase 7c — `runnerKind` lets diagnostics + tests distinguish
+  // the placeholder-runner phase from the real-agent-runner phase.
+  // The factory-bound initial runner is tagged 'placeholder' by
+  // default; `installRunner` flips to 'real'.
+  let _runnerKind: 'placeholder' | 'real' | 'none' = 'none';
   let _started = false;
   let _stopping = false;
   let _pollTimer: NodeJS.Timeout | null = null;
@@ -397,8 +415,23 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
       if (_started) return;
       _started = true;
       runner = opts.runnerFactory();
-      log('info', `[dispatcher] starting workerCount=${workerCount} leaseMs=${leaseMs}`);
+      // Initial runner from the factory is the placeholder unless the
+      // factory itself returned a real runner. The CLI's two-phase
+      // bootstrap (Phase 7c) starts with a placeholder factory and
+      // calls `installRunner` later with the real one.
+      _runnerKind = 'placeholder';
+      log('info', `[dispatcher] starting workerCount=${workerCount} leaseMs=${leaseMs} runner=placeholder`);
       _schedulePoll();
+    },
+    installRunner(next: DaemonAgentRunner) {
+      // Atomic swap — JS single-threaded execution means the read in
+      // _pumpOnce / processClaim can never see a half-installed runner.
+      runner = next;
+      _runnerKind = 'real';
+      log('info', `[dispatcher] runner swapped → real (next claim uses new runner)`);
+    },
+    runnerKind() {
+      return _runnerKind;
     },
     async stop(timeoutMs = DEFAULT_STOP_TIMEOUT_MS) {
       _stopping = true;

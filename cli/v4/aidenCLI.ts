@@ -313,15 +313,28 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       // path — subcommands (trigger add/list/show/remove/enable/
       // disable/test, config, --version, --help, doctor, …) do NOT
       // touch the daemon foundation.
-      // v4.5 Phase 7b — bootstrapDaemon() was previously called HERE
-      // (top of REPL action), but the Phase 7 agentBuilder injection
-      // needs the REPL's already-initialized provider resolver + tool
-      // registry + auxiliary client + prompt builder. We moved the
-      // bootstrap call into runInteractiveChat() (after
-      // buildAgentRuntime() returns) so the closure has all the
-      // references in scope. The dispatcher's poll loop is bounded
-      // (250ms idle) — moving init a fraction-of-second later is
-      // invisible.
+      // v4.5 Phase 7c — two-phase bootstrap. The daemon FOUNDATION
+      // (file watchers, webhook routes, email triggers, cron
+      // emitter, dispatcher with placeholder runner, HTTP server)
+      // comes up HERE — before buildAgentRuntime, before the setup
+      // wizard. This restores the pre-7b guarantee that daemon
+      // foundation boots regardless of REPL configuration state
+      // (matters for systemd/launchd units booted on fresh machines
+      // and for any environment without a provider configured yet).
+      //
+      // The REAL agent runner gets installed later inside
+      // runInteractiveChat() once buildAgentRuntime returns — see
+      // `installDaemonAgentBuilder` call there.
+      try {
+        if (process.env.AIDEN_DAEMON === '1') {
+          const { bootstrapDaemonFoundation } = await import('../../core/v4/daemon/bootstrap');
+          bootstrapDaemonFoundation();
+        }
+      } catch (e) {
+        // Fail-loud but non-fatal — daemon foundation init failure
+        // must not block the user from opening a REPL.
+        console.error('[daemon] foundation bootstrap failed: ' + (e instanceof Error ? e.message : String(e)));
+      }
 
       // Tier-3.1: surface --no-ui as an env var so downstream modules
       // (which import uiBuild.ts) see the flag without threading it
@@ -765,6 +778,27 @@ export async function buildAgentRuntime(
   let exploreMode = false;
 
   if (wizardNeeded) {
+    // v4.5 Phase 7c — TTY guard. The wizard uses inquirer prompts
+    // which block on stdin. When stdin is NOT a TTY (systemd unit
+    // start, launchd run, piped invocation, CI), there's no user
+    // to answer, so the wizard would hang forever — which in turn
+    // blocks the rest of buildAgentRuntime AND any post-build
+    // daemon wiring. Bail into exploreMode instead so the REPL
+    // boots with a NullAdapter; the daemon foundation (started at
+    // top of REPL action handler) keeps serving trigger rails with
+    // the placeholder runner. The operator runs `aiden` interactively
+    // once to finish configuration; from then on the real-agent
+    // runner installs on every subsequent boot.
+    if (!process.stdin.isTTY) {
+      process.stderr.write(
+        '[setup] stdin is not a TTY — skipping interactive wizard. ' +
+        'Booting in explore mode with NullAdapter. ' +
+        'Run `aiden` from a terminal once to configure a provider.\n',
+      );
+      exploreMode = true;
+      // Skip the wizard block entirely; fall through to adapter
+      // build with exploreMode=true so a NullAdapter is used.
+    } else {
     if (!detection.hasAnyProvider) {
       // Truly empty: no env, no OAuth, no Ollama, no inline config.
       process.stdout.write(`\n${summarizeDetection(detection)}\n`);
@@ -806,6 +840,7 @@ export async function buildAgentRuntime(
     // re-load both so the resolver sees what the wizard wrote.
     loadAidenEnvFile(paths.envFile);
     await config.load();
+    }       // end of TTY branch
   }
 
   // Phase v4.1.2-bug1: boot model selection now consults the priority-
@@ -1961,29 +1996,34 @@ export interface AgentRuntime {
 async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void> {
   const runtime = await buildAgentRuntime(cliOpts, opts);
 
-  // v4.5 Phase 7b — bootstrap the daemon AFTER the REPL agent is
-  // built. The daemonAgentBuilder closure (captured in the runtime)
-  // has all the references it needs (provider resolver, tool
-  // registry, prompt builder, auxiliary client, memory manager).
-  // When AIDEN_DAEMON=0 (default), bootstrapDaemon returns the
-  // NOOP_HANDLE — zero overhead. When =1, the dispatcher uses the
-  // real runner backed by our builder; daemon-fired triggers
-  // invoke a real AidenAgent.
+  // v4.5 Phase 7c — install the REAL agent runner now that the
+  // REPL agent is built. The daemon foundation already came up
+  // earlier (top of REPL action handler) with the Phase 5a
+  // placeholder runner serving claims. This call atomically swaps
+  // the dispatcher's runner from placeholder → real; the next
+  // claim uses `runtime.daemonAgentBuilder` to construct a real
+  // AidenAgent per fire.
   try {
     if (process.env.AIDEN_DAEMON === '1') {
-      const { bootstrapDaemon } = await import('../../core/v4/daemon/bootstrap');
-      bootstrapDaemon({
-        agentBuilder: runtime.daemonAgentBuilder,
-        persistedDefaultModel: {
-          provider: runtime.providerId,
-          model:    runtime.modelId,
-        },
-      });
+      const { getDaemonHandle, installDaemonAgentBuilder } =
+        await import('../../core/v4/daemon/bootstrap');
+      const handle = getDaemonHandle();
+      if (handle && handle.active) {
+        const ok = installDaemonAgentBuilder(
+          handle,
+          runtime.daemonAgentBuilder,
+          { provider: runtime.providerId, model: runtime.modelId },
+        );
+        if (!ok) {
+          console.warn('[daemon] real-runner install returned false — placeholder still active');
+        }
+      }
     }
   } catch (e) {
-    // Fail-loud but non-fatal — daemon foundation init failure
-    // must not block the user from opening a REPL.
-    console.error('[daemon] bootstrap failed: ' + (e instanceof Error ? e.message : String(e)));
+    // Fail-loud but non-fatal — install failure leaves the
+    // placeholder runner active; the REPL still works and the
+    // daemon's rails still serve triggers.
+    console.error('[daemon] install agent builder failed: ' + (e instanceof Error ? e.message : String(e)));
   }
 
   const sessionOpts = {
