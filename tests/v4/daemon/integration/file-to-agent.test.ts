@@ -119,7 +119,10 @@ describe('integration: file trigger → bus → dispatcher → agent → markDon
       }),
     });
     await dispatcher._pumpOnce();   // attempt 1 throws
+    // Phase 7 cooldown — manually expire so the next pump can re-claim.
+    db.prepare('UPDATE trigger_events SET claim_expires_at = ? WHERE id = 1').run(Date.now() - 1000);
     await dispatcher._pumpOnce();   // attempt 2 throws
+    db.prepare('UPDATE trigger_events SET claim_expires_at = ? WHERE id = 1').run(Date.now() - 1000);
     await dispatcher._pumpOnce();   // attempt 3 succeeds
     expect(sessions).toHaveLength(3);
     expect(sessions[0]).toBe(sessions[1]);

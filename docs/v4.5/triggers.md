@@ -161,3 +161,39 @@ run beats firing dozens of stale runs after a long laptop sleep.
 `aiden runs list` shows recent agent turns regardless of source.
 `aiden runs show <id>` returns the full `runs` row plus the
 `run_events` log for that turn.
+
+## Phase 7 spec fields (real agent runner)
+
+Every trigger spec accepts these optional fields. The CLI flags
+for adding them are listed alongside each. Stored under
+`triggers.spec_json` and consumed by the dispatcher at claim time.
+
+| Spec field | CLI flag | Default | Description |
+|---|---|---|---|
+| `provider` / `model` | (set via `aiden trigger ...`-time JSON spec or DB edit) | persisted REPL default | Per-trigger model override. Chain: trigger spec → `AIDEN_DAEMON_MODEL=<provider>/<model>` env → persisted REPL default. |
+| `daemonApproval` | (JSON spec) | `safe-only` | Auto-approval policy for daemon-fired turns. `safe-only` allows safe-tier tools and denies caution + dangerous (matches the Hermes "untrusted ingress" lesson). `caution-ok` allows safe + caution; dangerous still denied. `dangerous-ok` allows all tiers — use only for triggers from fully-trusted sources. |
+| `maxTokensPerFire` | (JSON spec) | unlimited | Per-turn token cap. When crossed, the runner aborts the turn via the agent's abort signal; finishReason becomes `budget_exhausted`. The trigger is NOT dead-lettered (budget exhaustion is treated as "this fire ran too hot"; the next fire starts fresh). |
+
+Global guardrails (env vars):
+
+| Env var | Default | Description |
+|---|---|---|
+| `AIDEN_DAEMON_MODEL` | unset | Fallback model for all daemon-fired turns. Format `<provider>/<model>`, e.g. `ollama/llama3.2:latest`. Wins over the persisted REPL default; loses to per-trigger overrides. |
+| `AIDEN_DAEMON_DAILY_BUDGET` | unset (unlimited) | Hard daily token cap across ALL daemon-fired turns (resets at midnight UTC). When hit, the pre-turn budget gate rejects new claims with a `trigger_quota` tag; affected events go to dead-letter (the retry matrix marks `trigger_quota` permanent). Counter stored in `daemon.db.idempotency_keys` (scope=`daemon_budget`) — no separate table. |
+
+## Phase 7 run_events emitted by the real runner
+
+When a real `AidenAgent` runner is wired (caller passes `agentBuilder` to `bootstrapDaemon`), the dispatcher emits these `run_events` kinds per turn (major-event audit only — full per-tool detail stays in the in-memory `loopTrace` the REPL uses):
+
+| Kind | Payload |
+|---|---|
+| `dispatcher:invoked` | source, triggerId, sessionId, model, provider, modelSource (`trigger`/`env`/`persisted`), approvalPolicy, dailySnapshot, maxTokensPerFire |
+| `tool_call_started` | toolName, args (truncated 200 chars), ts |
+| `tool_call_completed` | toolName, error, hasResult, durationMs |
+| `approval_decision` | toolName, category, riskTier, reason, policy, decision |
+| `budget_warning` | level (`caution` 70% / `warning` 90%), turn, max |
+| `dispatcher:completed` | finishReason, totalTokens, durationMs, dailySnapshot, perTurnBudgetHit, perTurnReason, invocationError |
+| `dispatcher:rejected` | reason, dailySnapshot — fires INSTEAD of `dispatcher:invoked` when the pre-turn budget gate rejects |
+| `dispatcher:builder_failed` | error — fires when the injected `agentBuilder` throws during agent construction |
+
+`aiden runs show <runId>` returns the full list. `aiden trigger logs <triggerId>` filters the same events to one trigger.

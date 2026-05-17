@@ -127,7 +127,11 @@ describe('dispatcher — failure handling', () => {
       invoke: async () => { throw new Error('persistent failure'); },
       maxAttempts: 2,
     });
-    await dispatcher._pumpOnce();      // attempt 1 → pending
+    await dispatcher._pumpOnce();      // attempt 1 → pending (with cooldown)
+    // Phase 7 — manually expire the cooldown so the second pump can re-claim
+    // immediately. Real bus poll loop would wait the cooldown out naturally.
+    db.prepare('UPDATE trigger_events SET claim_expires_at = ? WHERE id = ?')
+      .run(Date.now() - 1000, id);
     await dispatcher._pumpOnce();      // attempt 2 → dead_letter
     const row = bus.get(id);
     expect(row?.status).toBe('dead_letter');

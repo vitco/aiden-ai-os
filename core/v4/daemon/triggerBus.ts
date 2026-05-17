@@ -51,7 +51,7 @@ export interface TriggerBus {
   renewClaim(eventId: number, claimToken: string, extendMs: number): boolean;
   release(eventId: number, claimToken: string): void;
   markDone(eventId: number, claimToken: string, runId?: number): void;
-  markFailed(eventId: number, claimToken: string, error: string, opts?: { maxAttempts?: number }): void;
+  markFailed(eventId: number, claimToken: string, error: string, opts?: { maxAttempts?: number; cooldownMs?: number }): void;
   reclaimExpired(now?: number): { reclaimed: number };
   deadLetter(eventId: number, reason: string): void;
   stats(): {
@@ -149,16 +149,21 @@ export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
 
       const tx = db.transaction((): TriggerEventRow | null => {
         // Pick the oldest pending event matching the optional source filter.
+        // v4.5 Phase 7 — honour cooldown: skip pending rows whose
+        // claim_expires_at is still in the future (re-set by
+        // markFailed with cooldownMs to delay re-claim).
         const sql = opts2.source
           ? `SELECT id FROM trigger_events
               WHERE status = 'pending' AND source = ?
+                AND (claim_expires_at IS NULL OR claim_expires_at <= ?)
               ORDER BY created_at LIMIT 1`
           : `SELECT id FROM trigger_events
               WHERE status = 'pending'
+                AND (claim_expires_at IS NULL OR claim_expires_at <= ?)
               ORDER BY created_at LIMIT 1`;
         const candidate = (opts2.source
-          ? db.prepare(sql).get(opts2.source)
-          : db.prepare(sql).get()) as { id: number } | undefined;
+          ? db.prepare(sql).get(opts2.source, now)
+          : db.prepare(sql).get(now)) as { id: number } | undefined;
         if (!candidate) return null;
 
         const upd = db
@@ -232,12 +237,21 @@ export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
       eventId:    number,
       claimToken: string,
       error:      string,
-      opts2: { maxAttempts?: number } = {},
+      opts2: { maxAttempts?: number; cooldownMs?: number } = {},
     ): void {
       if (activeClaims.get(eventId) !== claimToken) return;
       const max = opts2.maxAttempts ?? DEFAULT_MAX_ATTEMPTS;
       const now = Date.now();
       const truncated = error.length > 1024 ? error.slice(0, 1024) + '…' : error;
+      // v4.5 Phase 7 — optional cooldown delays re-claim. When set,
+      // we stash `now + cooldownMs` in `claim_expires_at` while
+      // status='pending'. The claim picker filters out pending rows
+      // whose claim_expires_at is in the future (added below). Bus
+      // poll loop will pick the row up naturally once cooldown
+      // elapses — no explicit sleep needed.
+      const cooldownUntil = opts2.cooldownMs && opts2.cooldownMs > 0
+        ? now + opts2.cooldownMs
+        : null;
       const tx = db.transaction((): void => {
         const row = db
           .prepare('SELECT attempts FROM trigger_events WHERE id = ?')
@@ -261,11 +275,11 @@ export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
             `UPDATE trigger_events
                 SET status           = 'pending',
                     claim_owner      = NULL,
-                    claim_expires_at = NULL,
+                    claim_expires_at = ?,
                     last_error       = ?,
                     updated_at       = ?
               WHERE id = ?`,
-          ).run(truncated, now, eventId);
+          ).run(cooldownUntil, truncated, now, eventId);
         }
       });
       tx();

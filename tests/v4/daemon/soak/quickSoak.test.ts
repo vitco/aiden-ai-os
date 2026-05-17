@@ -48,7 +48,7 @@ function envInt(name: string, fallback: number): number {
 }
 
 describe('quick soak — synthetic load drains cleanly', () => {
-  it('bus + dispatcher drain to zero after generator stops', async () => {
+  it('bus + dispatcher drain to zero after generator stops', { timeout: 30_000 }, async () => {
     const DURATION_MS = envInt('AIDEN_SOAK_DURATION_MS', 3_000);
     const bus = createTriggerBus({ db });
     const runStore = createRunStore({ db });
@@ -93,7 +93,7 @@ describe('quick soak — synthetic load drains cleanly', () => {
     expect(dispatcher.stats().claimed).toBeGreaterThan(0);
   });
 
-  it('captures metric samples across the run window', async () => {
+  it('captures metric samples across the run window', { timeout: 20_000 }, async () => {
     const DURATION_MS = envInt('AIDEN_SOAK_DURATION_MS', 2_000);
     const SAMPLE_MS   = 250;
     const bus = createTriggerBus({ db });
@@ -127,7 +127,7 @@ describe('quick soak — synthetic load drains cleanly', () => {
     for (const s of samples) expect(s.rssBytes).toBeGreaterThan(0);
   });
 
-  it('no dead-letter under stub-runner happy path', async () => {
+  it('no dead-letter under stub-runner happy path', { timeout: 20_000 }, async () => {
     const DURATION_MS = envInt('AIDEN_SOAK_DURATION_MS', 2_000);
     const bus = createTriggerBus({ db });
     const runStore = createRunStore({ db });

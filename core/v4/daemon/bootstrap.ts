@@ -74,9 +74,15 @@ import { createEmailSeenStore } from './triggers/email/emailSeenStore';
 // v4.5 Phase 5a — trigger dispatcher.
 import {
   createDispatcher,
+  createRealAgentRunner,
   makeRunner,
 } from './dispatcher';
-import type { Dispatcher, DaemonAgentRunner, DaemonAgentResult } from './dispatcher';
+import type {
+  AgentBuilder,
+  Dispatcher,
+  DaemonAgentRunner,
+  DaemonAgentResult,
+} from './dispatcher';
 // v4.5 Phase 5b — cron migration to SQLite + daemon-mode emitter.
 import { runCronMigration } from './cron/migration';
 import { createCronEmitter } from './cron/cronEmitter';
@@ -161,6 +167,26 @@ export interface BootstrapOptions {
    * init line above the chat prompt.
    */
   log?: (level: 'info' | 'warn' | 'error', msg: string) => void;
+  /**
+   * v4.5 Phase 7 — caller-injected agent builder. When provided,
+   * the dispatcher uses `createRealAgentRunner` to invoke
+   * `AidenAgent.runConversation` per claim. When omitted, the
+   * Phase 5a placeholder runner is used (still useful for rails-
+   * only integration + environments without a configured provider).
+   *
+   * The CLI's `main()` is the natural call site: it already owns
+   * agent construction for the REPL, so it can pass an
+   * AgentBuilder that mirrors the REPL's `AidenAgent` construction
+   * with the daemon-specific hooks plumbed in.
+   */
+  agentBuilder?: AgentBuilder;
+  /**
+   * v4.5 Phase 7 — persisted-default model. Last leg of the
+   * `trigger spec → AIDEN_DAEMON_MODEL → persisted` chain. CLI
+   * loads this from its config layer; daemon mode doesn't read
+   * config files directly to keep import direction clean.
+   */
+  persistedDefaultModel?: { provider: string; model: string };
 }
 
 /**
@@ -516,21 +542,25 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
     // functional NOW; the runner adapter is the last seam.
     let dispatcher: Dispatcher | null = null;
     try {
-      dispatcher = createDispatcher({
-        triggerBus,
-        runStore,
-        db,
-        ownerId:       tracker.instanceId,
-        instanceId:    tracker.instanceId,
-        workerCount:   1,                   // Q-P5-1(a)
-        runnerFactory: (): DaemonAgentRunner => makeRunner(async (input) => {
-          // Phase 5a placeholder runner. Marks the run completed
-          // with finishReason='stop' after creating the run row +
-          // emitting a single placeholder event. The real runner
-          // (AidenAgent.runConversation) will be wired by the
-          // bootstrap-CLI integration step that owns the agent
-          // construction. Until then, the bus / dispatch / lease
-          // / markDone path is fully exercised end-to-end.
+      // v4.5 Phase 7 — runner selection: real agent when builder
+      // injected, placeholder otherwise. Both paths exercise the
+      // full bus / claim / lease / markDone / run_events plumbing;
+      // the difference is whether real `AidenAgent.runConversation`
+      // fires or just an immediate stop.
+      const runnerFactory: () => DaemonAgentRunner = opts.agentBuilder
+        ? () => createRealAgentRunner({
+            db, runStore, resourceRegistry,
+            log, agentBuilder: opts.agentBuilder!,
+            persistedDefault: opts.persistedDefaultModel,
+          })
+        : () => makeRunner(async (input) => {
+          // Phase 5a placeholder runner — used when no AgentBuilder
+          // is injected (e.g. user has no provider configured yet).
+          // Marks the run completed with finishReason='stop' after
+          // creating the run row + emitting a placeholder event.
+          // The bus / dispatch / lease / markDone path is fully
+          // exercised end-to-end so soak harness + tests still
+          // work without a real model wired.
           const runId = runStore.create({
             sessionId:      input.sessionId,
             instanceId:     input.instanceId,
@@ -547,11 +577,19 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
           runStore.setStatus(runId, 'completed', { finishReason: 'stop' });
           const result: DaemonAgentResult = { runId, finishReason: 'stop' };
           return result;
-        }),
+        });
+      dispatcher = createDispatcher({
+        triggerBus,
+        runStore,
+        db,
+        ownerId:       tracker.instanceId,
+        instanceId:    tracker.instanceId,
+        workerCount:   1,                   // Q-P5-1(a)
+        runnerFactory,
         log,
       });
       dispatcher.start();
-      log('info', `[dispatcher] active workerCount=1`);
+      log('info', `[dispatcher] active workerCount=1 runner=${opts.agentBuilder ? 'real' : 'placeholder'}`);
     } catch (e) {
       log('error', `[dispatcher] start failed: ${e instanceof Error ? e.message : String(e)}`);
       dispatcher = null;

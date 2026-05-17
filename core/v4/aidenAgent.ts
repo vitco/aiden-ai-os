@@ -148,6 +148,18 @@ export interface AidenAgentOptions {
   provider:                ProviderAdapter;
   toolExecutor:            ToolExecutor;
   tools:                   ToolSchema[];
+  /**
+   * v4.5 Phase 7 — explicit per-instance session id. When set, the
+   * agent reads it via the existing `this.sessionId` access path
+   * (line 751–752) so v4.4 docker session reuse + v4.3 browser
+   * observer + v4.2 TurnState all key correctly per session.
+   *
+   * Daemon-mode turns build this via `buildTriggerSessionId(...)`.
+   * REPL turns leave it undefined → the existing 'session' fallback
+   * remains the interactive-mode key. Setting it does NOT change
+   * REPL behaviour for callers that don't pass it.
+   */
+  sessionId?:              string;
   /** Hard cap on iterations through the loop. Default 90. */
   maxTurns?:               number;
   fallback?:               FallbackStrategy;
@@ -450,6 +462,15 @@ export class AidenAgent {
     this.onPromptBuilt            = opts.onPromptBuilt;
     this.onProviderRequestStart   = opts.onProviderRequestStart;
     this.lookupSkillRequiredTools = opts.lookupSkillRequiredTools;
+    // v4.5 Phase 7 — explicit sessionId. Existing access path
+    // `(this as { sessionId?: string }).sessionId` at line 751–752
+    // already reads from `this.sessionId`; setting it here keys
+    // docker / browser / TurnState per session for daemon-mode
+    // turns. Interactive REPL callers don't pass this and continue
+    // hitting the 'session' fallback.
+    if (typeof opts.sessionId === 'string' && opts.sessionId.length > 0) {
+      (this as { sessionId?: string }).sessionId = opts.sessionId;
+    }
     // Phase v4.1.2-slice3: optional health registry (constructor-
     // injected per the slice3 decision tree — no singleton). When
     // wired, the caller already plumbed trackers into each subsystem

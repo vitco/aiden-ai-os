@@ -66,6 +66,7 @@ import type {
   DaemonAgentRunner,
   TriggerInvocationContext,
 } from './agentRunner';
+import { computeRetryCooldownMs } from './realAgentRunner';
 
 // ── Defaults ───────────────────────────────────────────────────────────────
 
@@ -277,6 +278,9 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
       if (missing.length > 0 && spec?.prompt_template) {
         const reason = `trigger_misconfigured: template references undefined vars: ${missing.join(', ')}`;
         log('warn', `[dispatcher] ${reason} (eventId=${event.id} trigger=${event.sourceKey})`);
+        // misconfigured = permanent failure; no cooldown needed since
+        // retry won't help, but we still call markFailed (which will
+        // dead-letter after maxAttempts).
         opts.triggerBus.markFailed(event.id, event.claimToken, reason, { maxAttempts });
         _stats.misconfigured += 1;
         _stats.failed        += 1;
@@ -314,7 +318,10 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
       // Map finishReason to bus action.
       if (result.finishReason === 'error') {
         const errMsg = result.error ?? 'agent reported error finish';
-        opts.triggerBus.markFailed(event.id, event.claimToken, errMsg, { maxAttempts });
+        opts.triggerBus.markFailed(event.id, event.claimToken, errMsg, {
+          maxAttempts,
+          cooldownMs: computeRetryCooldownMs(event.attempts),
+        });
         _stats.failed += 1;
         if (event.attempts >= maxAttempts) _stats.deadLetter += 1;
         return;
@@ -327,7 +334,10 @@ export function createDispatcher(opts: CreateDispatcherOptions): Dispatcher {
       const msg = e instanceof Error ? (e.stack ?? e.message) : String(e);
       log('error', `[dispatcher] worker threw eventId=${event.id}: ${msg}`);
       try {
-        opts.triggerBus.markFailed(event.id, event.claimToken, msg.slice(0, 500), { maxAttempts });
+        opts.triggerBus.markFailed(event.id, event.claimToken, msg.slice(0, 500), {
+          maxAttempts,
+          cooldownMs: computeRetryCooldownMs(event.attempts),
+        });
       } catch { /* bus may be in a weird state; swallow */ }
       _stats.failed += 1;
       if (event.attempts >= maxAttempts) _stats.deadLetter += 1;

@@ -57,3 +57,47 @@ export type {
   DaemonAgentRunner,
   TriggerInvocationContext,
 } from './agentRunner';
+
+// v4.5 Phase 7 — real agent runner + dependencies.
+export {
+  createRealAgentRunner,
+  computeRetryCooldownMs,
+  RETRY_DECISION,
+} from './realAgentRunner';
+export type {
+  AgentBuilder,
+  CreateRealAgentRunnerOptions,
+} from './realAgentRunner';
+export {
+  resolveDaemonModel,
+} from './resolveModel';
+export type {
+  ResolvedDaemonModel,
+  ResolveDaemonModelInput,
+} from './resolveModel';
+export {
+  buildDaemonApprovalCallbacks,
+  decideForPolicy,
+  isDaemonApprovalPolicy,
+  DEFAULT_DAEMON_APPROVAL_POLICY,
+} from './daemonApproval';
+export type {
+  DaemonApprovalPolicy,
+} from './daemonApproval';
+export {
+  createDailyBudgetTracker,
+  utcDateKey,
+} from './dailyBudgetTracker';
+export type {
+  DailyBudgetTracker,
+  DailyBudgetSnapshot,
+} from './dailyBudgetTracker';
+export {
+  evaluatePreTurn,
+  consumePostTurn,
+  createPerTurnBudgetWatcher,
+} from './budgetGate';
+export type {
+  PreTurnVerdict,
+  PerTurnBudgetWatcher,
+} from './budgetGate';
