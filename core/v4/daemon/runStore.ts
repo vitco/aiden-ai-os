@@ -53,6 +53,22 @@ export interface RunStore {
   get(runId: number): RunRow | null;
   /** Diagnostic — event count for a run. */
   countEvents(runId: number): number;
+  /**
+   * v4.5 Phase 6 — recent runs with optional filters. Backs the
+   * `aiden runs list` CLI surface.
+   *
+   * Filters are additive; omitting any returns the unfiltered slice.
+   * `source` joins to trigger_events to filter by trigger source
+   * (file / webhook / email / schedule / manual).
+   */
+  listRecent(opts?: {
+    limit?:    number;          // default 50
+    status?:   RunStatus;
+    source?:   string;          // trigger_events.source filter
+    sessionIdPrefix?: string;   // useful for `aiden trigger runs <id>`
+  }): RunRow[];
+  /** List events for a run, ordered by ts ascending. */
+  listEvents(runId: number, limit?: number): Array<{ ts: number; kind: string; payload: string }>;
 }
 
 export interface CreateRunStoreOptions {
@@ -113,6 +129,39 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
         .prepare('SELECT COUNT(*) AS c FROM run_events WHERE run_id = ?')
         .get(runId) as { c: number };
       return r.c;
+    },
+    listRecent(opts2 = {}) {
+      const limit = Math.max(1, Math.min(opts2.limit ?? 50, 1000));
+      const whereParts: string[] = [];
+      const params: Array<string | number> = [];
+      if (opts2.status) {
+        whereParts.push('r.status = ?');
+        params.push(opts2.status);
+      }
+      if (opts2.source) {
+        whereParts.push('te.source = ?');
+        params.push(opts2.source);
+      }
+      if (opts2.sessionIdPrefix) {
+        whereParts.push('r.session_id LIKE ?');
+        params.push(`${opts2.sessionIdPrefix}%`);
+      }
+      const where = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : '';
+      const sql = `
+        SELECT r.* FROM runs r
+        LEFT JOIN trigger_events te ON r.trigger_event_id = te.id
+        ${where}
+        ORDER BY r.started_at DESC
+        LIMIT ?`;
+      params.push(limit);
+      const rows = db.prepare(sql).all(...params) as RunRowSql[];
+      return rows.map(rowToTs);
+    },
+    listEvents(runId, limit = 200) {
+      const rows = db.prepare(
+        `SELECT ts, kind, payload FROM run_events WHERE run_id = ? ORDER BY ts ASC LIMIT ?`,
+      ).all(runId, Math.max(1, Math.min(limit, 5000))) as Array<{ ts: number; kind: string; payload: string }>;
+      return rows;
     },
   };
 }

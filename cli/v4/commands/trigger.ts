@@ -204,9 +204,64 @@ export async function runTriggerSubcommand(
       out(`trigger test event inserted: id=${result.id} inserted=${result.inserted}\n`);
       return 0;
     }
+    case 'logs': {
+      // v4.5 Phase 6 — tail recent run_events for runs whose sessionId
+      // starts with `trigger:<source>:<id>:`. Surfaces what the agent
+      // did on each fire (or what the deliverOnly stub logged).
+      const id = args[0];
+      if (!id) { err('trigger logs: id required\n'); return 2; }
+      const trig = db.prepare('SELECT id, source, name FROM triggers WHERE id = ?').get(id) as { id: string; source: string; name: string } | undefined;
+      if (!trig) { err(`trigger logs: not found: ${id}\n`); return 1; }
+      const prefix = `trigger:${trig.source}:${id}:`;
+      const rows = db.prepare(
+        `SELECT re.ts, re.kind, re.payload, r.id AS run_id
+           FROM run_events re
+           JOIN runs r ON re.run_id = r.id
+          WHERE r.session_id LIKE ?
+          ORDER BY re.ts DESC
+          LIMIT 50`,
+      ).all(`${prefix}%`) as Array<{ ts: number; kind: string; payload: string; run_id: number }>;
+      if (rows.length === 0) {
+        out(`No run events recorded for trigger ${id} (${trig.name}).\n`);
+        return 0;
+      }
+      out(`Last ${rows.length} event(s) for trigger ${id} (${trig.name}):\n`);
+      for (const r of rows.reverse()) {       // chronological order for tail-like output
+        const ts = new Date(r.ts).toISOString().slice(0, 19) + 'Z';
+        const payloadStr = r.payload.length > 120 ? r.payload.slice(0, 120) + '…' : r.payload;
+        out(`  [${ts}] run=${r.run_id} ${r.kind.padEnd(20)} ${payloadStr}\n`);
+      }
+      return 0;
+    }
+    case 'runs': {
+      // v4.5 Phase 6 — list runs that originated from this trigger.
+      const id = args[0];
+      if (!id) { err('trigger runs: id required\n'); return 2; }
+      const trig = db.prepare('SELECT id, source, name FROM triggers WHERE id = ?').get(id) as { id: string; source: string; name: string } | undefined;
+      if (!trig) { err(`trigger runs: not found: ${id}\n`); return 1; }
+      const prefix = `trigger:${trig.source}:${id}:`;
+      const rows = db.prepare(
+        `SELECT id, status, finish_reason, started_at, completed_at
+           FROM runs
+          WHERE session_id LIKE ?
+          ORDER BY started_at DESC
+          LIMIT 50`,
+      ).all(`${prefix}%`) as Array<{ id: number; status: string; finish_reason: string | null; started_at: number; completed_at: number | null }>;
+      if (rows.length === 0) {
+        out(`No runs recorded for trigger ${id} (${trig.name}).\n`);
+        return 0;
+      }
+      out(`${'runId'.padEnd(6)}  ${'status'.padEnd(11)}  ${'finish'.padEnd(11)}  started\n`);
+      for (const r of rows) {
+        const started = new Date(r.started_at).toISOString().slice(0, 19) + 'Z';
+        out(`${String(r.id).padEnd(6)}  ${r.status.padEnd(11)}  ${(r.finish_reason ?? '-').padEnd(11)}  ${started}\n`);
+      }
+      out(`\n${rows.length} run${rows.length === 1 ? '' : 's'} for trigger ${id}\n`);
+      return 0;
+    }
     default:
       err(`Unknown trigger action: ${action}\n`);
-      err('Actions: add, list, show <id>, remove <id>, enable <id>, disable <id>, test <id>\n');
+      err('Actions: add, list, show <id>, remove <id>, enable <id>, disable <id>, test <id>, logs <id>, runs <id>\n');
       return 2;
   }
 }

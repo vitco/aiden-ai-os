@@ -274,7 +274,37 @@ async function handleWebhookRequest(ctx: HandlerCtx): Promise<void> {
   const cached = opts.idempotencyStore.get('webhook', idemKey);
   if (cached) {
     stats.duplicates += 1;
-    res.status(cached.statusCode).type('application/json').send(cached.responseJson);
+    // v4.5 Phase 6 — idempotency-replay cosmetic fix.
+    // The cached body was stamped with `deduplicated: false` on the
+    // first (successful) accept. Re-issuing it verbatim on a replay
+    // made every retried delivery look like a brand-new accept,
+    // which confused operators investigating duplicate POSTs. Inject
+    // `deduplicated: true` dynamically here so retries report the
+    // truth without a schema change.
+    let replayBody = cached.responseJson;
+    try {
+      const parsed = JSON.parse(cached.responseJson) as Record<string, unknown>;
+      parsed.deduplicated = true;
+      replayBody = JSON.stringify(parsed);
+    } catch { /* malformed cache entry — fall back to verbatim */ }
+    res.status(cached.statusCode).type('application/json').send(replayBody);
+    // Log the replay in webhook_deliveries with the corrected body so
+    // forensic search ("show me all deduped replays") works.
+    try {
+      deliveries.record({
+        routeId,
+        deliveryId:        spec.spec.hmacFormat === 'github'
+          ? (pickHeaderStr(req.headers as Record<string, string | string[] | undefined>, 'x-github-delivery') ?? null)
+          : null,
+        signatureVerified: true,
+        statusCode:        cached.statusCode,
+        responseBody:      replayBody,
+        clientIp,
+        headers:           req.headers as Record<string, string | string[] | undefined>,
+        bodyHash,
+        triggerEventId:    null,
+      });
+    } catch { /* never let delivery logging crash the replay path */ }
     return;
   }
 

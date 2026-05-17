@@ -32,13 +32,21 @@ import * as os   from 'node:os';
 import type { SlashCommand, SlashCommandContext } from '../commandRegistry';
 import { renderTable } from '../table';
 import {
-  createJob, listJobs, getJob,
+  createJob, createJobAsync, listJobs, getJob,
   pauseJob, resumeJob, deleteJob, triggerJob,
   awaitPendingSaves,
   getDiagnostics,
   AIDEN_CRON_BUILD,
   type CronJob,
 } from '../../../core/cronManager';
+// v4.5 Phase 6 — daemon-mode scheduled_workflows read-through.
+import {
+  daemonDbPath,
+  openDaemonDb,
+} from '../../../core/v4/daemon';
+import { jobToRow } from '../../../core/v4/daemon/cron/cronBridge';
+import { isMisfirePolicy } from '../../../core/v4/daemon/cron/misfirePolicy';
+import { resolveAidenRoot } from '../../../core/v4/paths';
 
 const NAME_RE      = /^[A-Za-z0-9_-]+$/;
 const LOGS_DIR     = path.join(os.homedir(), '.aiden', 'cron-logs');
@@ -285,6 +293,267 @@ async function cmdRemove(ctx: SlashCommandContext, args: string[]): Promise<void
   } else {
     ctx.display.printError('Remove failed.');
   }
+}
+
+// ── v4.5 Phase 6 — top-level `aiden cron` CLI surface ──────────────────────
+//
+// Parallel to runTriggerSubcommand / runDaemonSubcommand. Reuses the
+// cronManager API for JSON I/O (legacy source of truth) and reads the
+// SQLite scheduled_workflows table when AIDEN_DAEMON=1 to surface the
+// daemon-mode emitter's last_fired_at / misfire_policy.
+
+export interface CronCliOptions {
+  writeOut?: (s: string) => void;
+  writeErr?: (s: string) => void;
+}
+
+const cronNoopOut = (s: string): void => { process.stdout.write(s); };
+const cronNoopErr = (s: string): void => { process.stderr.write(s); };
+
+export interface CronAddArgs {
+  name?:           string;
+  label?:          string;          // alias accepted by the Commander wire
+  schedule?:       string;
+  command?:        string;
+  timezone?:       string;
+  misfirePolicy?:  string;
+  promptTemplate?: string;
+  deliverOnly?:    boolean;
+}
+
+interface SqlWorkflowSummary {
+  id:               string;
+  misfire_policy:   string;
+  last_fired_at:    number | null;
+  next_fire_at:     number | null;
+}
+
+/** Read the scheduled_workflows rows for the daemon-mode view. */
+function readScheduledWorkflows(): Map<string, SqlWorkflowSummary> {
+  const out: Map<string, SqlWorkflowSummary> = new Map();
+  try {
+    const root = resolveAidenRoot();
+    const db = openDaemonDb(daemonDbPath(root));
+    const rows = db.prepare(
+      `SELECT id, misfire_policy, last_fired_at, next_fire_at FROM scheduled_workflows`,
+    ).all() as SqlWorkflowSummary[];
+    for (const r of rows) out.set(r.id, r);
+  } catch { /* daemon DB absent — return empty map */ }
+  return out;
+}
+
+/** Write/refresh a scheduled_workflows row from a CronJobV2. Idempotent. */
+function upsertScheduledWorkflow(job: CronJob, misfirePolicy?: string, promptTemplate?: string, deliverOnly?: boolean): void {
+  try {
+    const root = resolveAidenRoot();
+    const db = openDaemonDb(daemonDbPath(root));
+    const row = jobToRow(job as CronJob);
+    const policy = misfirePolicy && isMisfirePolicy(misfirePolicy) ? misfirePolicy : row.misfire_policy;
+    db.prepare(
+      `INSERT INTO scheduled_workflows
+         (id, name, schedule_expression, timezone, enabled, payload_json,
+          prompt_template, deliver_only, misfire_policy, fire_rate_limit,
+          catch_up_limit, grace_ms, last_fired_at, next_fire_at,
+          created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         name = excluded.name,
+         schedule_expression = excluded.schedule_expression,
+         enabled = excluded.enabled,
+         payload_json = excluded.payload_json,
+         prompt_template = excluded.prompt_template,
+         deliver_only = excluded.deliver_only,
+         misfire_policy = excluded.misfire_policy,
+         updated_at = excluded.updated_at`,
+    ).run(
+      row.id, row.name, row.schedule_expression, row.timezone, row.enabled,
+      row.payload_json,
+      promptTemplate ?? row.prompt_template,
+      deliverOnly === true ? 1 : 0,
+      policy,
+      row.fire_rate_limit, row.catch_up_limit, row.grace_ms,
+      row.last_fired_at, row.next_fire_at,
+      row.created_at, row.updated_at,
+    );
+  } catch { /* daemon DB absent — JSON path still wrote the job */ }
+}
+
+/** Delete a scheduled_workflows row. Best-effort. */
+function deleteScheduledWorkflow(id: string): void {
+  try {
+    const root = resolveAidenRoot();
+    const db = openDaemonDb(daemonDbPath(root));
+    db.prepare(`DELETE FROM scheduled_workflows WHERE id = ?`).run(id);
+  } catch { /* noop */ }
+}
+
+/** Set enabled = 0/1 on scheduled_workflows. Best-effort. */
+function setWorkflowEnabled(id: string, enabled: number): void {
+  try {
+    const root = resolveAidenRoot();
+    const db = openDaemonDb(daemonDbPath(root));
+    db.prepare(
+      `UPDATE scheduled_workflows SET enabled = ?, updated_at = ? WHERE id = ?`,
+    ).run(enabled, Date.now(), id);
+  } catch { /* noop */ }
+}
+
+/**
+ * Top-level `aiden cron` dispatcher. Mirrors runTriggerSubcommand shape.
+ */
+export async function runCronSubcommand(
+  action: string,
+  args:   string[],
+  argv:   Record<string, unknown>,
+  opts:   CronCliOptions = {},
+): Promise<number> {
+  const out = opts.writeOut ?? cronNoopOut;
+  const err = opts.writeErr ?? cronNoopErr;
+
+  switch (action) {
+    case 'add':                return cmdCliAdd(argv as unknown as CronAddArgs, out, err);
+    case 'list':               return cmdCliList(out);
+    case 'show':               return cmdCliShow(args[0], out, err);
+    case 'remove': case 'rm':  return cmdCliRemove(args[0], out, err);
+    case 'enable':             return cmdCliEnable(args[0], out, err);
+    case 'disable':            return cmdCliDisable(args[0], out, err);
+    case 'run':                return cmdCliRun(args[0], out, err);
+    case 'logs':               return cmdCliLogs(args[0], out, err);
+    default:
+      err(`Unknown cron action: ${action}\n`);
+      err('Actions: add, list, show <id>, remove <id>, enable <id>, disable <id>, run <id>, logs <id>\n');
+      return 2;
+  }
+}
+
+async function cmdCliAdd(a: CronAddArgs, out: (s: string) => void, err: (s: string) => void): Promise<number> {
+  const name = a.name ?? a.label;
+  if (!name || !NAME_RE.test(name)) {
+    err('cron add: --label is required (alphanumeric, dash, underscore only)\n');
+    return 2;
+  }
+  if (!a.schedule || a.schedule.length === 0) {
+    err('cron add: --schedule is required (cron expr, "every Nm/h/d", or ISO timestamp)\n');
+    return 2;
+  }
+  if (!a.command || a.command.length === 0) {
+    err('cron add: --command is required\n');
+    return 2;
+  }
+  if (a.misfirePolicy && !isMisfirePolicy(a.misfirePolicy)) {
+    err(`cron add: invalid --misfire-policy "${a.misfirePolicy}" (skip_stale|run_once_if_late|catch_up_with_limit|manual_review)\n`);
+    return 2;
+  }
+  if (resolveJob(name)) {
+    err(`cron add: a job named "${name}" already exists\n`);
+    return 2;
+  }
+  let job: CronJob;
+  try { job = await createJobAsync(name, a.schedule, a.command); }
+  catch (e) { err(`cron add: ${e instanceof Error ? e.message : String(e)}\n`); return 2; }
+  // Mirror to SQLite for daemon-mode visibility.
+  upsertScheduledWorkflow(job, a.misfirePolicy, a.promptTemplate, a.deliverOnly === true);
+  await awaitPendingSaves();
+  out(`cron added: ${job.id} (${job.description})\n`);
+  out(`  schedule:       ${job.schedule}\n`);
+  out(`  command:        ${job.action}\n`);
+  if (a.misfirePolicy) out(`  misfire policy: ${a.misfirePolicy}\n`);
+  if (a.deliverOnly)   out(`  deliver_only:   true (daemon will skip the agent loop)\n`);
+  if (job.nextRun)     out(`  next run:       ${fmtTime(job.nextRun)}\n`);
+  return 0;
+}
+
+function cmdCliList(out: (s: string) => void): number {
+  const jobs = listJobs();
+  if (jobs.length === 0) {
+    out('No cron jobs.\n');
+    return 0;
+  }
+  const sqlView = readScheduledWorkflows();
+  out(`${'id'.padEnd(10)}  ${'enabled'.padEnd(8)}  ${'schedule'.padEnd(20)}  ${'misfire'.padEnd(20)}  ${'lastRun'.padEnd(20)}  name\n`);
+  for (const j of jobs) {
+    const sql = sqlView.get(j.id);
+    const id = j.id.slice(0, 10).padEnd(10);
+    const enabled = (j.enabled ? 'on' : 'off').padEnd(8);
+    const sched = (j.schedule || '').slice(0, 20).padEnd(20);
+    const policy = (sql?.misfire_policy ?? '-').padEnd(20);
+    const lastRun = (j.lastRun ? fmtTime(j.lastRun) : '-').padEnd(20);
+    out(`${id}  ${enabled}  ${sched}  ${policy}  ${lastRun}  ${j.description}\n`);
+  }
+  out(`\n${jobs.length} job${jobs.length === 1 ? '' : 's'}\n`);
+  return 0;
+}
+
+function cmdCliShow(ref: string | undefined, out: (s: string) => void, err: (s: string) => void): number {
+  if (!ref) { err('cron show: id or name required\n'); return 2; }
+  const job = resolveJob(ref);
+  if (!job) { err(`cron show: not found: ${ref}\n`); return 1; }
+  const sqlView = readScheduledWorkflows().get(job.id);
+  out(JSON.stringify({
+    jsonView: job,
+    sqlView:  sqlView ?? null,
+  }, null, 2) + '\n');
+  return 0;
+}
+
+async function cmdCliRemove(ref: string | undefined, out: (s: string) => void, err: (s: string) => void): Promise<number> {
+  if (!ref) { err('cron remove: id or name required\n'); return 2; }
+  const job = resolveJob(ref);
+  if (!job) { err(`cron remove: not found: ${ref}\n`); return 1; }
+  if (!deleteJob(job.id)) { err('cron remove: delete failed\n'); return 1; }
+  deleteScheduledWorkflow(job.id);
+  await awaitPendingSaves();
+  out(`cron removed: ${job.id} (${job.description})\n`);
+  return 0;
+}
+
+function cmdCliEnable(ref: string | undefined, out: (s: string) => void, err: (s: string) => void): number {
+  if (!ref) { err('cron enable: id or name required\n'); return 2; }
+  const job = resolveJob(ref);
+  if (!job) { err(`cron enable: not found: ${ref}\n`); return 1; }
+  if (!resumeJob(job.id)) { err('cron enable: enable failed\n'); return 1; }
+  setWorkflowEnabled(job.id, 1);
+  out(`cron enabled: ${job.id}\n`);
+  return 0;
+}
+
+function cmdCliDisable(ref: string | undefined, out: (s: string) => void, err: (s: string) => void): number {
+  if (!ref) { err('cron disable: id or name required\n'); return 2; }
+  const job = resolveJob(ref);
+  if (!job) { err(`cron disable: not found: ${ref}\n`); return 1; }
+  if (!pauseJob(job.id)) { err('cron disable: disable failed\n'); return 1; }
+  setWorkflowEnabled(job.id, 0);
+  out(`cron disabled: ${job.id}\n`);
+  return 0;
+}
+
+async function cmdCliRun(ref: string | undefined, out: (s: string) => void, err: (s: string) => void): Promise<number> {
+  if (!ref) { err('cron run: id or name required\n'); return 2; }
+  const job = resolveJob(ref);
+  if (!job) { err(`cron run: not found: ${ref}\n`); return 1; }
+  out(`cron run: triggering ${job.id} (${job.description})...\n`);
+  const ok = await triggerJob(job.id);
+  if (!ok) { err('cron run: trigger failed\n'); return 1; }
+  const fresh = getJob(job.id);
+  out(`cron run: done — lastResult=${fresh?.lastResult ?? 'unknown'}\n`);
+  return 0;
+}
+
+async function cmdCliLogs(ref: string | undefined, out: (s: string) => void, err: (s: string) => void): Promise<number> {
+  if (!ref) { err('cron logs: id or name required\n'); return 2; }
+  const job = resolveJob(ref);
+  if (!job) { err(`cron logs: not found: ${ref}\n`); return 1; }
+  const logPath = path.join(LOGS_DIR, `${job.id}.log`);
+  if (!fs.existsSync(logPath)) {
+    out(`No log yet for ${job.id} (${job.description}).\n`);
+    return 0;
+  }
+  const text = await fsp.readFile(logPath, 'utf-8');
+  const lines = text.split(/\r?\n/);
+  const tail = lines.slice(Math.max(0, lines.length - TAIL_LINES - 1));
+  out(`--- ${logPath} (last ${tail.length} lines) ---\n`);
+  out(tail.join('\n') + '\n');
+  return 0;
 }
 
 // ── SlashCommand definition ────────────────────────────────────────────────

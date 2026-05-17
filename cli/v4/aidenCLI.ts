@@ -520,6 +520,41 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
       process.exit(code);
     });
 
+  // v4.5 Phase 6 — `aiden cron` top-level surface (mirrors slash command).
+  program
+    .command('cron <action> [args...]')
+    .description('Scheduled jobs. Actions: add, list, show, remove, enable, disable, run, logs.')
+    .option('--label <name>',            'job label (alphanumeric/dash/underscore)')
+    .option('--schedule <expr>',         'cron expr ("0 9 * * *") / interval ("every 5m") / ISO timestamp')
+    .option('--command <cmd>',           'shell command to run')
+    .option('--timezone <tz>',           'IANA timezone (default UTC)')
+    .option('--misfire-policy <policy>', 'skip_stale | run_once_if_late | catch_up_with_limit | manual_review')
+    .option('--prompt-template <tpl>',   'render template instead of running raw command (daemon mode)')
+    .option('--deliver-only',            'daemon skips the agent loop on fire')
+    .action(async (action: string, posArgs: string[] | undefined, cmdObj: Record<string, unknown>) => {
+      const { runCronSubcommand } = await import('./commands/cron');
+      const code = await runCronSubcommand(action, posArgs ?? [], cmdObj, {
+        writeOut: opts.writeOut,
+      });
+      process.exit(code);
+    });
+
+  // v4.5 Phase 6 — `aiden runs` surface (daemon run history).
+  program
+    .command('runs <action> [args...]')
+    .description('Daemon runs. Actions: list, show <id>, interrupt <id>, stats.')
+    .option('--limit <n>',    'list: max rows (default 50)', (v: string) => Number.parseInt(v, 10))
+    .option('--source <src>', 'list: filter by trigger source (file/webhook/email/schedule/manual)')
+    .option('--status <s>',   'list: filter by status (queued/running/completed/failed/cancelled/interrupted)')
+    .option('--trigger <prefix>', 'list: sessionId prefix (e.g. "trigger:file:<id>:")')
+    .action(async (action: string, posArgs: string[] | undefined, cmdObj: Record<string, unknown>) => {
+      const { runRunsSubcommand } = await import('./commands/runs');
+      const code = await runRunsSubcommand(action, posArgs ?? [], cmdObj, {
+        writeOut: opts.writeOut,
+      });
+      process.exit(code);
+    });
+
   program
     .command('mcp <action>')
     .description(
