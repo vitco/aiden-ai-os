@@ -126,11 +126,35 @@ export const SPAWN_SUB_AGENT_SCHEMA: ToolSchema = {
       toolsets: {
         type: 'array',
         description:
-          'Requested toolsets for the child. Will be intersected with your own ' +
-          'enabled toolsets — the child cannot exceed your capabilities. Omit ' +
-          'to let the child inherit your full intersected set (after blocklist ' +
-          'removal).',
-        items: { type: 'string' },
+          'OPTIONAL — when present, RESTRICTS the child to specific toolsets. ' +
+          'OMIT this field to let the child inherit your full toolset (recommended ' +
+          'for most cases — children inherit your capabilities minus the hard ' +
+          'blocklist). Each entry MUST be one of the enumerated valid names ' +
+          'below; invalid names get stripped, and if every requested name is ' +
+          'invalid the child falls back to inheriting your full toolset (with a ' +
+          'warning logged). The child can never exceed your capabilities — this ' +
+          'parameter only narrows them.',
+        items: {
+          type: 'string',
+          // v4.6 Phase 1 — enum reflects the actual toolset string
+          // values registered in tools/v4/. Kept in sync with the
+          // registry; new toolsets ship by being added to a tool's
+          // `toolset` field AND to this list.
+          enum: [
+            'browser',
+            'execute',
+            'files',
+            'mcp',
+            'memory',
+            'process',
+            'sessions',
+            'skills',
+            'subagent',
+            'system',
+            'terminal',
+            'web',
+          ],
+        },
       },
       maxIterations: {
         type: 'integer',

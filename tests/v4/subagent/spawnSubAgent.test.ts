@@ -516,6 +516,83 @@ describe('spawnSubAgent — v4.6 Phase 1 contract', () => {
     expect(callResults[0].meta!.toolName).toBe('file_read');
   });
 
+  // ──────────────────────────────────────────────────────────────────────
+  // Dispatch 2L — zero-tools-bug fallback
+  // ──────────────────────────────────────────────────────────────────────
+
+  it('17. invalid requestedToolsets → fallback to full parent set + warning logged', async () => {
+    const { logger, lines } = makeCapturingLogger();
+    const deps = { ...makeDeps(), logger: logger as never };
+    const result = await spawnSubAgent(
+      // 'functions' is the actual name the model passed in the real
+      // smoke test (an OpenAI tool-use vocabulary word, NOT an Aiden
+      // toolset). Strict filter strips it → fallback engages.
+      { goal: 'count files', toolsets: ['functions'] },
+      deps,
+      {},
+    );
+    expect(result.ok).toBe(true);
+    // Warning logged with the requested + valid lists.
+    const warn = lines.find((l) =>
+      l.level === 'warn' &&
+      typeof l.msg === 'string' &&
+      l.msg.includes('requested toolsets stripped to empty'),
+    );
+    expect(warn).toBeDefined();
+    expect(warn!.meta!.requested).toEqual(['functions']);
+    expect(Array.isArray(warn!.meta!.validParentToolsets)).toBe(true);
+    // Child's actual tools — the "child built" line shows fallback worked.
+    const built = lines.find((l) => l.msg === 'spawn_sub_agent child built');
+    expect(built).toBeDefined();
+    const names = built!.meta!.toolNames as string[];
+    expect(names.length).toBeGreaterThan(0);
+    expect(names).toContain('file_read');
+    expect(names).toContain('web_search');
+  });
+
+  it('18. partial-intersection requestedToolsets → keep valid subset, NO fallback', async () => {
+    const { logger, lines } = makeCapturingLogger();
+    const deps = { ...makeDeps(), logger: logger as never };
+    const result = await spawnSubAgent(
+      // 'files' is valid; 'invalid_name' is not. Strict filter
+      // keeps 'files' → intersection non-empty → fallback NOT engaged.
+      { goal: 'g', toolsets: ['files', 'invalid_name'] },
+      deps,
+      {},
+    );
+    expect(result.ok).toBe(true);
+    // NO fallback warning — partial intersection is the user's
+    // explicit narrowing intent.
+    const warn = lines.find((l) =>
+      l.level === 'warn' && typeof l.msg === 'string' &&
+      l.msg.includes('requested toolsets stripped to empty'),
+    );
+    expect(warn).toBeUndefined();
+    // Child tools include only the 'files' toolset members.
+    const built = lines.find((l) => l.msg === 'spawn_sub_agent child built');
+    const names = built!.meta!.toolNames as string[];
+    expect(names).toContain('file_read');
+    expect(names).toContain('file_write');
+    // 'web_search' toolset 'web' was NOT requested.
+    expect(names).not.toContain('web_search');
+  });
+
+  it('19. valid requestedToolsets → narrow as requested, no fallback', async () => {
+    const { logger, lines } = makeCapturingLogger();
+    const deps = { ...makeDeps(), logger: logger as never };
+    const result = await spawnSubAgent({ goal: 'g', toolsets: ['files'] }, deps, {});
+    expect(result.ok).toBe(true);
+    const warn = lines.find((l) =>
+      l.level === 'warn' && typeof l.msg === 'string' &&
+      l.msg.includes('requested toolsets stripped to empty'),
+    );
+    expect(warn).toBeUndefined();
+    const built = lines.find((l) => l.msg === 'spawn_sub_agent child built');
+    const names = built!.meta!.toolNames as string[];
+    expect(names).toContain('file_read');
+    expect(names).not.toContain('web_search');
+  });
+
   it('16. observability is no-op when logger + runStore absent (unit-test path)', () => {
     // Direct buildChildAgent without runStore or logger — used by the
     // schema-only unit tests. Must not throw.

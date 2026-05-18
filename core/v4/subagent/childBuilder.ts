@@ -165,9 +165,36 @@ export function buildChildAgent(
     const handler = deps.toolRegistry.get(name);
     if (handler?.toolset) parentToolsetNames.add(handler.toolset);
   }
-  const chosenToolsets: string[] = input.requestedToolsets && input.requestedToolsets.length > 0
+  let chosenToolsets: string[] = input.requestedToolsets && input.requestedToolsets.length > 0
     ? input.requestedToolsets.filter((t) => parentToolsetNames.has(t))
     : [...parentToolsetNames];
+
+  // v4.6 Phase 1 (Dispatch 2L) — zero-tools-bug fallback. When the
+  // model passes `toolsets: [...]` with values that DON'T match any
+  // real registry toolset (e.g. `["functions"]`, a name fabricated
+  // from the OpenAI tool-use vocabulary, or `["file_operations"]`, a
+  // skill name confused for a toolset), the strict filter strips all
+  // entries → `chosenToolsets` is `[]` → child gets ZERO tools → it
+  // hallucinates an answer rather than admit it can't do the work.
+  //
+  // Recover by inheriting the full parent set when the requested
+  // names ALL miss. Logs a warning so the operator sees what the
+  // model asked for and what real names exist. Partial intersections
+  // (some valid, some invalid) keep the valid subset — that's the
+  // user's explicit narrowing intent, not a bug.
+  if (
+    input.requestedToolsets && input.requestedToolsets.length > 0 &&
+    chosenToolsets.length === 0
+  ) {
+    deps.logger?.warn?.(
+      'spawn_sub_agent: requested toolsets stripped to empty, falling back to full parent set',
+      {
+        requested:           input.requestedToolsets,
+        validParentToolsets: [...parentToolsetNames],
+      },
+    );
+    chosenToolsets = [...parentToolsetNames];
+  }
 
   // Step 4b — pull the schemas for those toolsets.
   // v4.6 Phase 1 — pass 'repl' context: in Phase 1 spawn_sub_agent
