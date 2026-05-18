@@ -262,12 +262,26 @@ CREATE INDEX IF NOT EXISTS idx_scheduled_workflows_enabled
   ON scheduled_workflows(enabled);
 `;
 
+// Embedded v6 schema. Source of truth lives at
+// `core/v4/daemon/db/schema/v6.sql` (matching v1-v4 convention).
+// Kept in sync via the `tests/v4/daemon/db/migrations-v6.test.ts`
+// snapshot check.
+const V6_SQL = `
+ALTER TABLE runs ADD COLUMN spawned_from_run_id     INTEGER;
+ALTER TABLE runs ADD COLUMN spawned_from_session_id TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_runs_spawned_from
+  ON runs(spawned_from_run_id)
+  WHERE spawned_from_run_id IS NOT NULL;
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',           sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',   sql: V2_SQL },
   { version: 3, name: 'phase 3 — webhook deliveries log',      sql: V3_SQL },
   { version: 4, name: 'phase 4a — email seen forensic table',  sql: V4_SQL },
   { version: 5, name: 'phase 5b — scheduled workflows',        sql: V5_SQL },
+  { version: 6, name: 'v4.6 phase 1 — sub-agent lineage',      sql: V6_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

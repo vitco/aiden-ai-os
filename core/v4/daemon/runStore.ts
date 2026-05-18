@@ -42,6 +42,14 @@ export interface RunStore {
     triggerEventId?:  number;
     status?:          RunStatus;
     startedAt?:       number;
+    /**
+     * v4.6 Phase 1 — when this run is a sub-agent spawned by another
+     * run, set both lineage fields. NULL for top-level runs (REPL
+     * turns, daemon-fired turns). Wired into the `runs` table by the
+     * v6 schema migration; older rows have NULL values silently.
+     */
+    spawnedFromRunId?:     number;
+    spawnedFromSessionId?: string;
   }): number;
   setStatus(runId: number, status: RunStatus, opts?: {
     finishReason?: string;
@@ -78,14 +86,27 @@ export interface CreateRunStoreOptions {
 export function createRunStore(opts: CreateRunStoreOptions): RunStore {
   const db = opts.db;
   return {
-    create({ sessionId, instanceId, triggerEventId, status, startedAt }) {
+    create({ sessionId, instanceId, triggerEventId, status, startedAt, spawnedFromRunId, spawnedFromSessionId }) {
       const now = startedAt ?? Date.now();
+      // v4.6 Phase 1 — explicit 8-column INSERT including the two
+      // sub-agent lineage columns. Top-level runs pass NULL for both;
+      // sub-agent runs pass the parent run_id + session_id. Single
+      // insert path keeps the code simple at the cost of two extra
+      // bound NULLs on the common (top-level) case.
       const r = db.prepare(
         `INSERT INTO runs
            (trigger_event_id, session_id, instance_id, status, started_at,
-            resume_pending)
-         VALUES (?, ?, ?, ?, ?, 0)`,
-      ).run(triggerEventId ?? null, sessionId, instanceId, status ?? 'queued', now);
+            resume_pending, spawned_from_run_id, spawned_from_session_id)
+         VALUES (?, ?, ?, ?, ?, 0, ?, ?)`,
+      ).run(
+        triggerEventId ?? null,
+        sessionId,
+        instanceId,
+        status ?? 'queued',
+        now,
+        spawnedFromRunId ?? null,
+        spawnedFromSessionId ?? null,
+      );
       return Number(r.lastInsertRowid);
     },
     setStatus(runId, status, opts2 = {}) {

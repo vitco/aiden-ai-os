@@ -405,6 +405,14 @@ export class AidenAgent {
   private readonly lookupSkillRequiredTools?:   AidenAgentOptions['lookupSkillRequiredTools'];
 
   // ── Cross-call state ─────────────────────────────────────────────────
+  /**
+   * v4.6 Phase 1 — current per-turn AbortSignal, exposed to tools that need
+   * to construct child signal chains (specifically `spawn_sub_agent`). Set
+   * at the top of `runTurnLoop` from `runOptions.signal`, cleared before
+   * the loop returns. Read via `getCurrentSignal()`. Per-agent-instance —
+   * not shared across agents; a child agent has its own `_currentSignal`.
+   */
+  private _currentSignal: AbortSignal | undefined = undefined;
   /** Cached system prompt — invalidated by setPersonalityOverlay/markMemoryDirty/explicit. */
   private cachedSystemPrompt:  string | null = null;
   private compressionEvents:    number        = 0;
@@ -608,6 +616,18 @@ export class AidenAgent {
   /** /doctor accessor for cumulative empty-response counters. */
   getEmptyResponseMetrics(): EmptyResponseMetrics {
     return { ...this.emptyResponseMetrics };
+  }
+
+  /**
+   * v4.6 Phase 1 — return the AbortSignal currently associated with this
+   * agent's active `runTurnLoop`, or `undefined` if the agent is between
+   * turns. Used by the `spawn_sub_agent` tool to construct a child signal
+   * chain that cascades parent aborts to the child (Flag 1 pattern: tool
+   * captures the parent agent reference at construction time and reads
+   * the current signal from the instance at dispatch time).
+   */
+  getCurrentSignal(): AbortSignal | undefined {
+    return this._currentSignal;
   }
 
   // ── Main entry: runConversation ──────────────────────────────────────
@@ -928,6 +948,16 @@ export class AidenAgent {
     /** v4.1.6 spike (TCE) — populated when finishReason === 'tool_loop'. */
     toolLoopCard?:      AidenAgentResult['toolLoopCard'];
   }> {
+    // v4.6 Phase 1 — expose the per-turn signal to tools via
+    // `getCurrentSignal()`. Set at loop entry; cleared before the return
+    // below. Tools that need the parent's signal (e.g. `spawn_sub_agent`
+    // building a child cancellation chain) capture the agent reference at
+    // construction time and read this field at dispatch time. If the loop
+    // throws, the stale value persists until the next call's set —
+    // acceptable because the only consumer is in-flight tool dispatch,
+    // which can only run while the loop is mid-execution.
+    this._currentSignal = runOptions.signal;
+
     const messages: Message[]              = [...initialMessages];
     const toolCallTrace: HonestyTraceEntry[] = [];
     // Internal trace mirror that retains tool-call arguments — Honesty's
@@ -1393,6 +1423,12 @@ export class AidenAgent {
       messages.push(...turnToolMessages);
       // Loop continues — provider gets the tool results next iteration.
     }
+
+    // v4.6 Phase 1 — clear the per-turn signal exposure before returning.
+    // No-throw guarantee: if any prior code in this loop threw, the next
+    // call's `this._currentSignal = runOptions.signal` at the top will
+    // overwrite the stale value before any tool can read it.
+    this._currentSignal = undefined;
 
     return {
       finalContent,

@@ -1,0 +1,351 @@
+/**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
+ * core/v4/subagent/spawnSubAgent.ts — v4.6 Phase 1.
+ *
+ * Public spawn primitive. Synchronously runs one child agent to handle
+ * a delegated sub-task, returns a structured `SubAgentResult` envelope.
+ * NEVER throws — every error path produces an envelope with the
+ * appropriate `status` + `error` fields so the parent's LLM can
+ * reason about the failure.
+ *
+ * Contract per `docs/v4.6/phase-1-design.md` §3, §6, §8.
+ *
+ *   - Single child (Phase 1; batch is Phase 2 via subagent_fanout
+ *     refactor)
+ *   - Synchronous: the parent's tool dispatch awaits this Promise
+ *   - Cooperative cancellation: parent's AbortSignal cascades to
+ *     child via a linked AbortController
+ *   - Wall-clock timeout: hard cap via setTimeout → child interrupt
+ *   - Persistence: writes a `runs` row with `spawned_from_run_id` +
+ *     `spawned_from_session_id` linking back to the parent
+ */
+
+import { randomUUID } from 'node:crypto';
+import { buildChildAgent } from './childBuilder';
+import type { ChildBuilderDeps } from './childBuilder';
+import type { RunStore } from '../daemon/runStore';
+
+// ── Public types (per design doc §3) ─────────────────────────────────────
+
+/** Spec the spawn tool's JSON schema validates before calling us. */
+export interface SubAgentSpec {
+  goal: string;
+  context?: string;
+  toolsets?: string[];
+  /** Will be clamped to [1, 200] by the tool wrapper; defaults to 50. */
+  maxIterations?: number;
+  /** Defaults to 600_000ms (10 min); minimum 1_000ms. */
+  timeoutMs?: number;
+}
+
+/** Result envelope per design doc §3, §8. */
+export interface SubAgentResult {
+  ok: boolean;
+  status: 'completed' | 'failed' | 'timeout' | 'interrupted';
+  summary: string | null;
+  error: string | null;
+  exitReason:
+    | 'completed'
+    | 'max_iterations'
+    | 'timeout'
+    | 'interrupted'
+    | 'error';
+  metrics: {
+    apiCalls: number;
+    durationMs: number;
+    tokensIn: number;
+    tokensOut: number;
+  };
+  /** Child run row id — populated for EVERY status, including failed. */
+  childRunId: string;
+  /** Child sessionId (flat UUID, fresh per spawn). */
+  childSessionId: string;
+}
+
+/** Dependencies the spawn primitive needs to do its job. */
+export interface SpawnSubAgentDeps extends ChildBuilderDeps {
+  /** Persistence handle — sub-agent run row is inserted via this. */
+  runStore: RunStore;
+  /** Daemon instance id (or a REPL-sentinel) used as `runs.instance_id`. */
+  instanceId: string;
+}
+
+/** Per-call context — parent identity + signal. */
+export interface SpawnSubAgentCtx {
+  /** Parent's AbortSignal (read via parentAgent.getCurrentSignal() at the
+   *  tool wrapper) — when aborted, cascades to the child immediately. */
+  signal?: AbortSignal;
+  /** Parent's `runs.id` — written to child's `spawned_from_run_id`.
+   *  Optional because Phase 1 spawn can be invoked from a REPL turn
+   *  that may not have a row written yet; absent → NULL in DB. */
+  parentRunId?: number;
+  /** Parent's `runs.session_id` — written to child's `spawned_from_session_id`. */
+  parentSessionId?: string;
+}
+
+// ── Constants ─────────────────────────────────────────────────────────────
+
+const DEFAULT_TIMEOUT_MS = 600_000;
+const MIN_TIMEOUT_MS = 1_000;
+const MAX_TIMEOUT_MS = 3_600_000;
+const DEFAULT_MAX_ITERATIONS = 50;
+const MIN_MAX_ITERATIONS = 1;
+const MAX_MAX_ITERATIONS = 200;
+
+// ── Implementation ────────────────────────────────────────────────────────
+
+/**
+ * Spawn one child agent. Always returns an envelope; never throws.
+ *
+ * Lifecycle (per §6 state machine):
+ *
+ *   1. Generate child sessionId (flat UUID).
+ *   2. Insert `runs` row with `status: 'running'` + lineage columns.
+ *   3. Build child agent (clones FallbackAdapter, intersects toolsets,
+ *      filters blocklist, fresh ApprovalEngine with auto-deny).
+ *   4. Construct linked AbortController: parent's signal feeds into
+ *      it; a setTimeout on `timeoutMs` also aborts it.
+ *   5. Run `child.runConversation(history, { signal: childCtrl.signal })`.
+ *   6. On return / throw / timeout, classify into the envelope's
+ *      status + exitReason and update the runs row's status.
+ *   7. Clean up timer + signal listener.
+ */
+export async function spawnSubAgent(
+  spec: SubAgentSpec,
+  deps: SpawnSubAgentDeps,
+  ctx: SpawnSubAgentCtx,
+): Promise<SubAgentResult> {
+  const startedAt = Date.now();
+
+  // ── 1. Clamp inputs ─────────────────────────────────────────────────────
+  const maxIterations = clamp(
+    spec.maxIterations ?? DEFAULT_MAX_ITERATIONS,
+    MIN_MAX_ITERATIONS,
+    MAX_MAX_ITERATIONS,
+  );
+  const timeoutMs = clamp(
+    spec.timeoutMs ?? DEFAULT_TIMEOUT_MS,
+    MIN_TIMEOUT_MS,
+    MAX_TIMEOUT_MS,
+  );
+
+  // ── 2. Fresh sessionId + run row ────────────────────────────────────────
+  const childSessionId = randomUUID();
+
+  // Pre-create the child run row in 'running' state so the envelope
+  // always carries a valid childRunId — even if buildChildAgent throws.
+  let childRunId: number;
+  try {
+    childRunId = deps.runStore.create({
+      sessionId:             childSessionId,
+      instanceId:            deps.instanceId,
+      status:                'running',
+      startedAt,
+      spawnedFromRunId:      ctx.parentRunId,
+      spawnedFromSessionId:  ctx.parentSessionId,
+    });
+  } catch (err) {
+    // Persistence failed before we even started — surface as failed
+    // envelope with a synthetic id of '0' so the contract holds.
+    return failureEnvelope({
+      childRunId:     '0',
+      childSessionId,
+      error:          `Failed to create child run row: ${errorMessage(err)}`,
+      durationMs:     Date.now() - startedAt,
+    });
+  }
+
+  // ── 3. Build child agent ────────────────────────────────────────────────
+  let agentBundle: ReturnType<typeof buildChildAgent>;
+  try {
+    agentBundle = buildChildAgent(deps, {
+      sessionId:         childSessionId,
+      goal:              spec.goal,
+      context:           spec.context,
+      requestedToolsets: spec.toolsets,
+      maxIterations,
+    });
+  } catch (err) {
+    deps.runStore.setStatus(childRunId, 'failed', { finishReason: 'error' });
+    return failureEnvelope({
+      childRunId:     String(childRunId),
+      childSessionId,
+      error:          `Failed to build child agent: ${errorMessage(err)}`,
+      durationMs:     Date.now() - startedAt,
+    });
+  }
+
+  // ── 4. Linked AbortController ───────────────────────────────────────────
+  // Two abort sources cascade into the child's signal:
+  //   (a) parent signal aborts — child aborts.
+  //   (b) timeoutMs elapses — child aborts.
+  // Track which one fired so we can label the envelope as
+  // 'interrupted' vs 'timeout' (the spec distinguishes them).
+  const childCtrl = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    childCtrl.abort();
+  }, timeoutMs);
+
+  let parentAbortHandler: (() => void) | null = null;
+  if (ctx.signal) {
+    if (ctx.signal.aborted) {
+      childCtrl.abort();
+    } else {
+      parentAbortHandler = () => childCtrl.abort();
+      ctx.signal.addEventListener('abort', parentAbortHandler, { once: true });
+    }
+  }
+
+  const cleanupAbortWiring = () => {
+    clearTimeout(timer);
+    if (parentAbortHandler && ctx.signal) {
+      ctx.signal.removeEventListener('abort', parentAbortHandler);
+    }
+  };
+
+  // ── 5. Run the child ─────────────────────────────────────────────────────
+  // `child.runConversation` propagates the signal into the loop's
+  // between-iteration + pre-tool-call abort checks via the prep
+  // dispatch (commit fd62f96d).
+  let summary: string | null = null;
+  let error: string | null = null;
+  let status: SubAgentResult['status'] = 'completed';
+  let exitReason: SubAgentResult['exitReason'] = 'completed';
+  let apiCalls = 0;
+  let tokensIn = 0;
+  let tokensOut = 0;
+
+  try {
+    const result = await agentBundle.agent.runConversation(
+      agentBundle.history,
+      { signal: childCtrl.signal },
+    );
+    apiCalls = result.turnCount;       // one provider call per turn
+    tokensIn = result.totalUsage.inputTokens;
+    tokensOut = result.totalUsage.outputTokens;
+
+    // Classify the result per design doc §8.
+    if (result.finishReason === 'interrupted') {
+      // Distinguish timeout from parent-interrupt by which source fired.
+      if (timedOut) {
+        status = 'timeout';
+        exitReason = 'timeout';
+        error = `Sub-agent timed out after ${timeoutMs}ms (maxIterations=${maxIterations})`;
+      } else {
+        status = 'interrupted';
+        exitReason = 'interrupted';
+        error = 'Parent interrupted — child did not finish in time';
+      }
+    } else if (result.finishReason === 'budget_exhausted') {
+      // Hit maxIterations. If the model produced a partial final reply,
+      // we ship it as a 'completed/max_iterations' (partial summary);
+      // otherwise it's a failure.
+      if (result.finalContent && result.finalContent.length > 0) {
+        status = 'completed';
+        exitReason = 'max_iterations';
+        summary = result.finalContent;
+      } else {
+        status = 'failed';
+        exitReason = 'error';
+        error = `Sub-agent hit max_iterations (${maxIterations}) without producing a summary`;
+      }
+    } else if (result.finishReason === 'error') {
+      status = 'failed';
+      exitReason = 'error';
+      error = 'Sub-agent loop reported an internal error';
+    } else if (result.finishReason === 'tool_loop') {
+      // TCE surfaced a tool loop — treat as a failure with structured
+      // payload buried in error string (Phase 1 doesn't yet ship the
+      // capability-card detail into the envelope).
+      status = 'failed';
+      exitReason = 'error';
+      error = `Sub-agent detected a tool loop and stopped: ${result.toolLoopCard?.title ?? 'tool_loop'}`;
+    } else {
+      // 'stop' → natural completion.
+      status = 'completed';
+      exitReason = 'completed';
+      summary = result.finalContent;
+    }
+  } catch (err) {
+    // child.runConversation threw — typically only happens when the
+    // provider call fails after exhausting fallback chain. Surface as
+    // a failed envelope with the error string.
+    status = 'failed';
+    exitReason = 'error';
+    error = `Sub-agent threw: ${errorMessage(err)}`;
+  } finally {
+    cleanupAbortWiring();
+  }
+
+  // ── 6. Update run row + emit envelope ────────────────────────────────────
+  const dbStatus =
+    status === 'completed'   ? 'completed'
+    : status === 'interrupted' ? 'interrupted'
+    : 'failed';
+  deps.runStore.setStatus(childRunId, dbStatus, { finishReason: exitReason });
+
+  const durationMs = Date.now() - startedAt;
+  const ok = status === 'completed' && exitReason !== 'error';
+
+  return {
+    ok,
+    status,
+    summary,
+    error,
+    exitReason,
+    metrics: {
+      apiCalls,
+      durationMs,
+      tokensIn,
+      tokensOut,
+    },
+    childRunId:     String(childRunId),
+    childSessionId,
+  };
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+function clamp(n: number, lo: number, hi: number): number {
+  if (!Number.isFinite(n)) return lo;
+  return Math.max(lo, Math.min(hi, Math.floor(n)));
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * Build a failed envelope for pre-run errors (run-row creation,
+ * agent construction). Always carries `summary: null`, `ok: false`,
+ * `status: 'failed'`, `exitReason: 'error'`.
+ */
+function failureEnvelope(opts: {
+  childRunId:     string;
+  childSessionId: string;
+  error:          string;
+  durationMs:     number;
+}): SubAgentResult {
+  return {
+    ok:             false,
+    status:         'failed',
+    summary:        null,
+    error:          opts.error,
+    exitReason:     'error',
+    metrics: {
+      apiCalls:    0,
+      durationMs:  opts.durationMs,
+      tokensIn:    0,
+      tokensOut:   0,
+    },
+    childRunId:     opts.childRunId,
+    childSessionId: opts.childSessionId,
+  };
+}
