@@ -18,6 +18,7 @@ Windows · Linux · WSL · macOS (API Mode)
 <p align="center">
   <a href="https://github.com/taracodlabs/aiden/releases/latest"><img src="https://img.shields.io/badge/version-v4.6.0-f97316?style=for-the-badge" alt="v4.6.0" /></a>
   <a href="https://www.npmjs.com/package/aiden-runtime"><img src="https://img.shields.io/npm/v/aiden-runtime?color=f97316&label=npm&style=for-the-badge" alt="npm" /></a>
+  <a href="https://www.npmjs.com/package/aiden-runtime"><img src="https://img.shields.io/npm/dm/aiden-runtime?color=f97316&label=downloads&style=for-the-badge" alt="npm downloads" /></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-AGPL--3.0-orange?style=for-the-badge" alt="License: AGPL-3.0" /></a>
   <a href="https://discord.gg/gMZ3hUnQTm"><img src="https://img.shields.io/badge/chat-discord-7289da?logo=discord&logoColor=white&style=for-the-badge" alt="Discord" /></a>
   <a href="https://github.com/taracodlabs/aiden/stargazers"><img src="https://img.shields.io/github/stars/taracodlabs/aiden?style=for-the-badge&color=f9d71c" alt="Stars" /></a>
