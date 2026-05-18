@@ -146,3 +146,144 @@ describe('runRunsSubcommand — stats', () => {
     expect(o.lines.join('')).toMatch(/failed/);
   });
 });
+
+// ── v4.6 Phase 2Q-B — children filter + badge ────────────────────────────
+
+/**
+ * Seed one top-level parent run with 3 children: 2 completed, 1 failed.
+ * Returns the parent run id so tests can assert.
+ */
+function seedParentWithChildren(): { db: ReturnType<typeof openDaemonDb>; parentId: number } {
+  const db = openDaemonDb(daemonDbPath(aidenHome));
+  db.prepare(`INSERT INTO daemon_instances
+    (instance_id, pid, hostname, started_at, last_heartbeat, version)
+    VALUES (?, ?, ?, ?, ?, ?)`).run('inst-2qb', 1, 'h', Date.now(), Date.now(), '4.6.0');
+  const runStore = createRunStore({ db });
+  // Top-level parent (no spawned_from_*).
+  const parentId = runStore.create({
+    sessionId:  'repl-parent-2qb',
+    instanceId: 'inst-2qb',
+    status:     'running',
+  });
+  // Three children linked to parent.
+  const c1 = runStore.create({
+    sessionId:            'child-1',
+    instanceId:           'inst-2qb',
+    status:               'running',
+    spawnedFromRunId:     parentId,
+    spawnedFromSessionId: 'repl-parent-2qb',
+  });
+  const c2 = runStore.create({
+    sessionId:            'child-2',
+    instanceId:           'inst-2qb',
+    status:               'running',
+    spawnedFromRunId:     parentId,
+    spawnedFromSessionId: 'repl-parent-2qb',
+  });
+  const c3 = runStore.create({
+    sessionId:            'child-3',
+    instanceId:           'inst-2qb',
+    status:               'running',
+    spawnedFromRunId:     parentId,
+    spawnedFromSessionId: 'repl-parent-2qb',
+  });
+  runStore.setStatus(parentId, 'completed', { finishReason: 'stop' });
+  runStore.setStatus(c1, 'completed', { finishReason: 'completed' });
+  runStore.setStatus(c2, 'completed', { finishReason: 'completed' });
+  runStore.setStatus(c3, 'failed',    { finishReason: 'error' });
+  return { db, parentId };
+}
+
+describe('runRunsSubcommand — list (v4.6 Phase 2Q-B child filter + badge)', () => {
+  it('default list hides children — only the top-level parent appears', async () => {
+    seedParentWithChildren();
+    const o = out();
+    const code = await runRunsSubcommand('list', [], {}, { writeOut: o.write });
+    expect(code).toBe(0);
+    const text = o.lines.join('');
+    // Exactly one row (the parent); the 3 children are filtered at SQL.
+    expect(text).toMatch(/1 run shown/);
+    // The parent's session id appears; child sessionIds do not.
+    expect(text).toMatch(/repl-parent-2qb/);
+    expect(text).not.toMatch(/child-1/);
+    expect(text).not.toMatch(/child-2/);
+    expect(text).not.toMatch(/child-3/);
+  });
+
+  it('default list renders child-count badge with completed count', async () => {
+    seedParentWithChildren();
+    const o = out();
+    await runRunsSubcommand('list', [], {}, { writeOut: o.write });
+    const text = o.lines.join('');
+    // 3 children total, 2 completed.
+    expect(text).toMatch(/\(3 children, 2 OK\)/);
+  });
+
+  it('--include-children flips the filter — children appear inline', async () => {
+    seedParentWithChildren();
+    const o = out();
+    const code = await runRunsSubcommand('list', [], { includeChildren: true }, { writeOut: o.write });
+    expect(code).toBe(0);
+    const text = o.lines.join('');
+    // 4 rows total: 1 parent + 3 children.
+    expect(text).toMatch(/4 runs shown/);
+    expect(text).toMatch(/child-1/);
+    expect(text).toMatch(/child-2/);
+    expect(text).toMatch(/child-3/);
+    expect(text).toMatch(/repl-parent-2qb/);
+    // No badges in flat view (children are inline rows already).
+    expect(text).not.toMatch(/\(3 children/);
+  });
+
+  it('top-level row with no children shows no badge', async () => {
+    seedRuns();  // two top-level rows, no children
+    const o = out();
+    await runRunsSubcommand('list', [], {}, { writeOut: o.write });
+    const text = o.lines.join('');
+    expect(text).toMatch(/2 runs shown/);
+    // Neither row gets a "(N children)" suffix.
+    expect(text).not.toMatch(/\(\d+ child/);
+  });
+
+  it('singular noun when child_count === 1', async () => {
+    const db = openDaemonDb(daemonDbPath(aidenHome));
+    db.prepare(`INSERT INTO daemon_instances
+      (instance_id, pid, hostname, started_at, last_heartbeat, version)
+      VALUES (?, ?, ?, ?, ?, ?)`).run('inst-2qb-s', 1, 'h', Date.now(), Date.now(), '4.6.0');
+    const runStore = createRunStore({ db });
+    const pid = runStore.create({ sessionId: 'p-singular', instanceId: 'inst-2qb-s', status: 'running' });
+    runStore.create({
+      sessionId: 'only-child', instanceId: 'inst-2qb-s', status: 'completed',
+      spawnedFromRunId: pid, spawnedFromSessionId: 'p-singular',
+    });
+    runStore.setStatus(pid, 'completed', { finishReason: 'stop' });
+    runStore.setStatus(2,   'completed', { finishReason: 'completed' });
+    const o = out();
+    await runRunsSubcommand('list', [], {}, { writeOut: o.write });
+    const text = o.lines.join('');
+    expect(text).toMatch(/\(1 child, 1 OK\)/);
+    expect(text).not.toMatch(/1 children/);
+  });
+});
+
+describe('runStore.countChildren (v4.6 Phase 2Q-B)', () => {
+  it('returns { total, completed } for a parent with mixed-status children', () => {
+    const { db, parentId } = seedParentWithChildren();
+    const runStore = createRunStore({ db });
+    const counts = runStore.countChildren(parentId);
+    expect(counts.total).toBe(3);
+    expect(counts.completed).toBe(2);
+  });
+
+  it('returns zeros when no children link back', () => {
+    const db = openDaemonDb(daemonDbPath(aidenHome));
+    db.prepare(`INSERT INTO daemon_instances
+      (instance_id, pid, hostname, started_at, last_heartbeat, version)
+      VALUES (?, ?, ?, ?, ?, ?)`).run('inst-2qb-z', 1, 'h', Date.now(), Date.now(), '4.6.0');
+    const runStore = createRunStore({ db });
+    const id = runStore.create({ sessionId: 'lonely', instanceId: 'inst-2qb-z' });
+    const counts = runStore.countChildren(id);
+    expect(counts.total).toBe(0);
+    expect(counts.completed).toBe(0);
+  });
+});

@@ -50,6 +50,14 @@ export interface RunsListArgs {
   source?: string;
   status?: string;
   trigger?: string;          // sessionIdPrefix: trigger:<src>:<id>:
+  /**
+   * v4.6 Phase 2Q-B — when true, the list returns parent + child
+   * rows interleaved (legacy pre-2Q-B view). Default false: rows
+   * with non-NULL `spawned_from_run_id` are filtered at the SQL
+   * layer so users see "user-triggered turns" cleanly, and each
+   * parent gets an inline child-count badge instead.
+   */
+  includeChildren?: boolean;
 }
 
 export async function runRunsSubcommand(
@@ -89,11 +97,17 @@ function cmdList(
   const status = argv.status && allowedStatuses.has(argv.status)
     ? (argv.status as 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted')
     : undefined;
+  // v4.6 Phase 2Q-B — default `topLevelOnly: true` hides children.
+  // `--include-children` flag (parsed by the CLI argv layer into
+  // `includeChildren: true`) flips the predicate to drop the IS NULL
+  // filter so child rows appear inline with parents.
+  const includeChildren = argv.includeChildren === true;
   const rows = runStore.listRecent({
     limit:           argv.limit ?? 50,
     status,
     source:          argv.source,
     sessionIdPrefix: argv.trigger,
+    topLevelOnly:    !includeChildren,
   });
   if (rows.length === 0) {
     out('No runs match the filter.\n');
@@ -103,9 +117,23 @@ function cmdList(
   for (const r of rows) {
     const started = new Date(r.startedAt).toISOString().slice(0, 19) + 'Z';
     const finish = r.finishReason ?? '-';
-    out(`${String(r.id).padEnd(6)}  ${r.status.padEnd(11)}  ${finish.padEnd(11)}  ${started.padEnd(20)}  ${r.sessionId}\n`);
+    // v4.6 Phase 2Q-B — child-count badge. Only relevant for the
+    // top-level view (when --include-children is OFF). Skipped on
+    // the flat view to avoid double-counting visual weight: in flat
+    // mode the children are already on screen as their own rows.
+    let badge = '';
+    if (!includeChildren) {
+      const { total, completed } = runStore.countChildren(r.id);
+      if (total > 0) {
+        badge = `  (${total} ${total === 1 ? 'child' : 'children'}, ${completed} OK)`;
+      }
+    }
+    out(`${String(r.id).padEnd(6)}  ${r.status.padEnd(11)}  ${finish.padEnd(11)}  ${started.padEnd(20)}  ${r.sessionId}${badge}\n`);
   }
-  out(`\n${rows.length} run${rows.length === 1 ? '' : 's'} shown\n`);
+  const hint = includeChildren
+    ? ' (parents + sub-agent children)'
+    : ' (top-level; use --include-children for sub-agents)';
+  out(`\n${rows.length} run${rows.length === 1 ? '' : 's'} shown${hint}\n`);
   return 0;
 }
 

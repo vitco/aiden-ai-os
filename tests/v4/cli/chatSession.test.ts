@@ -501,3 +501,131 @@ describe('ChatSession helpers', () => {
     expect(formatDuration(62 * 60_000)).toBe('1h2m');
   });
 });
+
+// ── v4.6 Phase 2Q-B — REPL parent-run row wiring ─────────────────────────
+
+describe('ChatSession — v4.6 Phase 2Q-B REPL parent-run row', () => {
+  // Lightweight in-memory RunStore stub: records create + setStatus
+  // calls without standing up sqlite. The chat session shouldn't care
+  // what backs the store — it just needs an id back from create() and
+  // a non-throwing setStatus().
+  function mkFakeRunStore() {
+    const created: Array<Parameters<import('../../../core/v4/daemon/runStore').RunStore['create']>[0]> = [];
+    const status: Array<{ runId: number; status: string; opts?: { finishReason?: string; completedAt?: number } }> = [];
+    let nextId = 100;
+    const store = {
+      create: vi.fn((opts) => {
+        created.push(opts);
+        return nextId++;
+      }),
+      setStatus: vi.fn((runId, s, opts) => {
+        status.push({ runId, status: s, opts });
+      }),
+      markResumePending: vi.fn(),
+      emitEvent:         vi.fn(),
+      listActive:        vi.fn(() => []),
+      get:               vi.fn(() => null),
+      countEvents:       vi.fn(() => 0),
+      listRecent:        vi.fn(() => []),
+      listEvents:        vi.fn(() => []),
+      countChildren:     vi.fn(() => ({ total: 0, completed: 0 })),
+    };
+    return { store: store as never, created, status };
+  }
+
+  it('writes a runs row before runConversation and updates to completed on success', async () => {
+    const { agent } = mkAgent({ finalContent: 'hi back' });
+    const { store, created, status } = mkFakeRunStore();
+    const ref: { runId: number | null; sessionId: string | null } = { runId: null, sessionId: null };
+    const session = new ChatSession(
+      buildOpts({
+        agent: agent as never,
+        promptApi: mkPromptApi({ inputs: ['hello', '/quit'] }),
+        replRunStore:     store,
+        replInstanceId:   'inst-test',
+        replParentRunRef: ref,
+      }),
+    );
+    await session.run();
+    // One row created for the one user turn.
+    expect(created).toHaveLength(1);
+    expect(created[0].instanceId).toBe('inst-test');
+    expect(created[0].status).toBe('running');
+    // setStatus called once at completion with 'completed' + finishReason 'stop'.
+    expect(status).toHaveLength(1);
+    expect(status[0].status).toBe('completed');
+    expect(status[0].opts?.finishReason).toBe('stop');
+    // Ref cleared after the turn so cross-turn spawns get NULL parent.
+    expect(ref.runId).toBeNull();
+    expect(ref.sessionId).toBeNull();
+  });
+
+  it('writes failed status on agent throw and clears the ref', async () => {
+    const { agent } = mkAgent({ shouldThrow: true });
+    const { store, created, status } = mkFakeRunStore();
+    const ref: { runId: number | null; sessionId: string | null } = { runId: null, sessionId: null };
+    const session = new ChatSession(
+      buildOpts({
+        agent: agent as never,
+        promptApi: mkPromptApi({ inputs: ['boom', '/quit'] }),
+        replRunStore:     store,
+        replInstanceId:   'inst-test',
+        replParentRunRef: ref,
+      }),
+    );
+    await session.run();
+    expect(created).toHaveLength(1);
+    expect(status).toHaveLength(1);
+    expect(status[0].status).toBe('failed');
+    expect(status[0].opts?.finishReason).toBe('error');
+    expect(ref.runId).toBeNull();
+  });
+
+  it('best-effort: runStore.create throwing does NOT crash the REPL turn', async () => {
+    const { agent } = mkAgent({ finalContent: 'ok' });
+    const store = {
+      create: vi.fn(() => { throw new Error('synthetic db lock'); }),
+      setStatus: vi.fn(),
+      markResumePending: vi.fn(),
+      emitEvent: vi.fn(),
+      listActive: vi.fn(() => []),
+      get: vi.fn(() => null),
+      countEvents: vi.fn(() => 0),
+      listRecent: vi.fn(() => []),
+      listEvents: vi.fn(() => []),
+      countChildren: vi.fn(() => ({ total: 0, completed: 0 })),
+    };
+    const ref: { runId: number | null; sessionId: string | null } = { runId: null, sessionId: null };
+    // Silence the expected warn so test output stays clean.
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const session = new ChatSession(
+      buildOpts({
+        agent: agent as never,
+        promptApi: mkPromptApi({ inputs: ['x', '/quit'] }),
+        replRunStore:     store as never,
+        replInstanceId:   'inst-test',
+        replParentRunRef: ref,
+      }),
+    );
+    await session.run();
+    // Turn still ran to completion — agent.runConversation was called.
+    expect(agent.runConversation).toHaveBeenCalledTimes(1);
+    // setStatus was NOT called because create() failed first.
+    expect(store.setStatus).not.toHaveBeenCalled();
+    expect(ref.runId).toBeNull();
+    warnSpy.mockRestore();
+  });
+
+  it('no runStore wiring → no rows written, no crash', async () => {
+    const { agent } = mkAgent({ finalContent: 'ok' });
+    const session = new ChatSession(
+      buildOpts({
+        agent: agent as never,
+        promptApi: mkPromptApi({ inputs: ['x', '/quit'] }),
+        // No replRunStore / replInstanceId / replParentRunRef.
+      }),
+    );
+    await session.run();
+    expect(agent.runConversation).toHaveBeenCalledTimes(1);
+  });
+});

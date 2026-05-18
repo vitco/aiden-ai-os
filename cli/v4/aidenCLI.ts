@@ -566,6 +566,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
     .option('--source <src>', 'list: filter by trigger source (file/webhook/email/schedule/manual)')
     .option('--status <s>',   'list: filter by status (queued/running/completed/failed/cancelled/interrupted)')
     .option('--trigger <prefix>', 'list: sessionId prefix (e.g. "trigger:file:<id>:")')
+    .option('--include-children', 'list: include sub-agent children (default: top-level only, with per-parent badge)')
     .action(async (action: string, posArgs: string[] | undefined, cmdObj: Record<string, unknown>) => {
       const { runRunsSubcommand } = await import('./commands/runs');
       const code = await runRunsSubcommand(action, posArgs ?? [], cmdObj, {
@@ -726,6 +727,18 @@ export async function buildAgentRuntime(
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(replInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), VERSION);
   const replRunStore = createRunStore({ db: replDb });
+
+  // v4.6 Phase 2Q-B — mutable holder for the REPL's current parent
+  // run id. ChatSession's `runAgentTurn` writes a row before each
+  // turn dispatches and stores the id here (and clears it on
+  // completion). The spawn / fanout tool factories below read it
+  // through `resolveParentRunId` / `resolveParentSessionId`
+  // callbacks so any child spawned mid-turn is linked back to the
+  // live REPL parent row via `runs.spawned_from_run_id`.
+  const replParentRunRef: { runId: number | null; sessionId: string | null } = {
+    runId:     null,
+    sessionId: null,
+  };
 
   // Phase 16c.2: load `paths.envFile` (the aiden-managed `.env` that
   // `setupWizard.ts::upsertEnvVar` writes to) into `process.env` BEFORE
@@ -1661,10 +1674,13 @@ export async function buildAgentRuntime(
       instanceId:          replInstanceId,
       logger:              bootLogger.child('subagent'),
     },
-    // No resolveParentRunId / resolveParentSessionId for REPL-fanout
-    // — REPL turns don't open a parent runs row by default, so
-    // children's `spawned_from_run_id` stays NULL. Phase 2Q-B will
-    // wire this once REPL turns produce their own runs row.
+    // v4.6 Phase 2Q-B — REPL parent-run wiring. Reads the shared
+    // `replParentRunRef` mutated by `ChatSession.runAgentTurn` so
+    // fanout children get `spawned_from_run_id` populated. Returns
+    // undefined between turns (ref cleared post-turn), matching the
+    // pre-2Q-B behaviour for slash-command-triggered spawns.
+    resolveParentRunId:     () => replParentRunRef.runId     ?? undefined,
+    resolveParentSessionId: () => replParentRunRef.sessionId ?? undefined,
     resolveProviders: (): ProviderOption[] => {
       // When the parent uses FallbackAdapter, expose every key-present
       // slot's (providerId, modelId) so rotation can spread children
@@ -1833,6 +1849,14 @@ export async function buildAgentRuntime(
     resolveMutates,
     runStore:            replRunStore,
     instanceId:          replInstanceId,
+    // v4.6 Phase 2Q-B — REPL parent-run wiring. Reads the same
+    // shared `replParentRunRef` the fanout factory above uses;
+    // ChatSession.runAgentTurn populates it before each turn
+    // dispatches. Returns undefined between turns so spawns from
+    // slash-command handlers stay top-level (consistent with
+    // pre-2Q-B observable behaviour).
+    resolveParentRunId:     () => replParentRunRef.runId     ?? undefined,
+    resolveParentSessionId: () => replParentRunRef.sessionId ?? undefined,
     // v4.6 Phase 1 observability — info-level traces for spec at
     // invocation, child-tools count, completion, and per-tool-call
     // run_events on the child's runs row.
@@ -2046,6 +2070,10 @@ export async function buildAgentRuntime(
     exploreMode,
     channelManager,
     daemonAgentBuilder,
+    // v4.6 Phase 2Q-B — REPL parent-run wiring.
+    replRunStore,
+    replInstanceId,
+    replParentRunRef,
   };
 }
 
@@ -2130,6 +2158,15 @@ export interface AgentRuntime {
    * runInteractiveChat.
    */
   daemonAgentBuilder: import('../../core/v4/daemon/dispatcher').AgentBuilder;
+  /**
+   * v4.6 Phase 2Q-B — REPL persistence handles. ChatSession consumes
+   * `replRunStore` + `replInstanceId` to insert a `runs` row per
+   * turn, and writes the row id into `replParentRunRef` so spawned
+   * children link via `spawned_from_run_id`.
+   */
+  replRunStore:     import('../../core/v4/daemon/runStore').RunStore;
+  replInstanceId:   string;
+  replParentRunRef: { runId: number | null; sessionId: string | null };
 }
 
 async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void> {
@@ -2202,6 +2239,14 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     // when /quit fires the auto-summary path.
     memoryManager: runtime.memoryManager,
     memoryGuard:   runtime.memoryGuard,
+    // v4.6 Phase 2Q-B — REPL parent-run wiring. ChatSession.runAgentTurn
+    // writes a runs row per turn and stores its id into
+    // `replParentRunRef`; the spawn / fanout factories above read the
+    // ref via their `resolveParentRunId` / `resolveParentSessionId`
+    // callbacks so children get `spawned_from_run_id` populated.
+    replRunStore:     runtime.replRunStore,
+    replInstanceId:   runtime.replInstanceId,
+    replParentRunRef: runtime.replParentRunRef,
   };
 
   if (cliOpts.tui) {

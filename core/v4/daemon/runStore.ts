@@ -74,7 +74,25 @@ export interface RunStore {
     status?:   RunStatus;
     source?:   string;          // trigger_events.source filter
     sessionIdPrefix?: string;   // useful for `aiden trigger runs <id>`
+    /**
+     * v4.6 Phase 2Q-B — when true (default), the list HIDES sub-agent
+     * children (rows with non-NULL `spawned_from_run_id`). Set to
+     * false to return a flat list (parents + children intermixed),
+     * matching the legacy pre-2Q-B behaviour. The CLI surface
+     * exposes this via `aiden runs list --include-children`.
+     */
+    topLevelOnly?: boolean;
   }): RunRow[];
+  /**
+   * v4.6 Phase 2Q-B — child-count aggregate for a parent run row.
+   * Returns `{ total, completed }` for all rows whose
+   * `spawned_from_run_id` matches `parentRunId`. Backs the badge
+   * "(N children, M OK)" rendered next to top-level rows in
+   * `aiden runs list`. Top-level rows with zero children get
+   * `{ total: 0, completed: 0 }` — the CLI omits the badge in that
+   * case.
+   */
+  countChildren(parentRunId: number): { total: number; completed: number };
   /** List events for a run, ordered by ts ascending. */
   listEvents(runId: number, limit?: number): Array<{ ts: number; kind: string; payload: string }>;
 }
@@ -167,6 +185,17 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
         whereParts.push('r.session_id LIKE ?');
         params.push(`${opts2.sessionIdPrefix}%`);
       }
+      // v4.6 Phase 2Q-B — default to top-level rows only. Children
+      // (rows with non-NULL `spawned_from_run_id`) clutter the list
+      // when you really want "what user-triggered runs happened
+      // recently". The partial index `idx_runs_spawned_from` makes
+      // the negated predicate cheap (children indexed; parents NOT
+      // indexed but the predicate is `IS NULL` — table scan, but
+      // the planner uses the limit + ORDER BY started_at to cap
+      // work). `--include-children` flips the flag for flat view.
+      if (opts2.topLevelOnly !== false) {
+        whereParts.push('r.spawned_from_run_id IS NULL');
+      }
       const where = whereParts.length > 0 ? `WHERE ${whereParts.join(' AND ')}` : '';
       const sql = `
         SELECT r.* FROM runs r
@@ -177,6 +206,22 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
       params.push(limit);
       const rows = db.prepare(sql).all(...params) as RunRowSql[];
       return rows.map(rowToTs);
+    },
+    countChildren(parentRunId) {
+      // Single round-trip via conditional COUNT — sqlite handles
+      // this fine even with a few thousand children per parent,
+      // which we'll never see in practice (fanout caps at 5).
+      const r = db.prepare(
+        `SELECT
+           COUNT(*) AS total,
+           SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS completed
+         FROM runs
+        WHERE spawned_from_run_id = ?`,
+      ).get(parentRunId) as { total: number; completed: number | null };
+      return {
+        total:     r.total,
+        completed: r.completed ?? 0,
+      };
     },
     listEvents(runId, limit = 200) {
       const rows = db.prepare(

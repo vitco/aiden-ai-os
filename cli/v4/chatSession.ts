@@ -271,6 +271,29 @@ export interface ChatSessionOptions {
    * separate API server.
    */
   channelManager?: import('../../core/channels/manager').ChannelManager;
+
+  /**
+   * v4.6 Phase 2Q-B — REPL parent-run wiring.
+   *
+   * When supplied, each REPL turn inserts a `runs` row (status:
+   * 'running') before dispatching `agent.runConversation(...)` and
+   * updates it to 'completed' / 'failed' / 'interrupted' on return.
+   *
+   * The mutable `replParentRunRef` is shared with the spawn /
+   * fanout tool factories in `cli/v4/aidenCLI.ts`: each factory's
+   * `resolveParentRunId` / `resolveParentSessionId` callback reads
+   * the ref's current value at dispatch time, so children spawned
+   * mid-turn get `spawned_from_run_id` populated to the live REPL
+   * parent row's id (instead of the NULL we shipped pre-2Q-B).
+   *
+   * All three fields are OPTIONAL — tests / test stubs that don't
+   * wire a daemon DB skip the persistence path entirely. The runStore
+   * write itself is best-effort; a write failure logs a warning and
+   * the REPL continues — never blocks user-facing turns.
+   */
+  replRunStore?:    import('../../core/v4/daemon/runStore').RunStore;
+  replInstanceId?:  string;
+  replParentRunRef?: { runId: number | null; sessionId: string | null };
 }
 
 const STATUS_BAR_WIDTH = 10;
@@ -1137,6 +1160,44 @@ export class ChatSession implements ChatSessionLike {
       ? [...this.history, ...newHistory, userMsg]
       : [...this.history, userMsg];
 
+    // v4.6 Phase 2Q-B — REPL parent-run row (best-effort).
+    //
+    // Insert a `runs` row tagged with this REPL session BEFORE the
+    // agent loop dispatches. Capture the row id into the shared
+    // `replParentRunRef` so any `spawn_sub_agent` / `subagent_fanout`
+    // child this turn produces can link back via
+    // `spawned_from_run_id`. The ref is cleared in the catch /
+    // success paths below regardless of outcome.
+    //
+    // Defensive: a runStore write failure (locked DB, schema drift,
+    // etc.) must NOT crash the REPL — every persistence call here is
+    // wrapped in try/catch and reduces to a logged warning. The
+    // user-facing turn still runs.
+    let replRunId: number | null = null;
+    const replRunStore       = this.opts.replRunStore;
+    const replInstanceId     = this.opts.replInstanceId;
+    const replParentRunRef   = this.opts.replParentRunRef;
+    if (replRunStore && replInstanceId && this.sessionId) {
+      try {
+        replRunId = replRunStore.create({
+          sessionId:  this.sessionId,
+          instanceId: replInstanceId,
+          status:     'running',
+          startedAt:  turnStartedAt,
+        });
+        if (replParentRunRef) {
+          replParentRunRef.runId     = replRunId;
+          replParentRunRef.sessionId = this.sessionId;
+        }
+      } catch (err) {
+        // Logged once per turn; the user's chat is not interrupted.
+        // eslint-disable-next-line no-console
+        console.warn('[runs] failed to write REPL parent-run row:',
+          err instanceof Error ? err.message : String(err));
+        replRunId = null;
+      }
+    }
+
     // Phase 16c: streaming gated on display.streaming config.
     // v4.1.4 Part 1.6: PRODUCTION DEFAULT FLIPPED FROM FALSE TO TRUE.
     // Streaming delivers the activity indicator, tool-row live tick,
@@ -1394,6 +1455,37 @@ export class ChatSession implements ChatSessionLike {
       this.totalUsage.inputTokens += result.totalUsage.inputTokens;
       this.totalUsage.outputTokens += result.totalUsage.outputTokens;
 
+      // v4.6 Phase 2Q-B — finalize the REPL parent-run row on success.
+      // `finishReason` from the agent loop maps directly into our DB
+      // status: `stop` → completed; `interrupted` / `tool_loop` →
+      // surface as 'interrupted' so it's visible in `runs list`;
+      // `budget_exhausted` / `error` → failed. Wrapped in try/catch
+      // so even a runStore write failure here can't crash the REPL.
+      if (replRunStore && replRunId !== null) {
+        try {
+          const dbStatus =
+            result.finishReason === 'stop'        ? 'completed'  :
+            result.finishReason === 'interrupted' ? 'interrupted':
+            result.finishReason === 'tool_loop'   ? 'interrupted':
+            'failed';
+          replRunStore.setStatus(replRunId, dbStatus, {
+            finishReason: result.finishReason,
+            completedAt:  Date.now(),
+          });
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn('[runs] failed to finalize REPL parent-run row:',
+            err instanceof Error ? err.message : String(err));
+        }
+      }
+      // Clear the shared ref so a subsequent turn (or stray
+      // spawn/fanout dispatched between turns from a slash command
+      // handler) doesn't see a stale parent id.
+      if (replParentRunRef) {
+        replParentRunRef.runId     = null;
+        replParentRunRef.sessionId = null;
+      }
+
       // Phase 16d: surface inline confirmations for verified memory writes.
       // We MUST gate on verified=true (the post-write read flag from
       // MemoryGuard) — HonestyEnforcement uses the same flag to catch
@@ -1511,6 +1603,26 @@ export class ChatSession implements ChatSessionLike {
       // or the next prompt.
       progressBar?.hide();
       if (streamingActive) this.opts.display.streamComplete();
+      // v4.6 Phase 2Q-B — finalize REPL parent-run row on error.
+      // Visible in `aiden runs list` as a failed top-level row so
+      // operators can correlate a chat error with whatever children
+      // it had already kicked off this turn.
+      if (replRunStore && replRunId !== null) {
+        try {
+          replRunStore.setStatus(replRunId, 'failed', {
+            finishReason: 'error',
+            completedAt:  Date.now(),
+          });
+        } catch (e2) {
+          // eslint-disable-next-line no-console
+          console.warn('[runs] failed to mark REPL parent-run failed:',
+            e2 instanceof Error ? e2.message : String(e2));
+        }
+      }
+      if (replParentRunRef) {
+        replParentRunRef.runId     = null;
+        replParentRunRef.sessionId = null;
+      }
       const msg = (err as Error)?.message ?? String(err);
       // v4.1.3-prebump: classify the error so the suggestion below
       // points at the actual fix instead of the generic "/model or
