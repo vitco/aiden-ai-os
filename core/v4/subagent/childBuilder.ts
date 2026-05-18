@@ -34,7 +34,9 @@ import { ApprovalEngine } from '../../../moat/approvalEngine';
 import { AidenAgent } from '../aidenAgent';
 import type { AidenAgentOptions, ToolExecutor } from '../aidenAgent';
 import type { ToolRegistry, ToolContext } from '../toolRegistry';
-import type { ProviderAdapter, Message, ToolSchema } from '../../../providers/v4/types';
+import type { ProviderAdapter, Message, ToolSchema, ToolCallRequest, ToolCallResult } from '../../../providers/v4/types';
+import type { RunStore } from '../daemon/runStore';
+import type { Logger } from '../logger/logger';
 
 // ── Hard-coded blocklist (Q5 from design doc §2) ────────────────────────────
 
@@ -85,6 +87,18 @@ export interface ChildBuilderDeps {
   resolveVerifiedFlag?: AidenAgentOptions['resolveVerifiedFlag'];
   resolveToolset?:      AidenAgentOptions['resolveToolset'];
   resolveMutates?:      AidenAgentOptions['resolveMutates'];
+  /**
+   * v4.6 Phase 1 observability — when supplied, the child agent's
+   * `onToolCall` is wired to emit `tool_call_started` /
+   * `tool_call_completed` events to this run store under the
+   * `childRunId` row (next field). Optional so pure unit tests of
+   * `buildChildAgent` can construct without persistence wiring.
+   */
+  runStore?:    RunStore;
+  /** Pre-created child run row id, used as the run_events key. */
+  childRunId?:  number;
+  /** Optional logger; emits per-tool-call info lines when present. */
+  logger?:      Logger;
 }
 
 /** One spawn's parameters, validated by the tool wrapper. */
@@ -177,7 +191,17 @@ export function buildChildAgent(
   // explicit in the design-doc §5 row.
   const childProvider = adapterWithCloneOrSame(deps.parentProvider);
 
-  // ── 6. Build the child agent ─────────────────────────────────────────────
+  // ── 6. Observability — onToolCall → run_events + log ─────────────────────
+  // When deps.runStore + deps.childRunId are present (the production
+  // path from spawnSubAgent.ts), wire an `onToolCall` callback that
+  // mirrors the daemon dispatcher's audit shape (see
+  // `core/v4/daemon/dispatcher/realAgentRunner.ts:367-382`). Per-call
+  // start time is tracked in a Map keyed by tool_call_id so the
+  // `durationMs` on completed events is per-tool, not per-turn.
+  // Pure no-op when runStore is absent (unit tests of buildChildAgent).
+  const onToolCall = buildOnToolCall(deps);
+
+  // ── 7. Build the child agent ─────────────────────────────────────────────
   // Focused worker config: omit plannerGuard, honestyEnforcement,
   // skillTeacher, skillMiner, contextCompressor, promptCaching,
   // promptBuilder. Match the daemon agent's "act on the task, don't
@@ -193,6 +217,7 @@ export function buildChildAgent(
     resolveVerifiedFlag: deps.resolveVerifiedFlag,
     resolveToolset:      deps.resolveToolset,
     resolveMutates:      deps.resolveMutates,
+    onToolCall,
     // iterationBudgetInjection inherits the default (true) — child
     // sees its own remaining-budget hint near the end of the run.
   });
@@ -263,4 +288,86 @@ function buildChildSystemPrompt(goal: string, context: string | undefined): stri
  */
 function composeUserMessage(goal: string, _context: string | undefined): string {
   return goal.trim();
+}
+
+/**
+ * v4.6 Phase 1 — build the child agent's `onToolCall` callback. Emits
+ * `tool_call_started` + `tool_call_completed` events to the child's
+ * `runs` row via the supplied runStore, mirroring the daemon
+ * dispatcher's audit shape. Also logs each call at info level so
+ * users tailing aiden.log see what the child actually did.
+ *
+ * Returns `undefined` when persistence + logger are both absent —
+ * the agent constructor accepts `undefined` for `onToolCall` and
+ * dispatches without notifying.
+ */
+function buildOnToolCall(deps: ChildBuilderDeps):
+  | ((call: ToolCallRequest, phase: 'before' | 'after', result?: ToolCallResult) => void)
+  | undefined
+{
+  const { runStore, childRunId, logger } = deps;
+  if (!runStore && !logger && childRunId === undefined) return undefined;
+
+  // Per-call start time keyed by tool_call_id so `durationMs` on the
+  // completed event reflects per-tool wall-clock, not per-turn.
+  const callStarts = new Map<string, number>();
+
+  return (call, phase, result) => {
+    try {
+      if (phase === 'before') {
+        const startedAt = Date.now();
+        callStarts.set(call.id, startedAt);
+        const argsSummary = safeShortJson(call.arguments, 200);
+        if (runStore && childRunId !== undefined) {
+          runStore.emitEvent(childRunId, 'tool_call_started', {
+            toolName: call.name,
+            args:     argsSummary,
+            ts:       startedAt,
+          });
+        }
+        if (logger) {
+          logger.info('sub-agent tool call', {
+            childRunId: childRunId ?? null,
+            toolName:   call.name,
+            args:       argsSummary,
+          });
+        }
+        return;
+      }
+      // phase === 'after'
+      const startedAt = callStarts.get(call.id) ?? Date.now();
+      callStarts.delete(call.id);
+      const durationMs = Date.now() - startedAt;
+      if (runStore && childRunId !== undefined) {
+        runStore.emitEvent(childRunId, 'tool_call_completed', {
+          toolName:  call.name,
+          error:     result?.error ?? null,
+          hasResult: result?.result !== undefined && result?.result !== null,
+          durationMs,
+        });
+      }
+      if (logger) {
+        logger.info('sub-agent tool result', {
+          childRunId: childRunId ?? null,
+          toolName:   call.name,
+          ok:         !result?.error,
+          durationMs,
+        });
+      }
+    } catch {
+      // Observability must never crash the agent loop.
+    }
+  };
+}
+
+/** JSON-stringify with a byte cap; returns the truncated string with an
+ *  ellipsis when the payload exceeds `maxBytes`. */
+function safeShortJson(value: unknown, maxBytes: number): string {
+  try {
+    const s = JSON.stringify(value);
+    if (s === undefined) return '';
+    return s.length > maxBytes ? s.slice(0, maxBytes) + '…' : s;
+  } catch {
+    return String(value).slice(0, maxBytes);
+  }
 }

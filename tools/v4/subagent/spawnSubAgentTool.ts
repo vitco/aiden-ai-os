@@ -26,6 +26,8 @@
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import type { ToolSchema } from '../../../providers/v4/types';
 import type { AidenAgent } from '../../../core/v4/aidenAgent';
+import type { Logger } from '../../../core/v4/logger/logger';
+import { noopLogger } from '../../../core/v4/logger/factory';
 import {
   spawnSubAgent,
   type SubAgentSpec,
@@ -59,6 +61,16 @@ export interface SpawnSubAgentFactoryOptions extends SpawnSubAgentDeps {
    * `spawned_from_session_id` is populated with this value.
    */
   resolveParentSessionId?: () => string | undefined;
+  /**
+   * v4.6 Phase 1 observability — optional logger for the spawn
+   * tool's own info-level traces (parsed spec at invocation,
+   * child-built confirmation, completion summary). Plumbed into
+   * `spawnSubAgent` so internal stages can also log. Defaults to
+   * `noopLogger()` — REPL wiring at `cli/v4/aidenCLI.ts` injects
+   * `bootLogger.child('subagent')` to land in the standard log
+   * sinks.
+   */
+  logger?: Logger;
 }
 
 // ── Schema description (verbatim from design doc §4) ───────────────────────
@@ -229,6 +241,25 @@ export function makeSpawnSubAgentTool(
         timeoutMs:      typeof args.timeoutMs === 'number'     ? args.timeoutMs     : undefined,
       };
 
+      // v4.6 Phase 1 observability — log the parsed spec so the next
+      // smoke test can correlate "what the model asked for" with the
+      // child's actual behaviour. Goal is truncated to keep the log
+      // line readable. The parent's sessionId (read off the agent
+      // instance) is included so logs from one user turn cluster.
+      const logger = factory.logger ?? noopLogger();
+      const goalPreview = spec.goal.length > 200 ? spec.goal.slice(0, 200) + '…' : spec.goal;
+      logger.info('spawn_sub_agent invoked', {
+        parentSessionId: factory.parentAgent.getCurrentSignal !== undefined
+          ? (factory.parentAgent as unknown as { sessionId?: string }).sessionId ?? null
+          : null,
+        goalPreview,
+        goalLen:         spec.goal.length,
+        contextLen:      spec.context?.length ?? 0,
+        toolsets:        spec.toolsets ?? null,
+        maxIterations:   spec.maxIterations ?? null,
+        timeoutMs:       spec.timeoutMs ?? null,
+      });
+
       // ── 2. Read the parent's current signal (Flag 1 pattern) ─────────────
       const parentSignal = factory.parentAgent.getCurrentSignal();
 
@@ -252,6 +283,8 @@ export function makeSpawnSubAgentTool(
           // Persistence:
           runStore:            factory.runStore,
           instanceId:          factory.instanceId,
+          // v4.6 Phase 1 observability:
+          logger,
         },
         {
           signal:           parentSignal,
@@ -259,6 +292,22 @@ export function makeSpawnSubAgentTool(
           parentSessionId,
         },
       );
+
+      // Completion log — pairs with "spawn_sub_agent invoked" so a
+      // grep on parentSessionId surfaces invoke → complete in order.
+      logger.info('spawn_sub_agent completed', {
+        childRunId:     result.childRunId,
+        childSessionId: result.childSessionId,
+        status:         result.status,
+        exitReason:     result.exitReason,
+        ok:             result.ok,
+        apiCalls:       result.metrics.apiCalls,
+        durationMs:     result.metrics.durationMs,
+        tokensIn:       result.metrics.tokensIn,
+        tokensOut:      result.metrics.tokensOut,
+        summaryLen:     result.summary?.length ?? 0,
+        errorPreview:   result.error?.slice(0, 200) ?? null,
+      });
 
       // The envelope IS the tool result body. The agent loop's tool-
       // result handling will JSON-stringify this and feed it back to

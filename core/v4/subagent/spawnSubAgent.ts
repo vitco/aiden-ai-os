@@ -29,6 +29,8 @@ import { randomUUID } from 'node:crypto';
 import { buildChildAgent } from './childBuilder';
 import type { ChildBuilderDeps } from './childBuilder';
 import type { RunStore } from '../daemon/runStore';
+import type { Logger } from '../logger/logger';
+import { noopLogger } from '../logger/factory';
 
 // ── Public types (per design doc §3) ─────────────────────────────────────
 
@@ -73,6 +75,13 @@ export interface SpawnSubAgentDeps extends ChildBuilderDeps {
   runStore: RunStore;
   /** Daemon instance id (or a REPL-sentinel) used as `runs.instance_id`. */
   instanceId: string;
+  /**
+   * v4.6 Phase 1 observability — optional logger for spawn-side
+   * traces (parsed spec, child-build summary, completion).
+   * Defaults to `noopLogger()` when omitted. Tests inject a
+   * capturing logger; production wiring passes a bootLogger child.
+   */
+  logger?: Logger;
 }
 
 /** Per-call context — parent identity + signal. */
@@ -161,15 +170,29 @@ export async function spawnSubAgent(
   }
 
   // ── 3. Build child agent ────────────────────────────────────────────────
+  const logger = deps.logger ?? noopLogger();
   let agentBundle: ReturnType<typeof buildChildAgent>;
   try {
-    agentBundle = buildChildAgent(deps, {
-      sessionId:         childSessionId,
-      goal:              spec.goal,
-      context:           spec.context,
-      requestedToolsets: spec.toolsets,
-      maxIterations,
-    });
+    agentBundle = buildChildAgent(
+      {
+        ...deps,
+        // v4.6 Phase 1 observability — pass runStore + childRunId
+        // through so childBuilder can wire onToolCall → run_events
+        // for the child's tool dispatches. Both are optional in
+        // ChildBuilderDeps so unit tests of buildChildAgent stay
+        // dependency-light.
+        runStore:    deps.runStore,
+        childRunId,
+        logger,
+      },
+      {
+        sessionId:         childSessionId,
+        goal:              spec.goal,
+        context:           spec.context,
+        requestedToolsets: spec.toolsets,
+        maxIterations,
+      },
+    );
   } catch (err) {
     deps.runStore.setStatus(childRunId, 'failed', { finishReason: 'error' });
     return failureEnvelope({
@@ -179,6 +202,21 @@ export async function spawnSubAgent(
       durationMs:     Date.now() - startedAt,
     });
   }
+
+  // v4.6 Phase 1 observability — log the child's actual tool catalog
+  // so we can see whether the toolsets-resolution path produced a
+  // sensible set or stripped everything. The single most-load-bearing
+  // diagnostic for the "child returned 0" class of bugs.
+  const childToolNames = (agentBundle.agent as unknown as { tools: { name: string }[] }).tools.map((t) => t.name);
+  logger.info('spawn_sub_agent child built', {
+    childRunId:      String(childRunId),
+    childSessionId,
+    toolCount:       childToolNames.length,
+    toolNames:       childToolNames,
+    requestedToolsets: spec.toolsets ?? null,
+    maxIterations,
+    timeoutMs,
+  });
 
   // ── 4. Linked AbortController ───────────────────────────────────────────
   // Two abort sources cascade into the child's signal:

@@ -428,4 +428,116 @@ describe('spawnSubAgent — v4.6 Phase 1 contract', () => {
     const childNames = childTools.map((t) => t.name);
     expect(childNames).not.toContain('spawn_sub_agent');
   });
+
+  // ──────────────────────────────────────────────────────────────────────
+  // v4.6 Phase 1 observability (Dispatch 2K)
+  // ──────────────────────────────────────────────────────────────────────
+
+  /**
+   * Tiny in-memory logger that captures every level + meta payload so
+   * tests can assert on what got logged without needing a file sink.
+   */
+  function makeCapturingLogger() {
+    const lines: Array<{ level: string; msg: string; meta?: Record<string, unknown> }> = [];
+    const log = (level: string) => (msg: string, meta?: Record<string, unknown>) => {
+      lines.push({ level, msg, meta });
+    };
+    const logger = {
+      debug: log('debug'),
+      info:  log('info'),
+      warn:  log('warn'),
+      error: log('error'),
+      child: () => logger,
+    };
+    return { logger, lines };
+  }
+
+  it('13. logger captures "spawn_sub_agent child built" with tool count + names', async () => {
+    const { logger, lines } = makeCapturingLogger();
+    const deps = { ...makeDeps(), logger: logger as never };
+    const result = await spawnSubAgent({ goal: 'count something', toolsets: ['files'] }, deps, {});
+    expect(result.ok).toBe(true);
+    const builtLine = lines.find((l) => l.msg === 'spawn_sub_agent child built');
+    expect(builtLine).toBeDefined();
+    expect(builtLine!.meta!.childRunId).toBe(result.childRunId);
+    expect(builtLine!.meta!.childSessionId).toBe(result.childSessionId);
+    expect(Array.isArray(builtLine!.meta!.toolNames)).toBe(true);
+    expect(builtLine!.meta!.toolCount).toBeTypeOf('number');
+    // 'files' toolset present → child has file_read + file_write at least.
+    expect(builtLine!.meta!.toolNames).toContain('file_read');
+    expect(builtLine!.meta!.toolNames).toContain('file_write');
+    // Blocklist still applied to subagent-named tools.
+    expect(builtLine!.meta!.toolNames).not.toContain('spawn_sub_agent');
+  });
+
+  it('14. child tool calls emit tool_call_started + tool_call_completed run_events', async () => {
+    // Provider that emits ONE tool call then stops. The tool executor
+    // dispatches the call via the registry's executor, which the child
+    // builder constructs with the parent's toolContext. The child's
+    // onToolCall hook (wired by buildOnToolCall) must emit events on
+    // the child's `runs` row.
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.toolUse([{ id: 'c1', name: 'file_read', arguments: { path: '/x' } }]),
+      MockProviderAdapter.stop('done'),
+    ]);
+    const deps = { ...makeDeps(), parentProvider: provider };
+    const result = await spawnSubAgent(
+      { goal: 'read a file', toolsets: ['files'] },
+      deps,
+      {},
+    );
+    expect(result.ok).toBe(true);
+    // Read run_events from the child's runs row.
+    const events = db
+      .prepare(`SELECT kind, payload FROM run_events WHERE run_id = ? ORDER BY id ASC`)
+      .all(Number(result.childRunId)) as Array<{ kind: string; payload: string }>;
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toContain('tool_call_started');
+    expect(kinds).toContain('tool_call_completed');
+    // Payload includes the tool name.
+    const started = events.find((e) => e.kind === 'tool_call_started')!;
+    const parsedStarted = JSON.parse(started.payload) as { toolName: string };
+    expect(parsedStarted.toolName).toBe('file_read');
+  });
+
+  it('15. logger captures per-tool-call info lines', async () => {
+    const { logger, lines } = makeCapturingLogger();
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.toolUse([{ id: 'c1', name: 'file_read', arguments: { path: '/x' } }]),
+      MockProviderAdapter.stop('done'),
+    ]);
+    const deps = { ...makeDeps(), parentProvider: provider, logger: logger as never };
+    await spawnSubAgent({ goal: 'go' }, deps, {});
+    const callStarts = lines.filter((l) => l.msg === 'sub-agent tool call');
+    const callResults = lines.filter((l) => l.msg === 'sub-agent tool result');
+    expect(callStarts.length).toBeGreaterThan(0);
+    expect(callResults.length).toBeGreaterThan(0);
+    expect(callStarts[0].meta!.toolName).toBe('file_read');
+    expect(callResults[0].meta!.toolName).toBe('file_read');
+  });
+
+  it('16. observability is no-op when logger + runStore absent (unit-test path)', () => {
+    // Direct buildChildAgent without runStore or logger — used by the
+    // schema-only unit tests. Must not throw.
+    const reg = makeFakeRegistry();
+    const out = buildChildAgent(
+      {
+        toolRegistry:      reg,
+        parentToolContext: makeFakeCtx(),
+        parentProvider:    new MockProviderAdapter([]),
+        parentProviderId:  'mock',
+        parentModelId:     'mock-model',
+        // no runStore, no childRunId, no logger
+      },
+      {
+        sessionId:     'sess-no-obs',
+        goal:          'g',
+        maxIterations: 50,
+      },
+    );
+    // Agent was built successfully — onToolCall internally resolves to
+    // undefined and AidenAgent accepts that. Smoke check: agent exists.
+    expect(out.agent).toBeDefined();
+    expect(out.history.length).toBe(2);
+  });
 });

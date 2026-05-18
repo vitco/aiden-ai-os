@@ -1801,6 +1801,10 @@ export async function buildAgentRuntime(
     resolveMutates,
     runStore:            replRunStore,
     instanceId:          replInstanceId,
+    // v4.6 Phase 1 observability — info-level traces for spec at
+    // invocation, child-tools count, completion, and per-tool-call
+    // run_events on the child's runs row.
+    logger:              bootLogger.child('subagent'),
   }));
   bootLogger.child('subagent').info('spawn_sub_agent: wired (REPL only)', {
     instanceId: replInstanceId,
