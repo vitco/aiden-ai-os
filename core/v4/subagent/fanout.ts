@@ -43,8 +43,6 @@
  * provider plumbing. This is what made the offline smoke tractable.
  */
 
-import { randomUUID } from 'node:crypto';
-
 import type { Logger } from '../logger/logger';
 import { noopLogger } from '../logger/factory';
 import {
@@ -63,6 +61,7 @@ import {
   type MergeOptions,
 } from './merger';
 import { AIDEN_SUBAGENT_BUILD, type FanoutDiagnostics } from './diagnostics';
+import { spawnSubAgent, type SpawnSubAgentDeps, type SubAgentSpec } from './spawnSubAgent';
 
 // ── Public types ─────────────────────────────────────────────────────────
 
@@ -110,8 +109,34 @@ export interface FanoutOptions {
   merge: MergeStrategy;
   /** Available provider options for rotation. */
   providers: ProviderOption[];
-  /** Per-child runner. */
-  runChild: RunChildFn;
+  /**
+   * v4.6 Phase 2Q — DEPRECATED. Pre-Phase-2 each fanout call built
+   * an AidenAgent per child via this callback; v4.6 Phase 2Q routes
+   * each child through `spawnSubAgent` instead, so `runChild` is no
+   * longer invoked. Kept as an optional field for binary-compatible
+   * type imports (`aidenCLI.ts`, `commands/mcp.ts` still import
+   * `RunChildArgs`); will be removed in v4.7. New callers should
+   * omit it and supply `spawnDeps` instead.
+   */
+  runChild?: RunChildFn;
+  /**
+   * v4.6 Phase 2Q — required deps the fanout layer threads into each
+   * `spawnSubAgent` call (see `core/v4/subagent/spawnSubAgent.ts`).
+   * Carries `toolRegistry`, `parentProvider` (a FallbackAdapter when
+   * provider rotation is needed), `runStore` for child-run
+   * persistence, etc.
+   */
+  spawnDeps: SpawnSubAgentDeps;
+  /**
+   * v4.6 Phase 2Q — optional parent run / session identifiers.
+   * Threaded into each child's `spawnSubAgent` ctx as
+   * `parentRunId` / `parentSessionId` so child rows link back to
+   * the parent's run row via `spawned_from_run_id`. Null when the
+   * fanout is invoked from a context without a parent run row
+   * (e.g. MCP-mode where the wrapper doesn't create a parent row).
+   */
+  parentRunId?:     number;
+  parentSessionId?: string;
   /** Aggregator adapter — supplied by the caller. Same shape as the
    *  parent's adapter. Used only when `merge !== 'all'`. */
   aggregatorAdapter: MergeOptions['aggregatorAdapter'];
@@ -191,19 +216,21 @@ export async function runFanout(opts: FanoutOptions): Promise<FanoutResult> {
   const children: Array<Promise<SubagentResult>> = [];
   for (let i = 0; i < opts.n; i += 1) {
     const provider = rotation.assignments[i]!;
-    const prompt = opts.mode === 'ensemble'
-      ? opts.query!
-      : buildPartitionPrompt(opts.tasks![i]!);
-    const role = opts.mode === 'partition' ? opts.tasks![i]!.role : undefined;
-    children.push(spawnOne({
-      index:       i,
-      prompt,
+    const task = opts.mode === 'partition' ? opts.tasks![i]! : null;
+    const role = task?.role;
+    children.push(spawnViaPrimitive({
+      index:         i,
+      query:         opts.mode === 'ensemble' ? opts.query! : task!.goal,
+      context:       task?.context,
       role,
       provider,
+      singleProviderWarning: rotation.singleProviderWarning,
       maxIterations: budget.maxIterations,
       perTimeoutMs:  budget.perSubagentTimeoutMs,
       wallSignal:    wallController.signal,
-      runChild:      opts.runChild,
+      spawnDeps:     opts.spawnDeps,
+      parentRunId:   opts.parentRunId,
+      parentSessionId: opts.parentSessionId,
       logger:        logger.child(`#${i}:${provider.providerId}`),
       now,
     }));
@@ -254,75 +281,126 @@ export async function runFanout(opts: FanoutOptions): Promise<FanoutResult> {
 
 // ── Internals ────────────────────────────────────────────────────────────
 
-interface SpawnOneArgs {
+/**
+ * v4.6 Phase 2Q — single-child spawn args. Replaces the pre-Phase-2
+ * `SpawnOneArgs` shape (which called `runChild` directly). The new
+ * shape delegates everything past the rotation slot to
+ * `spawnSubAgent`, which owns the run row + abort plumbing internally.
+ *
+ * Per-child timeout (`perTimeoutMs`) is kept here so the fanout layer
+ * still enforces its own envelope around each child — note that
+ * `spawnSubAgent` ALSO has its own `timeoutMs`, but we hand it the
+ * per-child fanout cap via `spec.timeoutMs` so the two systems agree.
+ * `wallSignal` carries the outer wall-clock cap; we pass it as
+ * `ctx.signal` so the primitive cascades it into the child loop.
+ */
+interface SpawnViaPrimitiveArgs {
   index:           number;
-  prompt:          string;
+  /** Either the ensemble query, or the partition task's `goal`. */
+  query:           string;
+  /** Partition-mode background — flows into `spec.context`. */
+  context?:        string;
   role?:           string;
   provider:        ProviderOption;
+  /**
+   * v4.6 Phase 2Q-A-FIX — when true, the rotation pool has fewer
+   * than 2 distinct providerIds (every assignment is the same
+   * provider). The fanout layer omits the per-spawn provider
+   * override in this case so children inherit the parent's adapter
+   * directly, avoiding a `provider_not_found` from 2P's strict
+   * validation when the parent is NOT a FallbackAdapter. The
+   * override path only adds value when rotation produces diversity.
+   */
+  singleProviderWarning: boolean;
   maxIterations:   number;
   perTimeoutMs:    number;
   wallSignal:      AbortSignal;
-  runChild:        RunChildFn;
+  spawnDeps:       SpawnSubAgentDeps;
+  parentRunId?:    number;
+  parentSessionId?: string;
   logger:          Logger;
   now:             () => number;
 }
 
-async function spawnOne(args: SpawnOneArgs): Promise<SubagentResult> {
+/**
+ * Spawn one child via the `spawnSubAgent` primitive and adapt its
+ * envelope to the merger's `SubagentResult` shape. Centralises the
+ * fanout-layer → primitive-layer conversion in one place — every
+ * call site goes through here so a future envelope-shape change
+ * has a single edit point.
+ *
+ * Envelope → SubagentResult mapping:
+ *   - `envelope.summary` → `output` (empty string on failure;
+ *      the merger uses `output.length === 0` for the failed test).
+ *   - `envelope.error`   → `error` (undefined when ok).
+ *   - `envelope.metrics.durationMs` → ignored; we capture wall-clock
+ *      at this layer for diagnostics consistency with v4.1's shape.
+ */
+async function spawnViaPrimitive(args: SpawnViaPrimitiveArgs): Promise<SubagentResult> {
   const startedAt = args.now();
-  // Per-child controller, aborted on wall-cap OR per-child timeout.
-  const childController = new AbortController();
-  const timer = setTimeout(() => childController.abort(),
-    args.perTimeoutMs);
-  const wallHandler = () => childController.abort();
-  if (args.wallSignal.aborted) childController.abort();
-  else args.wallSignal.addEventListener('abort', wallHandler, { once: true });
 
-  const id = randomUUID();
   args.logger.info('child: spawned', {
-    id,
-    provider: `${args.provider.providerId}:${args.provider.modelId}`,
-    role:     args.role,
+    provider:  `${args.provider.providerId}:${args.provider.modelId}`,
+    role:      args.role,
     timeoutMs: args.perTimeoutMs,
   });
 
-  let output = '';
-  let error:  string | undefined;
+  // v4.6 Phase 2Q-A-FIX — only forward the per-spawn provider
+  // override when rotation has real diversity (>= 2 distinct
+  // providerIds). For single-provider pools, every child would be
+  // assigned the same providerId, so the override path adds nothing
+  // — and worse, it trips 2P's `resolveChildProvider` rejection when
+  // the parent is a non-FallbackAdapter ("single-provider
+  // configuration" branch). Omitting it lets the child inherit the
+  // parent's adapter, which is the correct effective behavior.
+  const spec: SubAgentSpec = {
+    goal:          args.role ? `[role: ${args.role}] ${args.query}` : args.query,
+    context:       args.context,
+    maxIterations: args.maxIterations,
+    timeoutMs:     args.perTimeoutMs,
+    provider:      args.singleProviderWarning ? undefined : args.provider.providerId,
+  };
+
+  let envelope;
   try {
-    output = await args.runChild({
-      index:         args.index,
-      prompt:        args.prompt,
-      role:          args.role,
-      provider:      args.provider,
-      signal:        childController.signal,
-      maxIterations: args.maxIterations,
-      logger:        args.logger,
+    envelope = await spawnSubAgent(spec, args.spawnDeps, {
+      signal:          args.wallSignal,
+      parentRunId:     args.parentRunId,
+      parentSessionId: args.parentSessionId,
     });
   } catch (err) {
-    error = err instanceof Error ? err.message : String(err);
-    if (childController.signal.aborted) {
-      error = `aborted (timeout=${args.perTimeoutMs}ms or parent abort): ${error}`;
-    }
-    args.logger.warn('child: errored', { error });
-  } finally {
-    clearTimeout(timer);
-    args.wallSignal.removeEventListener('abort', wallHandler);
+    // spawnSubAgent's contract says it never throws — but defend in
+    // depth: a thrown error from the primitive would otherwise sink
+    // the whole Promise.all, which would silently kill sibling
+    // children. Surface as a failed SubagentResult instead.
+    const error = err instanceof Error ? err.message : String(err);
+    args.logger.warn('child: primitive threw', { error });
+    return {
+      index:      args.index,
+      providerId: args.provider.providerId,
+      modelId:    args.provider.modelId,
+      output:     '',
+      error,
+      elapsedMs:  args.now() - startedAt,
+    };
   }
 
   const elapsedMs = args.now() - startedAt;
-  args.logger.info('child: done', { elapsedMs, ok: !error && output.length > 0 });
+  const error = envelope.error ?? undefined;
+  args.logger.info('child: done', {
+    elapsedMs,
+    ok:         envelope.ok,
+    status:     envelope.status,
+    exitReason: envelope.exitReason,
+    childRunId: envelope.childRunId,
+  });
 
   return {
     index:      args.index,
     providerId: args.provider.providerId,
     modelId:    args.provider.modelId,
-    output:     error ? '' : output,
+    output:     envelope.ok ? (envelope.summary ?? '') : '',
     error,
     elapsedMs,
   };
-}
-
-function buildPartitionPrompt(task: PartitionTask): string {
-  const role = task.role ? `Role: ${task.role}\n` : '';
-  const context = task.context ? `\nContext:\n${task.context}\n` : '';
-  return `${role}Goal: ${task.goal}${context}`;
 }

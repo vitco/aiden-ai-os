@@ -1629,10 +1629,42 @@ export async function buildAgentRuntime(
   // shared subsystems (registry, skillLoader, paths, memoryManager,
   // promptBuilder, promptBuilderOptions) are read-only and pass by
   // reference.
+  // v4.6 Phase 2Q — `runFanout` now routes each child through
+  // `spawnSubAgent` instead of the legacy `runChild` closure below.
+  // `spawnDeps` mirrors the deps the `makeSpawnSubAgentTool` factory
+  // accepts (see lines below this block). The legacy `runChild`
+  // closure remains for binary type-compat; it is no longer invoked
+  // and will be deleted in v4.7 (Dispatch 2R cleanup).
   toolRegistry.register(makeSubagentFanoutTool({
     logger: bootLogger.child('subagent'),
     resolveActiveModel: () => ({ providerId, modelId }),
     aggregatorAdapter: adapter,
+    spawnDeps: {
+      toolRegistry,
+      parentToolContext: {
+        cwd:            process.cwd(),
+        paths,
+        sessions:       sessionManager,
+        memory:         memoryManager,
+        memoryGuard,
+        ssrfProtection,
+        tirithScanner,
+        skillLoader,
+      },
+      parentProvider:      adapter,
+      parentProviderId:    providerId,
+      parentModelId:       modelId,
+      resolveVerifiedFlag,
+      resolveToolset,
+      resolveMutates,
+      runStore:            replRunStore,
+      instanceId:          replInstanceId,
+      logger:              bootLogger.child('subagent'),
+    },
+    // No resolveParentRunId / resolveParentSessionId for REPL-fanout
+    // — REPL turns don't open a parent runs row by default, so
+    // children's `spawned_from_run_id` stays NULL. Phase 2Q-B will
+    // wire this once REPL turns produce their own runs row.
     resolveProviders: (): ProviderOption[] => {
       // When the parent uses FallbackAdapter, expose every key-present
       // slot's (providerId, modelId) so rotation can spread children

@@ -52,6 +52,7 @@ import {
   type MergeStrategy,
 } from '../../../core/v4/subagent/merger';
 import type { ProviderOption } from '../../../core/v4/subagent/providerRotation';
+import type { SpawnSubAgentDeps } from '../../../core/v4/subagent/spawnSubAgent';
 
 /** Caller-supplied factory inputs. The runtime supplies these once at
  *  boot from the closure scope (provider list, parent's active model,
@@ -67,9 +68,41 @@ export interface SubagentFanoutFactoryOptions {
   /** Adapter used for aggregator calls. Production threads the
    *  parent's adapter; tests inject a stub. */
   aggregatorAdapter: ProviderAdapter;
-  /** Per-child runner. Production constructs an AidenAgent per
-   *  child; tests inject a stub. */
-  runChild: (args: RunChildArgs) => Promise<string>;
+  /**
+   * v4.6 Phase 2Q — DEPRECATED. Pre-refactor each fanout child ran
+   * via this callback (which constructed an ad-hoc AidenAgent).
+   * Phase 2Q routes children through the `spawn_sub_agent` primitive
+   * instead — supplied via `spawnDeps`. Kept here for binary type
+   * compatibility with older external callers; will be removed in
+   * v4.7 (Dispatch 2R cleanup). New wiring should omit it.
+   */
+  runChild?: (args: RunChildArgs) => Promise<string>;
+  /**
+   * v4.6 Phase 2Q — deps for `spawnSubAgent` (the primitive the
+   * fanout layer now calls N times). Same shape as
+   * `SpawnSubAgentFactoryOptions extends SpawnSubAgentDeps` in
+   * `spawnSubAgentTool.ts`. Production wires this from REPL boot.
+   *
+   * OPTIONAL at construction time so the boot-time stub (registered
+   * in `tools/v4/index.ts` before the runtime resolves real deps)
+   * can be created without fabricating placeholder deps. The handler
+   * fails loudly with a clear "tool not wired" error if `spawnDeps`
+   * is missing AND `resolveProviders()` returns providers — which
+   * only happens with a half-wired runtime.
+   */
+  spawnDeps?: SpawnSubAgentDeps;
+  /**
+   * v4.6 Phase 2Q — optional resolver for the parent's current
+   * `runs.id`. Mirror of `SpawnSubAgentFactoryOptions.resolveParentRunId`.
+   * Called at handler-dispatch time so REPL turns can populate
+   * child rows' `spawned_from_run_id` link.
+   */
+  resolveParentRunId?:     () => number | undefined;
+  /**
+   * v4.6 Phase 2Q — optional resolver for the parent's session id.
+   * Mirror of `SpawnSubAgentFactoryOptions.resolveParentSessionId`.
+   */
+  resolveParentSessionId?: () => string | undefined;
   /** Optional logger — defaults to noop. */
   logger?: Logger;
 }
@@ -213,6 +246,26 @@ export function makeSubagentFanoutTool(
       const aggOverride = resolveAggregatorOverride();
       const aggregatorModel = aggOverride ?? factory.resolveActiveModel();
 
+      // v4.6 Phase 2Q — spawnDeps absent means we're still bound to
+      // the boot-time stub (the runtime hasn't replaced the
+      // registration with the real factory yet). Surface the same
+      // "tool not wired" failure shape MCP / REPL surface in their
+      // own pre-wired states.
+      if (!factory.spawnDeps) {
+        return {
+          success: false,
+          error:
+            'subagent_fanout: tool not wired — runtime did not supply spawnDeps. ' +
+            'Call register(makeSubagentFanoutTool({...spawnDeps})) after buildAgentRuntime.',
+        };
+      }
+
+      // v4.6 Phase 2Q — resolve parent identity at dispatch time so
+      // REPL turns that opened a run row between boot and now still
+      // link children to the right parent.
+      const parentRunId     = factory.resolveParentRunId?.();
+      const parentSessionId = factory.resolveParentSessionId?.();
+
       const fanoutOpts: FanoutOptions = {
         mode,
         query,
@@ -220,7 +273,9 @@ export function makeSubagentFanoutTool(
         n,
         merge,
         providers,
-        runChild:           factory.runChild,
+        spawnDeps:          factory.spawnDeps,
+        parentRunId,
+        parentSessionId,
         aggregatorAdapter:  factory.aggregatorAdapter,
         aggregatorModel,
         timeoutMs,

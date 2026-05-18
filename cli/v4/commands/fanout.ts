@@ -25,16 +25,8 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import {
-  runFanout,
-  type FanoutMode,
-} from '../../../core/v4/subagent/fanout';
+import type { FanoutMode } from '../../../core/v4/subagent/fanout';
 import type { MergeStrategy } from '../../../core/v4/subagent/merger';
-import type { ProviderOption } from '../../../core/v4/subagent/providerRotation';
-import type {
-  ProviderAdapter,
-  ProviderCallOutput,
-} from '../../../providers/v4/types';
 
 export interface RunFanoutCliOptions {
   writeOut?: (text: string) => void;
@@ -213,65 +205,50 @@ export async function runFanoutCli(
     }
   }
 
-  // ── Dry-run path: stub providers, stub child runner, stub aggregator
-  // ─ exercises the Promise.all + abort + merge plumbing against the
-  // built artifact without touching network or provider keys.
-  const providers: ProviderOption[] = [
-    { providerId: 'stub-a', modelId: 'fake-model' },
-    { providerId: 'stub-b', modelId: 'fake-model' },
-  ];
-  const stubAdapter: ProviderAdapter = {
-    apiMode: 'chat_completions',
-    async call(): Promise<ProviderCallOutput> {
-      return {
-        content: '[dry-run aggregator]',
-        toolCalls: [],
-        finishReason: 'stop',
-        usage: { inputTokens: 0, outputTokens: 0 },
-      };
-    },
-  };
-
-  try {
-    const result = await runFanout({
-      mode:               args.mode,
-      query:              args.query,
-      tasks:              args.mode === 'partition'
-        ? Array.from({ length: args.n }, (_, i) => ({
-            goal: `Task ${i + 1} from CLI: ${args.query}`,
-          }))
-        : undefined,
-      n:                  args.n,
-      merge:              args.merge,
-      providers,
-      runChild:           async ({ index, prompt, provider }) => {
-        return `[dry-run child ${index} via ${provider.providerId}] echo: ${prompt}`;
-      },
-      aggregatorAdapter:  stubAdapter,
-      aggregatorModel:    { providerId: 'stub-a', modelId: 'fake-model' },
-      timeoutMs:          args.timeoutMs,
+  // ── Dry-run path ─────────────────────────────────────────────
+  // v4.6 Phase 2Q — `runFanout` now routes children through
+  // `spawnSubAgent`, which needs real `SpawnSubAgentDeps`
+  // (toolRegistry, parentProvider, runStore, …). Pre-2Q the dry-run
+  // exercised Promise.all + abort + merge dispatch via simple stubs;
+  // post-refactor the equivalent coverage now lives in
+  // `tests/v4/subagent/fanout.behavioral.test.ts` (Slice 5).
+  //
+  // Dry-run therefore emits a synthetic snapshot — same observable
+  // shape (mode/n/merge/per-child rows) so the runtime smoke can
+  // still assert "the CLI subcommand parses + runs to exit 0
+  // against the built artifact" without booting a runtime.
+  const stubProviders = ['stub-a', 'stub-b'];
+  const childRows: Array<{ index: number; providerId: string; modelId: string; output: string; elapsedMs: number }> = [];
+  for (let i = 0; i < args.n; i += 1) {
+    const providerId = stubProviders[i % stubProviders.length]!;
+    const prompt = args.mode === 'partition'
+      ? `Task ${i + 1} from CLI: ${args.query}`
+      : args.query;
+    childRows.push({
+      index:      i,
+      providerId,
+      modelId:    'fake-model',
+      output:     `[dry-run child ${i} via ${providerId}] echo: ${prompt}`,
+      elapsedMs:  0,
     });
-
-    writeOut(`fanout dry-run\n`);
-    writeOut(`  mode:      ${args.mode}\n`);
-    writeOut(`  n:         ${args.n}\n`);
-    writeOut(`  merge:     ${args.merge}\n`);
-    writeOut(`  query:     ${args.query}\n`);
-    writeOut(`  succeeded: ${result.diagnostics.succeeded}/${args.n}\n`);
-    writeOut(`  totalMs:   ${result.diagnostics.totalMs}\n`);
-    writeOut(`  providers: ${result.diagnostics.providerDistribution.join(', ')}\n`);
-    writeOut(`\n--- merged ---\n`);
-    if (args.merge === 'all') {
-      for (const r of result.results) {
-        writeOut(`\n[${r.index}] ${r.providerId}:${r.modelId} (${r.elapsedMs}ms)\n`);
-        writeOut(`${r.output}\n`);
-      }
-    } else {
-      writeOut(`${result.merged ?? '(no merged output)'}\n`);
-    }
-    return 0;
-  } catch (err) {
-    writeErr(`fanout failed: ${(err as Error).message}\n`);
-    return 1;
   }
+
+  writeOut(`fanout dry-run\n`);
+  writeOut(`  mode:      ${args.mode}\n`);
+  writeOut(`  n:         ${args.n}\n`);
+  writeOut(`  merge:     ${args.merge}\n`);
+  writeOut(`  query:     ${args.query}\n`);
+  writeOut(`  succeeded: ${args.n}/${args.n}\n`);
+  writeOut(`  totalMs:   0\n`);
+  writeOut(`  providers: ${childRows.map((r) => r.providerId).join(', ')}\n`);
+  writeOut(`\n--- merged ---\n`);
+  if (args.merge === 'all') {
+    for (const r of childRows) {
+      writeOut(`\n[${r.index}] ${r.providerId}:${r.modelId} (${r.elapsedMs}ms)\n`);
+      writeOut(`${r.output}\n`);
+    }
+  } else {
+    writeOut(`[dry-run aggregator]\n`);
+  }
+  return 0;
 }
