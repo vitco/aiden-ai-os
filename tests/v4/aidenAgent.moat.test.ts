@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import os from 'node:os';
 import path from 'node:path';
 import { AidenAgent, type ToolExecutor } from '../../core/v4/aidenAgent';
@@ -7,6 +7,10 @@ import {
   PlannerGuard,
   type PlannerGuardRegistry,
 } from '../../moat/plannerGuard';
+import {
+  initRuntimeToggles,
+  _resetRuntimeTogglesForTests,
+} from '../../core/v4/runtimeToggles';
 import { HonestyEnforcement } from '../../moat/honestyEnforcement';
 import { SkillTeacher } from '../../moat/skillTeacher';
 import type { ToolHandler } from '../../core/v4/toolRegistry';
@@ -94,6 +98,20 @@ describe('AidenAgent — without moat (baseline)', () => {
 });
 
 describe('AidenAgent — PlannerGuard wiring', () => {
+  // v4.6 Phase 2M — PlannerGuard's per-turn narrowing is opt-in
+  // (default OFF). Tests that assert narrowed behaviour explicitly
+  // initialise the runtime toggles singleton with `planner_guard: ON`
+  // via env. Reset between cases so other test files see the default.
+  beforeEach(() => {
+    process.env.AIDEN_PLANNER_GUARD = '1';
+    _resetRuntimeTogglesForTests();
+    initRuntimeToggles({ env: process.env });
+  });
+  afterEach(() => {
+    delete process.env.AIDEN_PLANNER_GUARD;
+    _resetRuntimeTogglesForTests();
+  });
+
   it('2. tools narrowed before loop based on user message', async () => {
     const provider = new MockProviderAdapter([
       MockProviderAdapter.stop('hi'),
@@ -165,6 +183,115 @@ describe('AidenAgent — PlannerGuard wiring', () => {
     expect(toolsSeen).not.toContain('web_search');
     // memory_add IS expected — "remember" matches the memory rule.
     expect(toolsSeen).toContain('memory_add');
+  });
+});
+
+// ──────────────────────────────────────────────────────────────────────────
+// v4.6 Phase 2M — PlannerGuard opt-in toggle
+// ──────────────────────────────────────────────────────────────────────────
+
+describe('AidenAgent — PlannerGuard opt-in toggle (v4.6 Phase 2M)', () => {
+  beforeEach(() => {
+    // Make sure no prior test left the env / singleton dirty.
+    delete process.env.AIDEN_PLANNER_GUARD;
+    _resetRuntimeTogglesForTests();
+  });
+  afterEach(() => {
+    delete process.env.AIDEN_PLANNER_GUARD;
+    _resetRuntimeTogglesForTests();
+  });
+
+  it('A. default OFF: narrowTools returns full this.tools even when plannerGuard wired', async () => {
+    // No env, no slash command. Default state of planner_guard is OFF.
+    initRuntimeToggles({ env: process.env });
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.stop('hi'),
+    ]);
+    const guard = new PlannerGuard(registry, 'rule_based');
+    const agent = new AidenAgent({
+      provider,
+      toolExecutor: okExecutor,
+      tools: ALL_SCHEMAS,
+      plannerGuard: guard,
+    });
+    // User message that would normally narrow to ONLY file tools.
+    await agent.runConversation([userMsg('please write this file')]);
+    const toolsSeen = provider.capturedInputs[0].tools.map((t) => t.name);
+    // With toggle OFF, full catalog flows through — web_search remains
+    // visible to the model despite the file-only intent.
+    expect(toolsSeen).toContain('file_write');
+    expect(toolsSeen).toContain('web_search');
+    expect(toolsSeen).toContain('memory_add');
+  });
+
+  it('B. AIDEN_PLANNER_GUARD=1 in env: narrowing engages', async () => {
+    process.env.AIDEN_PLANNER_GUARD = '1';
+    initRuntimeToggles({ env: process.env });
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.stop('hi'),
+    ]);
+    const guard = new PlannerGuard(registry, 'rule_based');
+    const agent = new AidenAgent({
+      provider,
+      toolExecutor: okExecutor,
+      tools: ALL_SCHEMAS,
+      plannerGuard: guard,
+    });
+    await agent.runConversation([userMsg('please write this file')]);
+    const toolsSeen = provider.capturedInputs[0].tools.map((t) => t.name);
+    expect(toolsSeen).toContain('file_write');
+    expect(toolsSeen).not.toContain('web_search');
+  });
+
+  it('C. live flip via runtimeToggles.set: turn 1 OFF, turn 2 ON narrows', async () => {
+    initRuntimeToggles({ env: process.env });
+    // Two-turn scripted provider — both turns are simple `stop` responses.
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.stop('one'),
+      MockProviderAdapter.stop('two'),
+    ]);
+    const guard = new PlannerGuard(registry, 'rule_based');
+    const agent = new AidenAgent({
+      provider,
+      toolExecutor: okExecutor,
+      tools: ALL_SCHEMAS,
+      plannerGuard: guard,
+    });
+
+    // Turn 1: toggle OFF (default) — full catalog.
+    await agent.runConversation([userMsg('please write this file')]);
+    const turn1Tools = provider.capturedInputs[0].tools.map((t) => t.name);
+    expect(turn1Tools).toContain('web_search');
+
+    // Flip the toggle mid-session (simulates /planner-guard on).
+    const { getRuntimeToggles } = await import('../../core/v4/runtimeToggles');
+    await getRuntimeToggles().set('planner_guard', true, { persist: false });
+
+    // Turn 2: toggle ON — narrowing engages on the next call.
+    await agent.runConversation([userMsg('please write this file')]);
+    const turn2Tools = provider.capturedInputs[1].tools.map((t) => t.name);
+    expect(turn2Tools).toContain('file_write');
+    expect(turn2Tools).not.toContain('web_search');
+  });
+
+  it('D. no plannerGuard wired: still no-op regardless of toggle', async () => {
+    process.env.AIDEN_PLANNER_GUARD = '1';
+    initRuntimeToggles({ env: process.env });
+    const provider = new MockProviderAdapter([
+      MockProviderAdapter.stop('hi'),
+    ]);
+    // No plannerGuard option passed.
+    const agent = new AidenAgent({
+      provider,
+      toolExecutor: okExecutor,
+      tools: ALL_SCHEMAS,
+    });
+    await agent.runConversation([userMsg('please write this file')]);
+    const toolsSeen = provider.capturedInputs[0].tools.map((t) => t.name);
+    // Full catalog — no plannerGuard wired, so the toggle is moot
+    // (narrowTools returns this.tools because !this.plannerGuard).
+    expect(toolsSeen).toContain('file_write');
+    expect(toolsSeen).toContain('web_search');
   });
 });
 

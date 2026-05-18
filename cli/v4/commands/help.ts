@@ -86,6 +86,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   daemon: 'System',
   // v4.5 Phase 8b — contextual capability suggestions.
   suggestions: 'System',
+  // v4.6 Phase 2M — opt-in keyword-based tool narrower.
+  'planner-guard': 'System',
 
   // ── Authentication ──
   auth: 'Authentication',

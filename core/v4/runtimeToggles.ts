@@ -39,7 +39,7 @@
 
 // ── Public types ───────────────────────────────────────────────────────────
 
-export type ToggleKey = 'sandbox' | 'tce' | 'browser_depth' | 'suggestions';
+export type ToggleKey = 'sandbox' | 'tce' | 'browser_depth' | 'suggestions' | 'planner_guard';
 
 export type ToggleSource = 'env' | 'config' | 'default';
 
@@ -101,6 +101,13 @@ const ENV_VAR: Record<ToggleKey, string> = {
   // env (this is mostly a UX toggle) but included for symmetry with
   // the other subsystem toggles.
   suggestions:   'AIDEN_SUGGESTIONS',
+  // v4.6 Phase 2M — keyword-based per-turn tool narrowing.
+  // Default OFF: smart models (GPT-5.5, Claude Sonnet 4.5+, Opus)
+  // pick tools fine from a full catalog. PlannerGuard adds latency
+  // (1 LLM call when mode=llm_classified) and occasionally strips
+  // tools the model genuinely needed. Opt in for small local models
+  // that get overwhelmed by 50+ tool schemas.
+  planner_guard: 'AIDEN_PLANNER_GUARD',
 };
 
 const CONFIG_KEY: Record<ToggleKey, string> = {
@@ -108,9 +115,30 @@ const CONFIG_KEY: Record<ToggleKey, string> = {
   tce:           'runtime_toggles.tce',
   browser_depth: 'runtime_toggles.browser_depth',
   suggestions:   'runtime_toggles.suggestions',
+  planner_guard: 'runtime_toggles.planner_guard',
 };
 
-const ALL_KEYS: ReadonlyArray<ToggleKey> = ['sandbox', 'tce', 'browser_depth', 'suggestions'];
+const ALL_KEYS: ReadonlyArray<ToggleKey> = [
+  'sandbox', 'tce', 'browser_depth', 'suggestions', 'planner_guard',
+];
+
+/**
+ * v4.6 Phase 2M — per-key default. Pre-2M every toggle defaulted to
+ * `true` (sandbox/tce/browser-depth/suggestions all ship on); the
+ * `planner_guard` toggle is the first to default `false`, so the
+ * resolver needs a per-key default map rather than a hardcoded `true`.
+ *
+ * Smart models (GPT-5.5, Claude Sonnet 4.5+, Opus) pick from the
+ * full tool catalog without help — keyword-based narrowing is a
+ * legacy workaround for smaller local models, opt in when needed.
+ */
+const DEFAULT_VALUE: Record<ToggleKey, boolean> = {
+  sandbox:       true,
+  tce:           true,
+  browser_depth: true,
+  suggestions:   true,
+  planner_guard: false,
+};
 
 // ── Resolver primitives ────────────────────────────────────────────────────
 
@@ -170,8 +198,8 @@ export function buildRuntimeToggles(deps: RuntimeTogglesDeps = {}): RuntimeToggl
     // 3. config.yaml
     const cfgValue = readConfig(deps.configRead, key);
     if (cfgValue !== null) return { value: cfgValue, source: 'config' };
-    // 4. default
-    return { value: true, source: 'default' };
+    // 4. default (v4.6 Phase 2M — per-key, see DEFAULT_VALUE)
+    return { value: DEFAULT_VALUE[key], source: 'default' };
   }
 
   function fire(key: ToggleKey): void {

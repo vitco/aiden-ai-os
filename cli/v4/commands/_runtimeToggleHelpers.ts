@@ -32,6 +32,7 @@ const LABEL: Record<ToggleKey, string> = {
   tce:           'TCE',
   browser_depth: 'Browser depth',
   suggestions:   'Suggestions',
+  planner_guard: 'Planner-Guard',
 };
 
 const CONFIG_DOTTED: Record<ToggleKey, string> = {
@@ -39,6 +40,7 @@ const CONFIG_DOTTED: Record<ToggleKey, string> = {
   tce:           'runtime_toggles.tce',
   browser_depth: 'runtime_toggles.browser_depth',
   suggestions:   'runtime_toggles.suggestions',
+  planner_guard: 'runtime_toggles.planner_guard',
 };
 
 /**

@@ -910,6 +910,23 @@ export class AidenAgent {
     history: Message[],
   ): Promise<ToolSchema[]> {
     if (!this.plannerGuard) return this.tools;
+    // v4.6 Phase 2M — runtime toggle gates the keyword-based narrower.
+    // Default OFF: smart models (GPT-5.5, Claude Sonnet 4.5+, Opus)
+    // pick tools fine from the full catalog every turn, matching the
+    // reference multi-agent system's pattern. Opt in via env
+    // (AIDEN_PLANNER_GUARD=1) or `/planner-guard on` for small local
+    // models that need help. The toggle is read on each call so a
+    // mid-conversation flip takes effect on the next turn without
+    // restarting the agent.
+    //
+    // Lazy `require` to avoid a hard import dependency in the agent
+    // core — pure unit tests of AidenAgent that don't initialise the
+    // runtime toggles singleton keep working (the lazy getter returns
+    // an env-only fallback resolver per runtimeToggles.ts:213).
+    const { getRuntimeToggles } = await import('./runtimeToggles');
+    if (!getRuntimeToggles().isEnabled('planner_guard')) {
+      return this.tools;
+    }
     const decision = await this.plannerGuard.decide(userMsg, history);
     this.onPlannerGuardDecision?.(decision);
     const allowed = new Set(decision.selectedTools);

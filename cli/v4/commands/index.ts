@@ -52,6 +52,8 @@ import { browserDepth } from './browserDepth';
 import { daemonStatus } from './daemonStatus';
 // v4.5 Phase 8b — contextual capability suggestions toggle.
 import { suggestions } from './suggestions';
+// v4.6 Phase 2M — opt-in keyword-based tool narrower (default OFF).
+import { plannerGuard } from './plannerGuard';
 
 export {
   help,
@@ -94,6 +96,8 @@ export {
   daemonStatus,
   // v4.5 Phase 8b — contextual suggestions toggle.
   suggestions,
+  // v4.6 Phase 2M — opt-in keyword-based tool narrower.
+  plannerGuard,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -139,6 +143,8 @@ export const allCommands: SlashCommand[] = [
   daemonStatus,
   // v4.5 Phase 8b — contextual suggestions toggle.
   suggestions,
+  // v4.6 Phase 2M — opt-in keyword-based tool narrower (default OFF).
+  plannerGuard,
   clear,
   quit,
 ];
