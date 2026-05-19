@@ -1,3 +1,28 @@
+## v4.6.1 — 2026-05-20
+
+### Onboarding redesign
+- Disclaimer screen with framed banner and honest "still rough in spots" copy
+- 4-step loading sequence (system / skills / tools / memory) with timing readouts
+- Rich provider picker with badges, no defaults — force explicit selection
+- Live `/models` API fetch with curated static fallback for 6 providers
+- 3-step connection probe: key works → model accessible → tool calls supported
+- Success screen with 3 example prompts and REPL handoff
+- First-run hint banner
+- `/walkthrough` slash command — 5-screen guided tour
+
+### Site
+- Landing-site honesty rewrite: removed unshipped sections (dashboard mockup,
+  4-modes, watch mode, fake slash commands, unverifiable benchmark claims)
+- Added v4.6 feature cards reflecting what actually shipped
+- Hero, theme, navigation, contact form preserved
+
+### Known issues (deferred to v4.6.2)
+- Tool count shows "0 registered" briefly during loading (race condition)
+- `[skills] 72 loaded` line prints after success screen (race condition)
+- Capability card shows "60 tools" — actual count is 56 (display drift)
+
+---
+
 ## [4.6.0] — Sub-agents + Self-Improvement — 2026-05-19
 
 ### Added
