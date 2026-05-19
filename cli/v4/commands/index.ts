@@ -58,6 +58,8 @@ import { plannerGuard } from './plannerGuard';
 import { spawnPause } from './spawnPause';
 // v4.6 Phase 3b — self-improvement loop operator surface.
 import { recovery } from './recovery';
+// ONB1 slice 10 — new-user guided tour.
+import { walkthrough } from './walkthrough';
 
 export {
   help,
@@ -106,6 +108,8 @@ export {
   spawnPause,
   // v4.6 Phase 3b — self-improvement loop operator surface.
   recovery,
+  // ONB1 slice 10 — new-user guided tour.
+  walkthrough,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -157,6 +161,8 @@ export const allCommands: SlashCommand[] = [
   spawnPause,
   // v4.6 Phase 3b — self-improvement loop operator surface.
   recovery,
+  // ONB1 slice 10 — new-user guided tour.
+  walkthrough,
   clear,
   quit,
 ];
