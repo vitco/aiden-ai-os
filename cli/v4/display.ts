@@ -2126,22 +2126,33 @@ export class Display {
     // turn entirely. Resets when the next streaming turn begins (see
     // streamPartial header init) and on streamComplete cleanup.
     this.uiEventsFiredThisTurn = true;
-    if (name === 'ui_task_update') { this.renderUiTaskUpdate(args); return; }
-    if (name === 'ui_task_done')   { this.renderUiTaskDone(args);   return; }
-    // Other 5 events: silent until Phase 2.4 lands their renderers.
+    if (name === 'ui_task_update')      { this.renderUiTaskUpdate(args);      return; }
+    if (name === 'ui_task_done')        { this.renderUiTaskDone(args);        return; }
+    if (name === 'ui_command_result')   { this.renderUiCommandResult(args);   return; }
+    if (name === 'ui_test_result')      { this.renderUiTestResult(args);      return; }
+    if (name === 'ui_approval_request') { this.renderUiApprovalRequest(args); return; }
+    if (name === 'ui_toast')            { this.renderUiToast(args);           return; }
+    if (name === 'ui_artifact_created') { this.renderUiArtifactCreated(args); return; }
+    // Unknown event names silent-ignore (defensive — future registrations).
   }
 
   private renderUiTaskUpdate(args: Record<string, unknown>): void {
-    const taskId = typeof args.task_id === 'string' ? args.task_id : '';
-    const label  = typeof args.label   === 'string' ? args.label   : '';
-    const status = typeof args.status  === 'string' ? args.status  : '';
+    const taskId  = typeof args.task_id === 'string' ? args.task_id : '';
+    const label   = typeof args.label   === 'string' ? args.label   : '';
+    const status  = typeof args.status  === 'string' ? args.status  : '';
+    const kindArg = typeof args.kind    === 'string' ? args.kind    : 'task';
+    const depth   = typeof args.depth   === 'number' && args.depth > 0 ? args.depth : 0;
     if (!taskId || !label) return;
     this.commitStreamChunk();
     const glyph = status === 'paused' ? '⏸' : status === 'blocked' ? '⛔' : '⟳';
-    const kind: ColorKind = status === 'running' ? 'tool' : 'warn';
+    const colorKind: ColorKind = status === 'running' ? 'tool' : 'warn';
     this.uiTaskRows.set(taskId, { label });
-    const short = label.length > 80 ? label.slice(0, 79) + '…' : label;
-    this.out.write(`${this.skin.applyColors(`${glyph} ${short}`, kind)}\n`);
+    const short  = label.length > 80 ? label.slice(0, 79) + '…' : label;
+    // v4.8.0 Phase 2.4 — subagent kind: indent by depth so nested rows
+    // visually tier below their parent. parent_id telemetry lands in
+    // Phase 2.5 (daemon serializer); the renderer only uses depth.
+    const indent = kindArg === 'subagent' ? '  '.repeat(depth) : '';
+    this.out.write(`${indent}${this.skin.applyColors(`${glyph} ${short}`, colorKind)}\n`);
     this.streamLastEndedNewline = true;
   }
 
@@ -2162,6 +2173,85 @@ export class Display {
     const shortSum   = summary.length > 120 ? summary.slice(0, 119) + '…' : summary;
     const tail = shortSum ? ` — ${shortSum}` : '';
     this.out.write(`${this.skin.applyColors(`${glyph} ${shortLabel}${tail}`, kind)}\n`);
+    this.streamLastEndedNewline = true;
+  }
+
+  private renderUiCommandResult(args: Record<string, unknown>): void {
+    const command = typeof args.command === 'string' ? args.command : '';
+    if (!command) return;
+    const stdout  = typeof args.stdout  === 'string' ? args.stdout  : '';
+    const stderr  = typeof args.stderr  === 'string' ? args.stderr  : '';
+    const exitCode = typeof args.exit_code === 'number' ? args.exit_code : 0;
+    this.commitStreamChunk();
+    const sk = this.skin, ok = exitCode === 0;
+    const cap = (t: string): string => t.split('\n').slice(0, 5).join('\n');
+    let out = `${sk.applyColors(`▸ ${command}`, ok ? 'success' : 'error')}\n`;
+    if (stdout) out += `${sk.applyColors(cap(stdout), 'muted')}\n`;
+    if (stderr) out += `${sk.applyColors(cap(stderr), 'error')}\n`;
+    if (!ok)    out += `${sk.applyColors(`(exit ${exitCode})`, 'error')}\n`;
+    this.out.write(out);
+    this.streamLastEndedNewline = true;
+  }
+
+  private renderUiTestResult(args: Record<string, unknown>): void {
+    const framework = typeof args.framework === 'string' ? args.framework : '';
+    if (!framework) return;
+    const passed = typeof args.passed === 'number' ? args.passed : 0;
+    const failed = typeof args.failed === 'number' ? args.failed : 0;
+    const skipped = typeof args.skipped === 'number' ? args.skipped : 0;
+    const durationMs = typeof args.duration_ms === 'number' ? args.duration_ms : 0;
+    this.commitStreamChunk();
+    const ok = failed === 0;
+    const parts = [`${passed} passed`, `${failed} failed`];
+    if (skipped > 0) parts.push(`${skipped} skipped`);
+    const dur = durationMs > 0 ? ` in ${durationMs}ms` : '';
+    this.out.write(`${this.skin.applyColors(`${ok ? '✓' : '✗'} ${framework}: ${parts.join(', ')}${dur}`, ok ? 'success' : 'error')}\n`);
+    this.streamLastEndedNewline = true;
+  }
+
+  private renderUiApprovalRequest(args: Record<string, unknown>): void {
+    const prompt = typeof args.prompt === 'string' ? args.prompt : '';
+    if (!prompt) return;
+    const riskTier = typeof args.risk_tier === 'string' ? args.risk_tier : 'medium';
+    const reason = typeof args.reason === 'string' ? args.reason : '';
+    this.commitStreamChunk();
+    const kind: ColorKind = riskTier === 'low' ? 'success'
+      : (riskTier === 'high' || riskTier === 'critical') ? 'error' : 'warn';
+    const shortP = prompt.length > 160 ? prompt.slice(0, 159) + '…' : prompt;
+    let out = `${this.skin.applyColors(`⚠ Approval needed: ${shortP}`, kind)}\n`;
+    if (reason) {
+      const shortR = reason.length > 200 ? reason.slice(0, 199) + '…' : reason;
+      out += `  ${this.skin.applyColors(shortR, 'muted')}\n`;
+    }
+    this.out.write(out);
+    this.streamLastEndedNewline = true;
+  }
+
+  private renderUiToast(args: Record<string, unknown>): void {
+    const message = typeof args.message === 'string' ? args.message : '';
+    if (!message) return;
+    const kindArg = typeof args.kind === 'string' ? args.kind : 'info';
+    this.commitStreamChunk();
+    const glyph = kindArg === 'success' ? '✓' : kindArg === 'warning' ? '⚠' : kindArg === 'error' ? '✗' : 'ℹ';
+    const kind: ColorKind = kindArg === 'success' ? 'success' : kindArg === 'warning' ? 'warn' : kindArg === 'error' ? 'error' : 'tool';
+    const short = message.length > 120 ? message.slice(0, 119) + '…' : message;
+    this.out.write(`${this.skin.applyColors(`${glyph} ${short}`, kind)}\n`);
+    this.streamLastEndedNewline = true;
+  }
+
+  private renderUiArtifactCreated(args: Record<string, unknown>): void {
+    const path = typeof args.path === 'string' ? args.path : '';
+    if (!path) return;
+    const kindArg = typeof args.kind === 'string' ? args.kind : 'file';
+    const preview = typeof args.preview === 'string' ? args.preview : '';
+    this.commitStreamChunk();
+    const glyph = kindArg === 'skill' ? '🛠' : kindArg === 'directory' ? '📁' : '📄';
+    let out = `${this.skin.applyColors(`${glyph} Created: ${path}`, 'accent')}\n`;
+    if (preview) {
+      const shortP = preview.length > 200 ? preview.slice(0, 199) + '…' : preview;
+      out += `  ${this.skin.applyColors(shortP, 'muted')}\n`;
+    }
+    this.out.write(out);
     this.streamLastEndedNewline = true;
   }
 }
