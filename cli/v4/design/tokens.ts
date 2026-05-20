@@ -130,12 +130,23 @@ export const glyphs = {
   /**
    * Box-drawing chrome for table + panel surfaces (Slice 3+). Renders
    * sharp ASCII so wide-display terminals and narrow ConPTYs both
-   * align cleanly. Slice 4 will reuse for framed panels.
+   * align cleanly. Slice 4 reuses `hLine` for the panel divider.
    */
   chrome: {
     topLeft: '┌', topRight: '┐', botLeft: '└', botRight: '┘',
     teeDown: '┬', teeUp:    '┴', teeRight: '├', teeLeft:  '┤',
     cross:   '┼', hLine:    '─', vLine:    '│',
+  },
+  /**
+   * Aiden-native framed-panel chrome (Slice 4). Left-edge accent bar
+   * gives panels brand identity without a closing box; asymmetric
+   * chrome (top + bottom dividers, no corners) reads as intentional
+   * Aiden signature rather than borrowed pattern. `bar` is the
+   * one-eighth solid block — widely supported in fonts; falls back
+   * gracefully to `|` on dumb sinks.
+   */
+  panel: {
+    bar: '▎',
   },
 } as const;
 

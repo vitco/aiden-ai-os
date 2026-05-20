@@ -17,6 +17,7 @@
  * commands surface predictably until they're slotted intentionally.
  */
 import type { SlashCommand, SlashCommandContext } from '../commandRegistry';
+import { renderFramedPanel, type PanelRow } from '../display/framedPanel';
 
 /**
  * Order matters: sections render in this order. Commands within a
@@ -124,25 +125,36 @@ export const help: SlashCommand = {
       buckets.get(subsectionFor(c.name))!.push(c);
     }
 
-    // Tier-3.1: gate icon column on AIDEN_UI_ICONS=1 (default OFF).
+    // v4.8.0 Slice 4 — every section renders as an Aiden-native framed
+    // panel: left orange accent bar, title + count subtitle, command
+    // rows, footer hint always present. AIDEN_UI_ICONS still respected
+    // for the inline glyph column. Sections stack vertically; one
+    // blank line between them comes from the panel's trailing newline.
     const showIcons = process.env.AIDEN_UI_ICONS === '1';
+    const toRows = (cmds: SlashCommand[]): PanelRow[] => cmds.map((c) => ({
+      command:     `${showIcons ? `${c.icon ?? ' '} ` : ''}/${c.name}`,
+      description: c.description,
+    }));
+
     for (const sec of SUBSECTION_ORDER) {
       const cmds = buckets.get(sec)!;
       if (cmds.length === 0) continue;
-      ctx.display.dim(`── ${sec} ──`);
-      for (const c of cmds) {
-        const prefix = showIcons ? `${c.icon ?? ' '} ` : '';
-        ctx.display.write(`  ${prefix}/${c.name.padEnd(14)} ${c.description}\n`);
-      }
+      ctx.display.write(renderFramedPanel({
+        title:    sec,
+        subtitle: `${cmds.length} ${cmds.length === 1 ? 'command' : 'commands'}`,
+        rows:     toRows(cmds),
+        footer:   'type /<name> to run · /help for this list',
+      }));
       ctx.display.write('\n');
     }
 
     if (skill.length > 0) {
-      ctx.display.dim('── Skills ──');
-      for (const c of skill) {
-        const prefix = showIcons ? '⚡ ' : '';
-        ctx.display.write(`  ${prefix}/${c.name.padEnd(14)} ${c.description}\n`);
-      }
+      ctx.display.write(renderFramedPanel({
+        title:    'Skills',
+        subtitle: `${skill.length} ${skill.length === 1 ? 'command' : 'commands'}`,
+        rows:     toRows(skill),
+        footer:   'type /<name> to run · /skills list to browse installed skills',
+      }));
     }
     return {};
   },
