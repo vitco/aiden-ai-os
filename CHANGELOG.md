@@ -1,3 +1,42 @@
+## v4.8.0 — in progress
+
+> **Status:** UI redesign + ChatGPT-Plus routing fix pending. This entry covers
+> the **semantic ui_* events portion** only. Additional slices land before ship.
+
+### Semantic ui_* event surface
+
+Seven new uiOnly tools the model can call to communicate render-time state without writing it as markdown text. The agent's dispatch loop branches early for these: no executor, no iteration count, no observability hooks, no verifier, no recovery, no trace. A `(no output)` tool_result satisfies the provider protocol. The caller fires `onUiEvent(name, args)` and the REPL renders structured rows in the chat surface.
+
+**Tools registered (all `uiOnly: true`, `mutates: false`):**
+- `ui_task_update` — task state signal (running / paused / blocked); supports `kind: 'subagent'` with depth indent
+- `ui_task_done` — task complete with status (success / failure / blocked) and optional summary
+- `ui_command_result` — shell output as a formatted block; muted stdout cap-5 lines, error stderr cap-5 lines, exit-code row when non-zero
+- `ui_test_result` — pass/fail count with framework + optional duration
+- `ui_approval_request` — structured prompt; fires automatically alongside the existing y/n flow before risky tool dispatch
+- `ui_toast` — transient notice with info / success / warning / error kinds
+- `ui_artifact_created` — file / skill / directory creation surface
+
+**Wiring:**
+- Agent dispatch branch in `core/v4/aidenAgent.ts` (Phase 2.1) — bypasses observability + iteration accounting, fires `onUiEvent`
+- `Display.renderUiEvent` renders 2 events visually with chrome matching `toolRow` (muted `┊` gutter + space + colored content per line). Multi-line surfaces carry the gutter on every physical line.
+- REPL `chatSession.onUiEvent` stops the activity indicator before paint (the dispatch branch bypasses `onToolCall('before')` which normally stops it)
+- `ApprovalEngine` emits `ui_approval_request` immediately before `promptUser` (additive — y/n flow unchanged)
+- `spawn_sub_agent` emits `ui_task_update` (kind:`'subagent'`, depth:1) on child start and `ui_task_done` on completion
+- Daemon agent + subagent surfaces register `resolveUiOnly` but use no-op `onUiEvent` stubs (no chat surface)
+
+**System prompt nudge:** `## UI events` section added to every system prompt with WRONG/RIGHT examples teaching the model to emit structured events instead of markdown status text during multi-step work.
+
+### Tests
+
+- 13 new behavioural tests in `tests/v4/cli/display.test.ts` covering all 7 renderers, dispatch gates, subagent indent, multi-line gutter integrity, kind-glyph mapping, line-cap truncation, and required-field guards.
+
+### Known issues (deferred to next slice)
+- UI redesign for tables, cards, panels — pending Slice 2 (design system) which locks shared tokens (colors, glyphs, spacing) before consuming surfaces
+- ChatGPT Plus + gpt-5 auxiliary-call routing bug surfaces when subagents complete (pre-existing v4.6.2 backlog item, breaks the `ui_task_done` emit path on this specific provider)
+- Daemon-side `onUiEvent` serialization to `run_events` stream — currently no-op; planned alongside daemon UX work
+
+---
+
 ## v4.7.0 — 2026-05-20
 
 ### Honesty verifier — outcome-based, no more false refusals

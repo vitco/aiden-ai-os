@@ -1303,3 +1303,164 @@ describe('TRAIL_HIDE_TOOLS (v4.1.5 Phase 1d Q-Q2-a)', () => {
     }
   });
 });
+
+describe('Display v4.8.0 ui_* event renderers', () => {
+  function captureDisplay(opts: { tty: boolean }) {
+    const chunks: string[] = [];
+    const out = new Writable({
+      write(chunk, _enc, cb) { chunks.push(chunk.toString()); cb(); },
+    }) as unknown as NodeJS.WriteStream;
+    (out as unknown as { isTTY: boolean }).isTTY = opts.tty;
+    const skin = new SkinEngine({ forceMono: true });
+    const d = new Display({ skin, stdout: out });
+    return { d, chunks };
+  }
+
+  // ── Dispatch gates ────────────────────────────────────────────────────
+
+  it('non-TTY: every ui_* event is silent', () => {
+    const { d, chunks } = captureDisplay({ tty: false });
+    d.renderUiEvent('ui_task_update', { task_id: 't1', label: 'x', status: 'running' });
+    d.renderUiEvent('ui_task_done',   { task_id: 't1', status: 'success' });
+    d.renderUiEvent('ui_command_result',   { command: 'ls' });
+    d.renderUiEvent('ui_test_result',      { framework: 'vitest', passed: 1, failed: 0 });
+    d.renderUiEvent('ui_approval_request', { prompt: 'go?', risk_tier: 'medium' });
+    d.renderUiEvent('ui_toast',            { message: 'hi', kind: 'info' });
+    d.renderUiEvent('ui_artifact_created', { path: '/x', kind: 'file' });
+    expect(chunks.join('')).toBe('');
+  });
+
+  it('unknown event name silent-ignores (no crash)', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    expect(() => d.renderUiEvent('ui_does_not_exist', { foo: 'bar' })).not.toThrow();
+    expect(chunks.join('')).toBe('');
+  });
+
+  // ── ui_task_update ────────────────────────────────────────────────────
+
+  it('ui_task_update paints gutter + glyph + label', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.renderUiEvent('ui_task_update', { task_id: 't1', label: 'researching', status: 'running' });
+    const out = stripAnsi(chunks.join(''));
+    expect(out).toContain('┊');
+    expect(out).toContain('⟳');
+    expect(out).toContain('researching');
+  });
+
+  it('ui_task_update silent on missing task_id or label', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.renderUiEvent('ui_task_update', { label: 'x', status: 'running' });
+    d.renderUiEvent('ui_task_update', { task_id: 't1', status: 'running' });
+    expect(chunks.join('')).toBe('');
+  });
+
+  it('ui_task_update subagent kind indents inside gutter by depth', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.renderUiEvent('ui_task_update', {
+      task_id: 's1', label: 'nested', status: 'running', kind: 'subagent', depth: 2,
+    });
+    const out = stripAnsi(chunks.join(''));
+    // `┊ ` then 4-space indent (depth 2 × 2 spaces) then glyph + label
+    expect(out).toMatch(/┊ {5}⟳ nested/);
+  });
+
+  // ── ui_task_done ──────────────────────────────────────────────────────
+
+  it('ui_task_done resolves label from prior update + appends summary', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.renderUiEvent('ui_task_update', { task_id: 't1', label: 'researching', status: 'running' });
+    chunks.length = 0;
+    d.renderUiEvent('ui_task_done', { task_id: 't1', status: 'success', summary: 'found 3' });
+    const out = stripAnsi(chunks.join(''));
+    expect(out).toContain('✓');
+    expect(out).toContain('researching');
+    expect(out).toContain('found 3');
+  });
+
+  it('ui_task_done with no prior update falls back to task_id as label', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.renderUiEvent('ui_task_done', { task_id: 'orphan', status: 'failure' });
+    const out = stripAnsi(chunks.join(''));
+    expect(out).toContain('✗');
+    expect(out).toContain('orphan');
+  });
+
+  // ── ui_command_result ─────────────────────────────────────────────────
+
+  it('ui_command_result paints header + stdout + exit row on failure', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.renderUiEvent('ui_command_result', {
+      command: 'npm test', stdout: 'one\ntwo', stderr: 'boom', exit_code: 2,
+    });
+    const out = stripAnsi(chunks.join(''));
+    expect(out).toContain('▸ npm test');
+    expect(out).toContain('one');
+    expect(out).toContain('two');
+    expect(out).toContain('boom');
+    expect(out).toContain('(exit 2)');
+    // Every physical line carries the gutter.
+    for (const line of out.split('\n').filter(Boolean)) {
+      expect(line.startsWith('┊')).toBe(true);
+    }
+  });
+
+  it('ui_command_result caps stdout/stderr at 5 lines each', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    const long = Array.from({ length: 12 }, (_, i) => `line${i}`).join('\n');
+    d.renderUiEvent('ui_command_result', { command: 'spam', stdout: long });
+    const out = stripAnsi(chunks.join(''));
+    expect(out).toContain('line0');
+    expect(out).toContain('line4');
+    expect(out).not.toContain('line5');
+  });
+
+  // ── ui_test_result ────────────────────────────────────────────────────
+
+  it('ui_test_result: glyph + skipped + duration based on counts', () => {
+    const a = captureDisplay({ tty: true });
+    a.d.renderUiEvent('ui_test_result', { framework: 'vitest', passed: 12, failed: 0, skipped: 2, duration_ms: 450 });
+    const greenOut = stripAnsi(a.chunks.join(''));
+    expect(greenOut).toContain('✓ vitest:');
+    expect(greenOut).toContain('12 passed');
+    expect(greenOut).toContain('2 skipped');
+    expect(greenOut).toContain('in 450ms');
+    const b = captureDisplay({ tty: true });
+    b.d.renderUiEvent('ui_test_result', { framework: 'pytest', passed: 3, failed: 1 });
+    expect(stripAnsi(b.chunks.join(''))).toContain('✗ pytest:');
+  });
+
+  // ── ui_approval_request ───────────────────────────────────────────────
+
+  it('ui_approval_request paints prompt row + optional reason on second line', () => {
+    const { d, chunks } = captureDisplay({ tty: true });
+    d.renderUiEvent('ui_approval_request', {
+      prompt: 'delete logs', risk_tier: 'medium', reason: 'cleanup task',
+    });
+    const out = stripAnsi(chunks.join(''));
+    expect(out).toContain('⚠ Approval needed: delete logs');
+    expect(out).toContain('cleanup task');
+  });
+
+  // ── ui_toast ──────────────────────────────────────────────────────────
+
+  it('ui_toast picks glyph from kind', () => {
+    for (const [kind, glyph] of [['info', 'ℹ'], ['success', '✓'], ['warning', '⚠'], ['error', '✗']] as const) {
+      const { d, chunks } = captureDisplay({ tty: true });
+      d.renderUiEvent('ui_toast', { message: 'msg', kind });
+      expect(stripAnsi(chunks.join(''))).toContain(`${glyph} msg`);
+    }
+  });
+
+  // ── ui_artifact_created ───────────────────────────────────────────────
+
+  it('ui_artifact_created paints kind-glyph + path + optional preview; kind:skill uses 🛠', () => {
+    const a = captureDisplay({ tty: true });
+    a.d.renderUiEvent('ui_artifact_created', { path: '/tmp/hello.py', kind: 'file', preview: 'print(1)' });
+    const fileOut = stripAnsi(a.chunks.join(''));
+    expect(fileOut).toContain('📄 Created: /tmp/hello.py');
+    expect(fileOut).toContain('print(1)');
+    const b = captureDisplay({ tty: true });
+    b.d.renderUiEvent('ui_artifact_created', { path: 'mySkill', kind: 'skill' });
+    expect(stripAnsi(b.chunks.join(''))).toContain('🛠 Created: mySkill');
+  });
+});
