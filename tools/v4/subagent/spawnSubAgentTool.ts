@@ -76,6 +76,14 @@ export interface SpawnSubAgentFactoryOptions extends SpawnSubAgentDeps {
    * sinks.
    */
   logger?: Logger;
+  /**
+   * v4.8.0 Phase 2.5 — semantic ui_* event sink. When supplied, the
+   * handler fires `ui_task_update` (kind:'subagent', depth:1) before
+   * the child run starts and `ui_task_done` when it completes.
+   * Display layer paints these as gutter-indented trail rows so the
+   * user can see subagent activity alongside the parent's tool trail.
+   */
+  onUiEvent?: (name: string, args: Record<string, unknown>) => void;
 }
 
 // ── Pause helper (v4.6 Phase 3A) ──────────────────────────────────────────
@@ -362,6 +370,20 @@ export function makeSpawnSubAgentTool(
       const parentRunId     = factory.resolveParentRunId?.();
       const parentSessionId = factory.resolveParentSessionId?.();
 
+      // v4.8.0 Phase 2.5 — emit ui_task_update for the subagent start.
+      // Stable task_id correlates with the matching ui_task_done emit
+      // after the spawnSubAgent call returns. depth:1 hardcoded today
+      // — childBuilder caps recursion at 1 (see SUBAGENT_BLOCKED_TOOL_NAMES
+      // 'spawn_sub_agent'). TODO: thread real depth when nested spawns ship.
+      const subTaskId = `subagent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      factory.onUiEvent?.('ui_task_update', {
+        task_id: subTaskId,
+        label:   goalPreview,
+        status:  'running',
+        kind:    'subagent',
+        depth:   1,
+      });
+
       // ── 4. Invoke the primitive. NEVER throws — always envelope. ─────────
       const result = await spawnSubAgent(
         spec,
@@ -387,6 +409,18 @@ export function makeSpawnSubAgentTool(
           parentSessionId,
         },
       );
+
+      // v4.8.0 Phase 2.5 — emit ui_task_done with the same subTaskId
+      // so the display layer can finalize the in-flight row.
+      const doneStatus: 'success' | 'failure' | 'blocked' =
+        result.ok                       ? 'success' :
+        result.status === 'interrupted' ? 'blocked' :
+        result.status === 'timeout'     ? 'blocked' : 'failure';
+      factory.onUiEvent?.('ui_task_done', {
+        task_id: subTaskId,
+        status:  doneStatus,
+        summary: `${result.metrics.apiCalls} calls · ${result.exitReason}`,
+      });
 
       // Completion log — pairs with "spawn_sub_agent invoked" so a
       // grep on parentSessionId surfaces invoke → complete in order.

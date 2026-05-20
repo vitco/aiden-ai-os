@@ -77,6 +77,13 @@ export interface ApprovalCallbacks {
   onDecision?: (req: ApprovalRequest, decision: ApprovalDecision) => void;
   /** Permanent-allowlist sink. Phase 6 ConfigManager wires this up. */
   persistAllow?: (toolName: string, argSignature: string) => void;
+  /**
+   * v4.8.0 Phase 2.5 — semantic ui_* event sink. The engine fires
+   * `ui_approval_request` immediately before `promptUser` so the
+   * display layer can paint a structured row alongside the existing
+   * y/n prompt. Additive only — the y/n flow is unchanged.
+   */
+  onUiEvent?: (name: string, args: Record<string, unknown>) => void;
 }
 
 /**
@@ -324,6 +331,21 @@ export class ApprovalEngine {
       this.callbacks.onDecision?.(req, 'deny');
       return false;
     }
+    // v4.8.0 Phase 2.5 — emit a structured ui_approval_request event
+    // BEFORE the y/n prompt fires. Additive: the display layer paints
+    // the gutter-integrated row, then the existing promptUser flow
+    // runs unchanged. Moat-tier (safe/caution/dangerous) maps to the
+    // ui schema's 4-tier scale; 'critical' is reserved for future
+    // wiring and unreachable from this path.
+    const uiTier: 'low' | 'medium' | 'high' =
+      req.riskTier === 'safe'      ? 'low'  :
+      req.riskTier === 'dangerous' ? 'high' : 'medium';
+    const argsPreview = JSON.stringify(req.args).slice(0, 80);
+    this.callbacks.onUiEvent?.('ui_approval_request', {
+      prompt:    `${req.toolName} ${argsPreview}`,
+      risk_tier: uiTier,
+      reason:    req.reason,
+    });
     const decision = await this.callbacks.promptUser(req);
     this.callbacks.onDecision?.(req, decision);
 

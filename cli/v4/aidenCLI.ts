@@ -1228,6 +1228,10 @@ export async function buildAgentRuntime(
   approvalEngine['callbacks'] = {
     promptUser: callbacks.promptApproval,
     riskAssess: callbacks.riskAssess,
+    // v4.8.0 Phase 2.5 — paint the structured approval row before the
+    // existing y/n prompt runs. Additive; promptApproval flow unchanged.
+    onUiEvent: (name: string, args: Record<string, unknown>) =>
+      display.renderUiEvent(name, args),
     // Phase 16f: append-on-disk for "Allow always" choices. Single-process
     // REPL — atomic write via tmp-then-rename.
     persistAllow: (tool: string, signature: string) => {
@@ -1827,6 +1831,11 @@ export async function buildAgentRuntime(
     resolveToolset,
     resolveMutates,
     resolveUiOnly,
+    // v4.8.0 Phase 2.5 — emit ui_task_update/ui_task_done events so
+    // subagent activity surfaces as gutter-indented trail rows in the
+    // parent's chat surface alongside its own tool trail.
+    onUiEvent: (name: string, args: Record<string, unknown>) =>
+      display.renderUiEvent(name, args),
     runStore:            replRunStore,
     instanceId:          replInstanceId,
     // v4.6 Phase 2Q-B — REPL parent-run wiring. Reads the same
