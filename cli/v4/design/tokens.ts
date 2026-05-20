@@ -136,8 +136,12 @@ export const glyphs = {
     bulletOpen: '○',
     /** Mid-dot — existing skin bullet for compact lists. */
     midDot:     '•',
-    /** Check-success — heavier than ui-event `✓` for emphasis. */
-    check:      '✔',
+    /** Check-success — heavier than ui-event `✓` for emphasis. Slice 8
+     *  hotfix: VS16 (U+FE0F) appended to force emoji-presentation width
+     *  = 2 cells so `✔` renders with the same visual heft as `●`/`○`
+     *  bullets and doesn't sit flush against following text. Same fix
+     *  pattern as Slice 5 for `✏`/`👁`. */
+    check:      '✔️',
     /** Inline arrow — submenu, breadcrumb. */
     arrow:      '›',
     /** Trail-style horizontal arrow — ui_command_result header. */

@@ -355,7 +355,16 @@ function renderListItemTokens(
     // block parser handles these via the normal dispatch (which calls
     // back into our own `renderer.list` override for nested lists —
     // depth counter is already incremented before we got here).
+    //
+    // v4.8.0 Slice 8 hotfix — ensure inline text and following block
+    // tokens are separated by a newline. Without this, a tight-list
+    // item like `- Python` followed by a nested `- Django` collapses
+    // to `● Python    ○ Django` on a single line because head/tail
+    // split in renderer.list takes only the first line as `head`.
     if (parser.parse) {
+      if (out.length > 0 && !out[out.length - 1].endsWith('\n')) {
+        out.push('\n');
+      }
       out.push(parser.parse([tk as unknown] as unknown[]));
       continue;
     }
