@@ -1,9 +1,6 @@
-## v4.8.0 — in progress
+## v4.8.0 — 2026-05-21
 
-> **Status:** UI redesign + ChatGPT-Plus routing fix pending. This entry covers
-> the **semantic ui_* events portion** only. Additional slices land before ship.
-
-### Semantic ui_* event surface
+### Semantic ui_* event surface (Phase 2.1–2.7)
 
 Seven new uiOnly tools the model can call to communicate render-time state without writing it as markdown text. The agent's dispatch loop branches early for these: no executor, no iteration count, no observability hooks, no verifier, no recovery, no trace. A `(no output)` tool_result satisfies the provider protocol. The caller fires `onUiEvent(name, args)` and the REPL renders structured rows in the chat surface.
 
@@ -18,7 +15,7 @@ Seven new uiOnly tools the model can call to communicate render-time state witho
 
 **Wiring:**
 - Agent dispatch branch in `core/v4/aidenAgent.ts` (Phase 2.1) — bypasses observability + iteration accounting, fires `onUiEvent`
-- `Display.renderUiEvent` renders 2 events visually with chrome matching `toolRow` (muted `┊` gutter + space + colored content per line). Multi-line surfaces carry the gutter on every physical line.
+- `Display.renderUiEvent` renders all 7 events with chrome matching `toolRow` (muted `┊` gutter + space + colored content per line). Multi-line surfaces carry the gutter on every physical line.
 - REPL `chatSession.onUiEvent` stops the activity indicator before paint (the dispatch branch bypasses `onToolCall('before')` which normally stops it)
 - `ApprovalEngine` emits `ui_approval_request` immediately before `promptUser` (additive — y/n flow unchanged)
 - `spawn_sub_agent` emits `ui_task_update` (kind:`'subagent'`, depth:1) on child start and `ui_task_done` on completion
@@ -26,14 +23,65 @@ Seven new uiOnly tools the model can call to communicate render-time state witho
 
 **System prompt nudge:** `## UI events` section added to every system prompt with WRONG/RIGHT examples teaching the model to emit structured events instead of markdown status text during multi-step work.
 
+### Visual redesign (Slices 2–11c)
+
+Comprehensive UI refresh across every surface the user sees.
+
+**Design system foundation:**
+- `cli/v4/design/tokens.ts` — central tokens for colors, glyphs, and spacing. All surfaces consume from one source so chrome stays consistent and a future palette swap is a one-line change.
+- Brand orange `#FF6B35` carried by colour, not by exotic codepoints. Glyph set locked to universal-font characters: `│ ─ ● ○ ✔ ⌛ ♥ ▲ ╭ ╮ ╰ ╯ █`.
+
+**Status bar:**
+- Packed cross-glance footer: cyan model name · amber token ratio · semantic-tiered context bar (`●●●●●●○○○○`) · purple turn counter · teal `⌛` per-turn timer · state dot.
+- Auto-progressive disclosure: drops segments on narrow terminals (status state → turn count → timer → tokens → model) preserving the highest-signal info.
+
+**Reply + tool surfaces:**
+- Aiden reply chrome: `│ Aiden` header in brand orange, content aligned to column 2.
+- Tool-trail rows: emoji icons + verb (`✏️  writing`, `👁️  reading`, `🌐 fetching`) followed by truncated arg preview. Indicator pulses + (Ns) elapsed time.
+- Activity indicator: single-row sliding-block shimmer — 4-cell `█` segment scrolls L→R on a muted `─` track at 250ms/cell, wraps continuously. Replaces the prior 2-row hourglass + wave-bar layout.
+
+**Framed panel chrome:**
+- Aiden-native asymmetric framing: orange `│` left-edge bar with top-divider + bottom-hint footer; no closing corners. Used by `/help`, approval prompts, setup wizard step headers, and the framed-panel renderer.
+- Approval prompt redesigned: structured key/value rows replace the prior ASCII box. Tier carried by colour (cyan info / amber caution / red destructive) so the bar paint signals the tier without a separate label.
+- Code blocks: top-divider asymmetric chrome (`── python ─────`) with brand-orange language label. Left-rail dropped (competed visually with dark-bg syntax highlighting).
+
+**Markdown rendering:**
+- Bullet lists: `●` filled top-level / `○` hollow nested.
+- Task lists: `✔️` checked / `○` unchecked (GFM-compatible).
+- Numbered lists: zero-padded alignment for double-digit counts.
+
+**Onboarding refresh:**
+- 24-bit ANSI ASCII banner — bypasses theme depth-detection so the brand mark renders crisp on Windows ConPTY regardless of `COLORTERM`.
+- Disclaimer rewritten with capability bullets + scannable legal acknowledgments inside the framed panel.
+- Loading sequence: 10-cell progress bar (`●●○○○○○○○○ 25%`) above per-step rows; each step has a real check (`✓ Checking system`) and a right-aligned status (`Node v22 · Windows 11`).
+- "Built solo" card: rounded heavy frame (`╭─╮ │ │ ╰─╯`) — distinct from the `│` panel chrome to signal "identity card" rather than "navigation surface".
+
+### ChatGPT Plus + gpt-5 auxiliary routing fix (Slice 11)
+
+Auxiliary cheap-LLM calls (`risk_assess`, `compression`, `session_summary`, `skill_describe`) previously inherited the parent loop's provider/model. When the parent was ChatGPT Plus + gpt-5, every auxiliary call returned `400 model-not-supported` from the Codex backend (which accepts only `gpt-5-codex` / `gpt-4.1-mini` / etc.).
+
+Fix: `AuxiliaryClient` gained a `fallbacks[]` chain. aidenCLI now passes Groq + `llama-3.1-8b-instant` as the default and the parent provider/model as the fallback. Auxiliary calls land on Groq when configured (cheap, fast, reliable for the cheap classify/summarise jobs auxiliary is designed for) and fall through to the parent only when Groq is absent. `AIDEN_VERBOSE=1` surfaces which provider handled each call.
+
+### Debug spam silenced
+
+`[auxiliary]`, `[skill] candidate`, `[compress]`, `[budget] caution`, `[memory]` lines now gated behind `AIDEN_VERBOSE=1`. End-user terminal stays quiet; power users opt in.
+
 ### Tests
 
-- 13 new behavioural tests in `tests/v4/cli/display.test.ts` covering all 7 renderers, dispatch gates, subagent indent, multi-line gutter integrity, kind-glyph mapping, line-cap truncation, and required-field guards.
+- 13 new behavioural tests in `tests/v4/cli/display.test.ts` covering all 7 ui_* renderers, dispatch gates, subagent indent, multi-line gutter integrity, kind-glyph mapping, line-cap truncation, required-field guards.
+- 3 new fallback-chain tests in `tests/v4/auxiliaryClient.test.ts` (default-wins, fallback-wins, all-fail unavailable path).
+- Shimmer indicator coverage rewritten in `tests/v4/cli/activityIndicator.test.ts` (slide, wrap, opt-out, single-row erase, breathing-space `\n`).
+- Full `tests/v4/cli/` suite: 891 passed, 16 skipped, 0 failed.
 
-### Known issues (deferred to next slice)
-- UI redesign for tables, cards, panels — pending Slice 2 (design system) which locks shared tokens (colors, glyphs, spacing) before consuming surfaces
-- ChatGPT Plus + gpt-5 auxiliary-call routing bug surfaces when subagents complete (pre-existing v4.6.2 backlog item, breaks the `ui_task_done` emit path on this specific provider)
-- Daemon-side `onUiEvent` serialization to `run_events` stream — currently no-op; planned alongside daemon UX work
+### Breaking (cosmetic only)
+
+- Panel chrome glyph changed from `▎` (U+258E LEFT ONE QUARTER BLOCK) to `│` (U+2502 BOX DRAWING LIGHT VERTICAL). `▎` rendered as outline-tofu on Cascadia / common Windows ConPTY fonts; `│` is universal. Affects `/help`, approval prompt, Aiden reply header, setup wizard, framed-panel renderer, onboarding disclaimer + success screens.
+- Status footer glyphs swapped from hex dots (`⬢`/`⬡`) to circles (`●`/`○`) for cross-font compatibility.
+
+### Known limitations (deferred to v4.8.1)
+
+- Render path consolidation — some surfaces still drift on first paint until the v4.8.1 refactor unifies them.
+- Daemon-side `onUiEvent` serialization to `run_events` stream — currently no-op; planned alongside daemon UX work.
 
 ---
 

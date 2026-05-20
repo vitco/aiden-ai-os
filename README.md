@@ -245,6 +245,17 @@ Remove-Item -Recurse -Force $env:LOCALAPPDATA\aiden
 <img width="938" height="1049" alt="preview (3)" src="https://github.com/user-attachments/assets/4e32ae38-74ad-433d-b986-0a15bc2dffec" />
 
 
+## Recommended terminal setup
+
+For best visual rendering, Aiden looks crispest with:
+
+- **Font:** Cascadia Code, JetBrains Mono, or Fira Code at 13–14pt
+- **Terminal:** Windows Terminal, iTerm2, or a modern emulator with truecolor support
+- **Color depth:** truecolor (24-bit) — most modern terminals support this
+
+Aiden works on any terminal but glyphs and color depth may degrade gracefully on older / minimal setups.
+
+
 ## Setup wizard
 
 The first time you run `aiden`, you'll see:
