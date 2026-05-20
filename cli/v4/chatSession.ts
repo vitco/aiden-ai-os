@@ -1232,6 +1232,11 @@ export class ChatSession implements ChatSessionLike {
     const indicator = this.opts.display.activityIndicator('thinking');
     let indicatorStopped = false;
     let streamingActive  = false;
+    // v4.8.0 Phase 2.3 fix-2 — clear the ui-event flag at turn-start.
+    // The existing reset sites in Display (streamPartial first-delta +
+    // streamComplete) only fire on text-streaming turns; tool-only
+    // turns leave the flag sticky. This is the authoritative reset.
+    this.opts.display.resetUiTurnState();
     // v4.1.5 Issue O — track whether this turn had any tool calls so
     // we can emit a single muted rule between the tool trail and the
     // reply header. Set true when the first tool's `before` phase
@@ -1424,11 +1429,19 @@ export class ChatSession implements ChatSessionLike {
               this.opts.display.streamToolIndicator(call.name);
             }
           : undefined,
-        // v4.8.0 Phase 2.3 — uiOnly events route to the display layer.
-        // Phase 2.3 handles ui_task_update + ui_task_done; the other 5
-        // event names land in Phase 2.4 (renderer silent-ignores them
-        // for now).
-        onUiEvent: (name, args) => this.opts.display.renderUiEvent(name, args),
+        // v4.8.0 Phase 2.3 fix-2 — uiOnly events route to the display
+        // layer. The Phase 2.1 dispatch branch in aidenAgent.ts skips
+        // onToolCall('before'), which is what normally fires
+        // beforeFirstToolHook → stopIndicatorOnce. Without this stop
+        // call, the 250ms indicator tick walks up 2 lines and erases
+        // our paint within a quarter-second. Stop the indicator here,
+        // mirroring how a first regular tool call stops it. Phase 2.3
+        // handles ui_task_update + ui_task_done; the other 5 event
+        // names land in Phase 2.4 (renderer silent-ignores them).
+        onUiEvent: (name, args) => {
+          stopIndicatorOnce();
+          this.opts.display.renderUiEvent(name, args);
+        },
         onProgress: streamingEnabled
           ? (outputTokens: number, maxTokens?: number) => {
               if (indicatorStopped === false) return;

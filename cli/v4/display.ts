@@ -2105,6 +2105,18 @@ export class Display {
    * names land in Phase 2.4 (silent ignore until then). Non-TTY out
    * surfaces silent — matches the activityIndicator precedent.
    */
+  /**
+   * v4.8.0 Phase 2.3 fix-2 — reset the per-turn ui-event flag. Called
+   * by chatSession at the top of each turn. The existing reset sites
+   * (streamPartial first-delta + streamComplete) only fire when the
+   * turn actually streamed text deltas. Tool-only turns never reset,
+   * leaving the flag sticky into subsequent turns. This is the
+   * authoritative reset for turn-start.
+   */
+  resetUiTurnState(): void {
+    this.uiEventsFiredThisTurn = false;
+  }
+
   renderUiEvent(name: string, args: Record<string, unknown>): void {
     if (!this.out.isTTY) return;
     // v4.8.0 Phase 2.3 fix — Option C. The post-stream markdown rerender
