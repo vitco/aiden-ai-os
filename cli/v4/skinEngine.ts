@@ -47,7 +47,11 @@ export type ColorKind =
   /** Yellow — degraded tool outcomes (best-effort, partial result). v4.1.3-repl-polish. */
   | 'degraded'
   /** Purple — status footer turn counter (⌘). v4.8.0 Slice 7 hotfix #2. */
-  | 'metric_turn';
+  | 'metric_turn'
+  /** Dim cool grey — least-important text (unchecked task glyphs,
+   *  deprecated rows, captions). v4.8.0 Slice 8 — bridges
+   *  `colors.content.tertiary` from tokens.ts into runtime. */
+  | 'tertiary';
 
 export interface SkinDefinition {
   name: string;
@@ -97,6 +101,9 @@ const DEFAULT_SKIN: SkinDefinition = {
     // segment (⌘) in the status footer. #a48be0 reads as a soft
     // lavender that doesn't compete with brand orange.
     metric_turn: [0xa4, 0x8b, 0xe0],
+    // v4.8.0 Slice 8 — tertiary dim grey, dimmer than `muted` (warm
+    // tint) for lowest-priority text like unchecked task markers.
+    tertiary: [0x6a, 0x6a, 0x6a],
   },
   glyphs: {
     bullet: '•',
@@ -133,6 +140,8 @@ const LIGHT_SKIN: SkinDefinition = {
     degraded: [0x80, 0x60, 0x00],
     // Slice 7 hotfix #2 — deeper purple on light bg keeps contrast budget.
     metric_turn: [0x6e, 0x50, 0xaa],
+    // Slice 8 — lighter grey on light bg keeps the dim-but-readable feel.
+    tertiary: [0x9a, 0x9a, 0x9a],
   },
   glyphs: { ...DEFAULT_SKIN.glyphs },
 };
@@ -154,6 +163,7 @@ const MONOCHROME_SKIN: SkinDefinition = {
     session: null,
     degraded: null,
     metric_turn: null,
+    tertiary: null,
   },
   glyphs: {
     bullet: '*',

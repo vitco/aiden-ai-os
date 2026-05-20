@@ -28,6 +28,8 @@
 import { marked } from 'marked';
 import { getSkinEngine } from './skinEngine';
 import { highlightCode, isSupportedLang } from './syntaxHighlight';
+// v4.8.0 Slice 8 — token-sourced bullet glyphs + task-list markers.
+import { glyphs } from './design/tokens';
 // v4.1.4 reply-quality polish: single source of truth for frame math.
 // Replaces 3 inline `Math.min(process.stdout.columns ?? 80, 100) - 4`
 // callsites in this file with `getBodyWidth()` and adds soft-wrap for
@@ -39,7 +41,7 @@ const TerminalRenderer = require('marked-terminal').default ?? require('marked-t
 
 type Painter = (text: string) => string;
 
-function paint(kind: 'brand' | 'heading' | 'muted' | 'agent' | 'tool' | 'success' | 'warn' | 'error' | 'accent'): Painter {
+function paint(kind: 'brand' | 'heading' | 'muted' | 'agent' | 'tool' | 'success' | 'warn' | 'error' | 'accent' | 'tertiary'): Painter {
   return (text: string) => getSkinEngine().applyColors(text, kind);
 }
 
@@ -552,6 +554,10 @@ export function getReplyRenderer(): { render: (text: string) => string } {
     let isOrdered = false;
     let startNum  = 1;
     let items:    string[];
+    // v4.8.0 Slice 8 — task/checked flags collected alongside items so
+    // the marker dispatch below can pick ✔ (checked) or ○ (unchecked).
+    // Default false (not a task) so the bullet path stays unchanged.
+    let itemTasks: Array<{ task: boolean; checked: boolean }> = [];
     // CRITICAL: increment depth BEFORE walking items. Item walking via
     // `parser.parse(it.tokens)` recurses into our own override for any
     // nested list tokens — those nested calls need to see the parent's
@@ -597,9 +603,15 @@ export function getReplyRenderer(): { render: (text: string) => string } {
           parseInline?: (t: unknown[]) => string;
         };
       }).parser;
-      items = (tok.items ?? []).map((it) => {
-        if (!parser) return it.text ?? '';
-        return renderListItemTokens(it, parser);
+      // v4.8.0 Slice 8 — capture GFM task/checked flags alongside the
+      // rendered text so the marker dispatch below can pick the right
+      // glyph (✔ checked / ○ unchecked) for task-list items.
+      const rawItems = tok.items ?? [];
+      items = rawItems.map((it) =>
+        parser ? renderListItemTokens(it, parser) : (it.text ?? ''));
+      itemTasks = rawItems.map((it) => {
+        const itx = it as { task?: boolean; checked?: boolean };
+        return { task: itx.task === true, checked: itx.checked === true };
       });
     } else {
       isOrdered = ordered === true;
@@ -612,21 +624,31 @@ export function getReplyRenderer(): { render: (text: string) => string } {
       items = raw.split('\n').filter((ln) => ln.trim().length > 0);
     }
     const indent = '  '.repeat(depth);
-    // Top-level bullet `•` (filled); nested `▸` (arrow-like) for
-    // visual depth differentiation. Numbered lists override with
-    // `N.` regardless of depth.
-    const bulletGlyph = depth === 1 ? '•' : '▸';
+    // v4.8.0 Slice 8 — token-sourced bullet glyphs. Top-level (depth 1)
+    // uses filled `●`, nested (depth ≥ 2) uses hollow `○`. Both painted
+    // brand orange to give lists visual identity (was `muted` grey).
+    const bulletGlyph = depth === 1 ? glyphs.util.bullet : glyphs.util.bulletOpen;
 
     const lines: string[] = [];
     for (let i = 0; i < items.length; i += 1) {
       const item = items[i];
-      // Each item may itself contain newlines (nested list output,
-      // multi-line paragraph). Indent every line of the rendered
-      // item AFTER the first — the first line takes the bullet, the
-      // continuation lines align under the bullet's content column.
-      const marker = isOrdered
-        ? paint('muted')(`${startNum + i}.`)
-        : paint('muted')(bulletGlyph);
+      const task = itemTasks[i] ?? { task: false, checked: false };
+      // v4.8.0 Slice 8 — marker dispatch:
+      //   • GFM checked task → ✔ in semantic success (green)
+      //   • GFM unchecked task → ○ in tertiary dim (looks incomplete)
+      //   • Ordered list → `N.` right-padded to 3 cols, brand orange
+      //   • Bullet → ●/○ by depth, brand orange
+      let marker: string;
+      if (task.task && task.checked) {
+        marker = paint('success')(glyphs.util.check);
+      } else if (task.task) {
+        marker = paint('tertiary')(glyphs.util.bulletOpen);
+      } else if (isOrdered) {
+        const numStr = `${startNum + i}.`.padStart(3);
+        marker = paint('brand')(numStr);
+      } else {
+        marker = paint('brand')(bulletGlyph);
+      }
       const itemLines = item.split('\n');
       const head = itemLines[0] ?? '';
       const tail = itemLines.slice(1);

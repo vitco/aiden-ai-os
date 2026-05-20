@@ -95,11 +95,11 @@ describe('replyRenderer — Fix C (list-item inline expansion)', () => {
     const onCount = out.split(BOLD_ON).length - 1;
     expect(onCount).toBeGreaterThanOrEqual(2);
     expect(out).not.toContain('**');
-    // Stripped output shows the nested glyph (▸) for the inner items
-    // and the top-level (•) for the outer.
+    // v4.8.0 Slice 8 — bullets are now token-sourced: filled ● for
+    // top-level, hollow ○ for nested. Both painted in brand orange.
     const stripped = stripAnsi(out);
-    expect(stripped).toContain('•');
-    expect(stripped).toContain('▸');
+    expect(stripped).toContain('●');
+    expect(stripped).toContain('○');
   });
 
   it('paragraph (no list): inline bold still works (regression sentinel)', () => {
@@ -193,5 +193,61 @@ describe('getReplyRenderer().render() — Issue I end-to-end (v4.1.4)', () => {
     const r = getReplyRenderer();
     const out = r.render('## Section\n\nProse below.');
     expect(out).not.toMatch(/\n{3,}/);
+  });
+});
+
+describe('replyRenderer v4.8.0 Slice 8 — list polish', () => {
+  function stripAnsi(s: string): string {
+    // eslint-disable-next-line no-control-regex
+    return s.replace(/\x1b\[[0-9;]*[A-Za-z]/g, '');
+  }
+
+  it('top-level bullets render as ● (filled circle)', () => {
+    const r = getReplyRenderer();
+    const out = stripAnsi(r.render('- alpha\n- bravo\n- charlie'));
+    // 3 top-level items → 3 filled circles.
+    const filled = (out.match(/●/g) ?? []).length;
+    expect(filled).toBe(3);
+    expect(out).toContain('alpha');
+    expect(out).toContain('charlie');
+  });
+
+  it('nested bullets render as ○ (hollow circle) at depth 2', () => {
+    const r = getReplyRenderer();
+    const out = stripAnsi(r.render('- parent\n  - child1\n  - child2'));
+    // 1 parent (●) + 2 children (○).
+    expect((out.match(/●/g) ?? []).length).toBe(1);
+    expect((out.match(/○/g) ?? []).length).toBe(2);
+  });
+
+  it('task list checked → ✔ marker; unchecked → ○ marker', () => {
+    const r = getReplyRenderer();
+    const out = stripAnsi(r.render('- [x] done one\n- [x] done two\n- [ ] pending'));
+    // 2 checks for done items; 1 hollow circle for pending.
+    expect((out.match(/✔/g) ?? []).length).toBe(2);
+    expect((out.match(/○/g) ?? []).length).toBeGreaterThanOrEqual(1);
+    expect(out).toContain('done one');
+    expect(out).toContain('pending');
+    // Raw `[x]` / `[ ]` syntax should NOT leak through to visible output.
+    expect(out).not.toContain('[x]');
+    expect(out).not.toContain('[ ]');
+  });
+
+  it('numbered list right-pads numbers in a 3-char column for alignment', () => {
+    const r = getReplyRenderer();
+    const out = stripAnsi(r.render(
+      Array.from({ length: 11 }, (_, i) => `${i + 1}. item ${i + 1}`).join('\n'),
+    ));
+    // 1./10./11. all present; padStart(3) means ' 1.' / '10.' / '11.'.
+    expect(out).toMatch(/ 1\. item 1/);
+    expect(out).toMatch(/10\. item 10/);
+    expect(out).toMatch(/11\. item 11/);
+  });
+
+  it('bullet glyph paints in brand orange (#FF6B35)', () => {
+    const r = getReplyRenderer();
+    const out = r.render('- alpha');
+    // brand orange = #FF6B35 → rgb 255, 107, 53.
+    expect(out).toContain('\x1b[38;2;255;107;53m');
   });
 });
