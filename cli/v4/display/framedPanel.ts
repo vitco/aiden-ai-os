@@ -61,57 +61,78 @@ function statusKind(s: PanelRowStatus): ColorKind {
  * Render the Aiden-native framed panel. Returns a multi-line string
  * with trailing newline; caller writes via `display.write`.
  */
+/**
+ * v4.8.0 Slice 4 hotfix — word-boundary wrap. Returns the input split
+ * into chunks each ≤ `max` visible chars, preferring spaces. Used by
+ * the panel description column when the row's text exceeds the
+ * allocated width: subsequent chunks render on indented continuation
+ * lines instead of being truncated to `…`.
+ */
+function smartWrap(s: string, max: number): string[] {
+  if (max <= 0 || vWidth(s) <= max) return [s];
+  const out: string[] = [];
+  let rest = s;
+  while (vWidth(rest) > max) {
+    let cut = max;
+    const lastSpace = rest.slice(0, max).lastIndexOf(' ');
+    if (lastSpace >= Math.floor(max * 0.5)) cut = lastSpace;
+    out.push(rest.slice(0, cut).trimEnd());
+    rest = rest.slice(cut).trimStart();
+  }
+  if (rest.length > 0) out.push(rest);
+  return out;
+}
+
 export function renderFramedPanel(opts: PanelOptions): string {
   const sk = getSkinEngine();
-  const innerW = Math.max(40, opts.width ?? 72);
+  // v4.8.0 Slice 4 hotfix — read terminal width like table.ts does so
+  // wide terminals get wide panels instead of a hardcoded 72-col cap.
+  // Indent every row by 2 cells (matches table's `indent` default) so
+  // the left bar sits at col 2 rather than col 0 — col-0 paint reads
+  // as "terminal-edge artifact" instead of "panel boundary".
+  const indent = '  ';
+  const termCols = process.stdout.columns ?? 100;
+  const innerW = Math.max(40, opts.width ?? Math.min(termCols - indent.length, 110));
   const bar = sk.applyColors(glyphs.panel.bar, BAR_COLOR);
-  const line = (content: string): string => `${bar} ${content}`;
+  const line = (content: string): string => `${indent}${bar} ${content}`;
 
-  // Column widths for the 3-col row body: command, args, description.
-  // command + args get natural width; description flexes. Min 8.
   const maxCmd  = Math.max(...opts.rows.map(r => vWidth(r.command)), 4);
   const maxArgs = Math.max(...opts.rows.map(r => vWidth(r.args ?? '')), 0);
   const cmdCol  = maxCmd + 2;
   const argsCol = maxArgs > 0 ? maxArgs + 2 : 0;
-  // Status badge widest text the row body might carry.
   const maxStat = Math.max(...opts.rows.map(r => vWidth(r.status ?? '')), 0);
   const statCol = maxStat > 0 ? maxStat + 2 : 0;
   const descCol = Math.max(8, innerW - 2 - cmdCol - argsCol - statCol);
 
   const lines: string[] = [];
-
-  // ── Title row: `▎ /skills                            11 commands` ──
   const titlePaint = sk.applyColors(opts.title, 'heading');
   if (opts.subtitle) {
     const subRight = ' '.repeat(Math.max(0, innerW - 1 - vWidth(opts.title) - vWidth(opts.subtitle)));
-    const subPaint = sk.applyColors(opts.subtitle, 'muted');
-    lines.push(line(` ${titlePaint}${subRight}${subPaint}`));
+    lines.push(line(` ${titlePaint}${subRight}${sk.applyColors(opts.subtitle, 'muted')}`));
   } else {
     lines.push(line(` ${titlePaint}`));
   }
-
-  // ── Top divider ──
   lines.push(line(' ' + sk.applyColors(glyphs.chrome.hLine.repeat(innerW - 2), 'muted')));
 
-  // ── Body rows ──
+  // Body rows — wrap descriptions instead of truncating.
+  const descIndent = '  ' + ' '.repeat(cmdCol) + ' '.repeat(argsCol);
   for (const row of opts.rows) {
     const cmd  = sk.applyColors(row.command.padEnd(cmdCol),  'agent');
     const args = argsCol > 0
       ? sk.applyColors((row.args ?? '').padEnd(argsCol), 'muted')
       : '';
     const stat = statCol > 0 && row.status
-      ? sk.applyColors(row.status.padStart(maxStat),     statusKind(row.status))
+      ? sk.applyColors(row.status.padStart(maxStat), statusKind(row.status))
       : (statCol > 0 ? ' '.repeat(statCol) : '');
-    // Truncate description to its allocated column.
-    let desc = row.description;
-    if (vWidth(desc) > descCol) desc = desc.slice(0, Math.max(1, descCol - 1)) + '…';
-    const descPaint = sk.applyColors(desc.padEnd(descCol), 'muted');
-    lines.push(line(`  ${cmd}${args}${descPaint}${stat ? ' ' + stat : ''}`));
+    const wrapped = smartWrap(row.description, descCol);
+    const head = sk.applyColors(wrapped[0].padEnd(descCol), 'muted');
+    lines.push(line(`  ${cmd}${args}${head}${stat ? ' ' + stat : ''}`));
+    for (let i = 1; i < wrapped.length; i++) {
+      lines.push(line(descIndent + sk.applyColors(wrapped[i].padEnd(descCol), 'muted')));
+    }
   }
 
-  // ── Bottom divider + footer ──
   lines.push(line(' ' + sk.applyColors(glyphs.chrome.hLine.repeat(innerW - 2), 'muted')));
   lines.push(line(' ' + sk.applyColors(opts.footer, 'muted')));
-
   return lines.join('\n') + '\n';
 }
