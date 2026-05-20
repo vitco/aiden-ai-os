@@ -202,6 +202,12 @@ config/devos.config.backup.json
 
 # ── Smoke harnesses (CC self-smokes; not for shipping) ──────────────────────
 scripts/smoke-*.ts
+# Exceptions: cross-platform smokes are required CI gates (ci.yml:60,63).
+# smoke-v4.1-attribution-sweep is invoked transitively by cross-platform
+# at the G1 step, so it must also ship.
+!scripts/smoke-v4.1-cross-platform.ts
+!scripts/smoke-v4.1-cross-platform-runtime.ts
+!scripts/smoke-v4.1-attribution-sweep.ts
 
 # ── Server / test logs ──────────────────────────────────────────────────────
 *.log

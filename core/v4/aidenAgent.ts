@@ -718,18 +718,6 @@ export class AidenAgent {
         );
         if (!scan.passed) {
           honestyFindings = scan.findings;
-          if (scan.correctedResponse) {
-            finalContent = scan.correctedResponse;
-            // Reflect the corrected text in the message history too so
-            // /debug-prompt and /usage agree on the final string.
-            for (let i = loopResult.messages.length - 1; i >= 0; i--) {
-              const m = loopResult.messages[i];
-              if (m.role === 'assistant' && (!m.toolCalls || m.toolCalls.length === 0)) {
-                (loopResult.messages[i] as { content: string }).content = finalContent;
-                break;
-              }
-            }
-          }
         }
       } catch {
         /* honesty failures must not break the turn */

@@ -133,7 +133,7 @@ function expandPathInline(input: string, cwd: string): string {
 
 /**
  * Boundary-aware containment check. `path.relative` avoids the
- * `/home/user-evil` vs `/home/user` false positive that a naive
+ * `<root>/user-evil` vs `<root>/user` false positive that a naive
  * `startsWith` would produce.
  */
 export function isWithin(child: string, parent: string): boolean {

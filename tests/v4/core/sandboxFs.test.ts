@@ -188,10 +188,19 @@ const symdescribe = symlinkable ? describe : describe.skip;
 symdescribe('isPathAllowed — symlink escape', () => {
   let allow: string;
   let outside: string;
+  // The default allowlist in sandboxConfig.ts:155-167 includes os.tmpdir().
+  // Both `allow` and `outside` cannot both live in /tmp/ — `outside` would
+  // be under the default allowlist via the tmpdir entry, and the symlink-
+  // escape check would correctly report `realUnderAllow: true`, masking the
+  // bug we're trying to test. Place `outside` under os.homedir() (which is
+  // NOT in the default allowlist — only home/Documents|Downloads|Desktop
+  // are) so the symlink target is genuinely outside every allowlist entry.
   beforeEach(() => {
     _clearRealPathCacheForTests();
     allow   = tmpDir('allow');
-    outside = tmpDir('outside');
+    outside = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.homedir(), '.aiden-sbx-outside-')),
+    );
   });
   afterEach(() => { cleanup(allow); cleanup(outside); });
 
