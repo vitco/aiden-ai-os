@@ -183,47 +183,55 @@ describe('renderApprovalBox (Phase 22 Task 5B)', () => {
     reason: 'destructive operation',
   };
 
-  it('opens with a rounded box top titled "Approval required"', () => {
+  it('Slice 6: every line carries the 2-space indent + ▎ accent bar (no rounded corners)', () => {
     const display = makeDisplay({ mono: true });
     const out = renderApprovalBox(SAMPLE_REQ as any, display);
-    expect(out.split('\n')[0]).toMatch(/^┌── Approval required /);
+    for (const line of out.split('\n').filter(l => l.length > 0)) {
+      expect(line.startsWith('  ▎')).toBe(true);
+    }
+    // The ASCII-box corners are gone.
+    expect(out).not.toContain('┌');
+    expect(out).not.toContain('┐');
+    expect(out).not.toContain('└');
+    expect(out).not.toContain('┘');
   });
 
-  it('renders Tool, Reason, and Args fields inside the box', () => {
+  it('Slice 6: renders key/value rows for tool, reason, and args', () => {
     const display = makeDisplay({ mono: true });
     const out = stripAnsi(renderApprovalBox(SAMPLE_REQ as any, display));
-    expect(out).toMatch(/Tool: file_delete/);
-    expect(out).toMatch(/Reason: destructive operation/);
-    expect(out).toMatch(/Args: \{"path":"C:\\\\Users\\\\shiva\\\\backups\\\\old\.zip"\}/);
+    // New chrome: key column (lowercase, padded) then value.
+    expect(out).toMatch(/tool\s+file_delete/);
+    expect(out).toMatch(/reason\s+destructive operation/);
+    expect(out).toMatch(/args\s+\{"path":"C:\\\\Users\\\\shiva\\\\backups\\\\old\.zip"\}/);
   });
 
-  it('omits the Reason row when no reason is supplied', () => {
+  it('omits the reason row when no reason is supplied', () => {
     const display = makeDisplay({ mono: true });
     const noReason = { ...SAMPLE_REQ, reason: undefined };
     const out = stripAnsi(renderApprovalBox(noReason as any, display));
-    expect(out).not.toMatch(/Reason:/);
-    expect(out).toMatch(/Tool: file_delete/);
+    expect(out).not.toMatch(/^.*reason\s+/m);
+    expect(out).toMatch(/tool\s+file_delete/);
   });
 
   it('truncates oversized args with an ellipsis', () => {
     const display = makeDisplay({ mono: true });
     const big = { ...SAMPLE_REQ, args: { blob: 'x'.repeat(500) } };
     const out = stripAnsi(renderApprovalBox(big as any, display));
-    // Args line ends with the truncation ellipsis.
-    expect(out).toMatch(/Args: \{"blob":"x+…/);
+    expect(out).toMatch(/args\s+\{"blob":"x+…/);
   });
 
-  it('shows the [y]/[a]/[n] action keys at the bottom', () => {
+  it('shows the [y]/[a]/[n] action keys in the footer hint', () => {
     const display = makeDisplay({ mono: true });
     const out = stripAnsi(renderApprovalBox(SAMPLE_REQ as any, display));
     expect(out).toMatch(/\[y\] allow once.*\[a\] allow always.*\[n\] deny/);
   });
 
-  it('coloured output uses yellow (warn) for box borders', () => {
+  it('Slice 6: the left bar paints brand orange (#FF6B35), tier badge paints semantic colour', () => {
     const display = makeDisplay({ mono: false });
     const out = renderApprovalBox(SAMPLE_REQ as any, display);
-    // warn colour in default skin = #FFC107 → rgb 255, 193, 7.
+    // brand orange = #FF6B35 → rgb 255, 107, 53.
+    expect(out).toContain('\x1b[38;2;255;107;53m');
+    // caution tier → warn colour = #FFC107 → rgb 255, 193, 7.
     expect(out).toContain('\x1b[38;2;255;193;7m');
-    expect(out).not.toContain('\x1b[38;2;128;128;128m'); // no grey
   });
 });

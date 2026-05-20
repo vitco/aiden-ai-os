@@ -34,7 +34,8 @@ import type { ToolCallRequest, ToolCallResult, CapabilityCardData } from '../../
 // here for the renderer + the structural mapping helper below.
 import type { BlockerKind, BlockerSurface } from '../../tools/v4/browser/browserBlocker';
 // v4.8.0 Slice 5 — verbose-mode gate for internal-telemetry dim lines.
-import { isVerbose } from './design/tokens';
+import { isVerbose, glyphs } from './design/tokens';
+import type { ColorKind } from './skinEngine';
 /* Phase 23.6 rollback — Ink controller bridge stashed to
  * docs/sprint/_internal/v4.1-ink-stash/.  Re-introduce when v4.1 picks
  * up the Ink rebuild. */
@@ -741,49 +742,54 @@ const APPROVAL_BOX_WIDTH = 64;
 const APPROVAL_ARGS_LIMIT = 50;
 
 /**
- * Render an approval request as a yellow-bordered rounded box. Pure —
- * returns the multi-line string; caller writes it. Args are truncated
- * to APPROVAL_ARGS_LIMIT chars for display only; the full args stay
- * with the tool call.
+ * Render an approval request with the Aiden-native framed-panel chrome
+ * (Slice 6) — orange left bar, no closing corners, footer hint always
+ * present. Token-sourced from cli/v4/design/tokens.ts. Returns the
+ * multi-line string; caller writes it. Args are truncated to
+ * APPROVAL_ARGS_LIMIT chars for display only; the full args stay with
+ * the tool call. Colour discipline: brand (bar + title + key glyphs),
+ * tier-semantic (badge), muted (everything else) — ≤3 distinct colours.
  */
 export function renderApprovalBox(req: ApprovalRequest, display: Display): string {
-  const W = APPROVAL_BOX_WIDTH;
-  const top = display.paint(boxTopTitled('Approval required', W), 'warn');
-  const bot = display.paint(boxBottom(W), 'warn');
-  const side = (content: string): string => {
-    const raw = boxLine(content, W);
-    const left = raw.slice(0, 1);
-    const inner = raw.slice(1, raw.length - 1);
-    const right = raw.slice(raw.length - 1);
-    return `${display.paint(left, 'warn')}${inner}${display.paint(right, 'warn')}`;
-  };
+  const indent = '  ';
+  const innerW = APPROVAL_BOX_WIDTH;
+  const bar = display.applyColors(glyphs.panel.bar, 'brand');
+  const line = (content: string): string => `${indent}${bar} ${content}`;
+  const divider = display.muted(glyphs.chrome.hLine.repeat(innerW - 2));
 
-  const tierBadge = badgeForTier(req.riskTier);
+  // Title row: `Approval needed` (brand) + tier badge right-aligned (semantic).
+  const tierKind: ColorKind =
+    req.riskTier === 'safe'      ? 'success' :
+    req.riskTier === 'dangerous' ? 'error'   :
+    req.riskTier === 'caution'   ? 'warn'    : 'muted';
+  const title    = display.applyColors('Approval needed', 'heading');
+  const tierText = req.riskTier ?? '';
+  const gap = ' '.repeat(Math.max(1, innerW - 1 - 'Approval needed'.length - tierText.length));
+  const titleRow = tierText
+    ? ` ${title}${gap}${display.applyColors(tierText, tierKind)}`
+    : ` ${title}`;
+
   let argsPreview = '';
-  try {
-    argsPreview = JSON.stringify(req.args);
-  } catch {
-    argsPreview = String(req.args);
-  }
+  try { argsPreview = JSON.stringify(req.args); }
+  catch { argsPreview = String(req.args); }
   if (argsPreview.length > APPROVAL_ARGS_LIMIT) {
     argsPreview = argsPreview.slice(0, APPROVAL_ARGS_LIMIT - 1) + '…';
   }
 
+  // Key-value rows. Key column padded to 12 cells for vertical alignment.
+  const kv = (k: string, v: string): string =>
+    `  ${display.muted(k.padEnd(12))}${v}`;
+
   const lines: string[] = [
-    top,
-    side(''),
-    side(` ${display.muted('Tool:')} ${req.toolName}${tierBadge ? '  ' + tierBadge : ''}`),
+    line(titleRow),
+    line(' ' + divider),
+    line(kv('tool', req.toolName)),
   ];
-  if (req.reason) {
-    lines.push(side(` ${display.muted('Reason:')} ${req.reason}`));
-  }
-  lines.push(side(` ${display.muted('Args:')} ${argsPreview}`));
-  lines.push(side(''));
-  lines.push(
-    side(
-      ` ${display.brand('[y]')} allow once  ${display.brand('[a]')} allow always  ${display.brand('[n]')} deny`,
-    ),
-  );
-  lines.push(bot);
+  if (req.reason) lines.push(line(kv('reason', req.reason)));
+  lines.push(line(kv('args', argsPreview)));
+  lines.push(line(' ' + divider));
+  lines.push(line(
+    `  ${display.brand('[y]')} allow once  ${display.brand('[a]')} allow always  ${display.brand('[n]')} deny`,
+  ));
   return lines.join('\n');
 }
