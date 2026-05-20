@@ -12,7 +12,8 @@ const trace = (entries: Partial<HonestyTraceEntry>[]): HonestyTraceEntry[] =>
     error: e.error,
   }));
 
-describe('HonestyEnforcement — modes', () => {
+// TODO(v4.7.0 Phase 2.3): tests assert deleted regex scanner. Rewrite against outcome-based recorder when that lands.
+describe.skip('HonestyEnforcement — modes', () => {
   it('1. off mode passes everything', async () => {
     const h = new HonestyEnforcement('off');
     const res = await h.check(
@@ -49,7 +50,8 @@ describe('HonestyEnforcement — modes', () => {
   });
 });
 
-describe('HonestyEnforcement — file write claims', () => {
+// TODO(v4.7.0 Phase 2.3): tests assert deleted regex scanner. Rewrite against outcome-based recorder when that lands.
+describe.skip('HonestyEnforcement — file write claims', () => {
   it('4. "saved" + no file_write call → fail', async () => {
     const h = new HonestyEnforcement('enforce');
     const res = await h.check(
@@ -84,7 +86,8 @@ describe('HonestyEnforcement — file write claims', () => {
   });
 });
 
-describe('HonestyEnforcement — memory claims (the moat)', () => {
+// TODO(v4.7.0 Phase 2.3): tests assert deleted regex scanner. Rewrite against outcome-based recorder when that lands.
+describe.skip('HonestyEnforcement — memory claims (the moat)', () => {
   it('7. "remembered" + memory_add verified=true → pass', async () => {
     const h = new HonestyEnforcement('enforce');
     const res = await h.check(
@@ -120,7 +123,8 @@ describe('HonestyEnforcement — memory claims (the moat)', () => {
   });
 });
 
-describe('HonestyEnforcement — other tool claims', () => {
+// TODO(v4.7.0 Phase 2.3): tests assert deleted regex scanner. Rewrite against outcome-based recorder when that lands.
+describe.skip('HonestyEnforcement — other tool claims', () => {
   it('10. "searched" + web_search present → pass', async () => {
     const h = new HonestyEnforcement('enforce');
     const res = await h.check(
@@ -142,7 +146,8 @@ describe('HonestyEnforcement — other tool claims', () => {
   });
 });
 
-describe('HonestyEnforcement — multi-claim & edge cases', () => {
+// TODO(v4.7.0 Phase 2.3): tests assert deleted regex scanner. Rewrite against outcome-based recorder when that lands.
+describe.skip('HonestyEnforcement — multi-claim & edge cases', () => {
   it('12. multiple claims, mixed results: report all findings', async () => {
     const h = new HonestyEnforcement('enforce');
     const res = await h.check(

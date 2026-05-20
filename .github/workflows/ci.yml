@@ -97,9 +97,12 @@ jobs:
         run: |
           # Fail if any provider key prefix lands in source. Excludes
           # node_modules + .git only — dist/ is shipped, scan it too.
+          # tests/ is excluded because test fixtures legitimately contain
+          # mock-shaped credentials to verify credential-filter redaction;
+          # those are policy data, not real leaked keys.
           if grep -rE "sk-ant-[A-Za-z0-9_-]{20,}|sk-proj-[A-Za-z0-9_-]{20,}|gsk_[A-Za-z0-9]{20,}|AIza[A-Za-z0-9_-]{20,}" \
             --include='*.ts' --include='*.js' --include='*.json' --include='*.md' \
-            --exclude-dir=node_modules --exclude-dir=.git . ; then
+            --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=tests . ; then
             echo "::error::Possible API key found in source"
             exit 1
           fi

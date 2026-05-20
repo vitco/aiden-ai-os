@@ -295,7 +295,8 @@ describe('AidenAgent — PlannerGuard opt-in toggle (v4.6 Phase 2M)', () => {
   });
 });
 
-describe('AidenAgent — HonestyEnforcement wiring', () => {
+// TODO(v4.7.0 Phase 2.3): tests assert deleted regex scanner (correctedResponse rewrite + memory_verified_false detection). Rewrite against outcome-based recorder when that lands.
+describe.skip('AidenAgent — HonestyEnforcement wiring', () => {
   it('4. failed claims rewritten in finalContent', async () => {
     const provider = new MockProviderAdapter([
       MockProviderAdapter.stop('I saved the file to disk.'),
