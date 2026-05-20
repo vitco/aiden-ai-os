@@ -46,6 +46,7 @@ import type { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
 import type { PromptBuilder, PromptBuilderOptions } from '../../core/v4/promptBuilder';
 import type { MemoryManager } from '../../core/v4/memoryManager';
 import { ApprovalEngine } from '../../moat/approvalEngine';
+import { HonestyEnforcement, type HonestyMode } from '../../moat/honestyEnforcement';
 import type { AidenPaths } from '../../core/v4/paths';
 
 // ── Public types ───────────────────────────────────────────────────────────
@@ -66,6 +67,13 @@ export interface BuildDaemonAgentBuilderInput {
   resolveVerifiedFlag:  AidenAgentOptions['resolveVerifiedFlag'];
   resolveToolset:       AidenAgentOptions['resolveToolset'];
   resolveMutates:       AidenAgentOptions['resolveMutates'];
+  /**
+   * v4.7.0 Phase 2.4 — honesty-mode plumbed in from the REPL's config
+   * resolution at boot, so daemon turns honour the same setting the
+   * user picked for interactive sessions. Defaults to 'enforce' if the
+   * caller omits.
+   */
+  honestyMode?:         HonestyMode;
   /** Max turns ceiling (mirrors REPL cap). */
   maxTurns?:            number;
   /** Log sink for the per-turn stdout audit line (Q-P7b-4b). */
@@ -152,11 +160,18 @@ export function buildDaemonAgentBuilder(
       resolveMutates:       deps.resolveMutates,
       // Memory snapshot refresh — daemon agent doesn't track dirty
       // bits because each instance is short-lived; we provide the
-      // refresh callback so honestyEnforcement-style consumers (when
-      // we add them) can still rebuild.
+      // refresh callback so honestyEnforcement (and any future
+      // consumer that needs a current memory snapshot) can rebuild.
       refreshMemorySnapshot: () => deps.memoryManager.loadSnapshot(),
-      // Scope cuts (Phase 7b): no plannerGuard, no honestyEnforcement,
-      // no skillTeacher, no skillMiner. These add LLM calls + state
+      // v4.7.0 Phase 2.4 — HonestyEnforcement is now structural
+      // (reads tool trace only, no natural-language scanning) and
+      // cheap enough to run on autonomous daemon turns. Mode mirrors
+      // the REPL's config-resolved value (default 'enforce'); the
+      // footer appended in enforce mode is captured by the daemon
+      // dispatcher's run_events and surfaced in the channel reply.
+      honestyEnforcement: new HonestyEnforcement(deps.honestyMode ?? 'enforce'),
+      // Scope cuts (Phase 7b, still deferred): no plannerGuard, no
+      // skillTeacher, no skillMiner. These add LLM calls + state
       // that don't fit the daemon's "fire and act" pattern.
     });
 

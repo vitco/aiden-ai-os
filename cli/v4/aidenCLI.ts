@@ -1629,6 +1629,10 @@ export async function buildAgentRuntime(
     resolveVerifiedFlag,
     resolveToolset,
     resolveMutates,
+    // v4.7.0 Phase 2.4 — share the REPL's config-resolved honesty mode
+    // with daemon-built agents so autonomous turns honour the same
+    // setting interactive turns do.
+    honestyMode,
     maxTurns: config.getValue<number>('agent.max_turns', 90)!,
   });
 

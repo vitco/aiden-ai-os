@@ -31,6 +31,7 @@
 
 import type { ApprovalCallbacks } from '../../../moat/approvalEngine';
 import { ApprovalEngine } from '../../../moat/approvalEngine';
+import { HonestyEnforcement } from '../../../moat/honestyEnforcement';
 import { AidenAgent } from '../aidenAgent';
 import type { AidenAgentOptions, ToolExecutor } from '../aidenAgent';
 import type { ToolRegistry, ToolContext } from '../toolRegistry';
@@ -275,10 +276,16 @@ export function buildChildAgent(
   const onToolCall = buildOnToolCall(deps);
 
   // ── 7. Build the child agent ─────────────────────────────────────────────
-  // Focused worker config: omit plannerGuard, honestyEnforcement,
-  // skillTeacher, skillMiner, contextCompressor, promptCaching,
-  // promptBuilder. Match the daemon agent's "act on the task, don't
-  // self-improve" shape.
+  // Focused worker config: omit plannerGuard, skillTeacher, skillMiner,
+  // contextCompressor, promptCaching, promptBuilder. Match the daemon
+  // agent's "act on the task, don't self-improve" shape.
+  //
+  // v4.7.0: HonestyEnforcement is now structural (reads tool trace only,
+  // no natural-language scanning) and cheap enough to run in subagents.
+  // Mode is 'detect' here — events are captured into the child's run
+  // record but never produce user-visible output (subagents have no
+  // chat surface; the parent assembles their summary).
+  const childHonestyEnforcement = new HonestyEnforcement('detect');
   const agent = new AidenAgent({
     provider:            childProvider,
     tools:               childTools,
@@ -290,6 +297,7 @@ export function buildChildAgent(
     resolveVerifiedFlag: deps.resolveVerifiedFlag,
     resolveToolset:      deps.resolveToolset,
     resolveMutates:      deps.resolveMutates,
+    honestyEnforcement:  childHonestyEnforcement,
     onToolCall,
     // iterationBudgetInjection inherits the default (true) — child
     // sees its own remaining-budget hint near the end of the run.
