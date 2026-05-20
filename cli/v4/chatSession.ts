@@ -1921,7 +1921,10 @@ export class ChatSession implements ChatSessionLike {
     } catch { /* never let a missing marker crash boot */ }
 
     // Bottom prompt hint — final line of the boot card.
-    display.write('\n');
+    // v4.8.0 Slice 7 hotfix #2 — explicit \n\n gives a guaranteed blank
+    // line above the hint regardless of whether the preceding surface
+    // (capability card / two-column block) terminated with a newline.
+    display.write('\n\n');
     display.write(display.bottomPromptHint() + '\n');
   }
 

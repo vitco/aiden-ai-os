@@ -50,6 +50,19 @@ export const colors = {
     error:   '#e05a5a',
     info:    '#7da7c7',
   },
+  /**
+   * v4.8.0 Slice 7 hotfix #2 — per-metric accent palette for the
+   * packed status footer. Each metric gets a stable colour so
+   * cross-glance reading stays consistent: cyan model, amber tokens,
+   * purple turn count, teal timer. Maps to skinEngine ColorKinds at
+   * runtime: tool / warn / metric_turn / success.
+   */
+  metrics: {
+    model:     '#9cdcfe',
+    tokens:    '#e0a040',
+    turnCount: '#a48be0',
+    timer:     '#7fc28b',
+  },
   surface: {
     /** Terminal background reference; tokens never paint bg directly. */
     bg:       '#0d0e10',

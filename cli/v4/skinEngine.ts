@@ -45,7 +45,9 @@ export type ColorKind =
   /** Cyan — session IDs, session-end card labels. v4.1.3-repl-polish. */
   | 'session'
   /** Yellow — degraded tool outcomes (best-effort, partial result). v4.1.3-repl-polish. */
-  | 'degraded';
+  | 'degraded'
+  /** Purple — status footer turn counter (⌘). v4.8.0 Slice 7 hotfix #2. */
+  | 'metric_turn';
 
 export interface SkinDefinition {
   name: string;
@@ -91,6 +93,10 @@ const DEFAULT_SKIN: SkinDefinition = {
     // (which shares the colour) so callers can differentiate in code
     // even though they render identically.
     degraded: [0xff, 0xc1, 0x07],
+    // v4.8.0 Slice 7 hotfix #2 — purple accent for the turn-counter
+    // segment (⌘) in the status footer. #a48be0 reads as a soft
+    // lavender that doesn't compete with brand orange.
+    metric_turn: [0xa4, 0x8b, 0xe0],
   },
   glyphs: {
     bullet: '•',
@@ -125,6 +131,8 @@ const LIGHT_SKIN: SkinDefinition = {
     heading: [0xc4, 0x42, 0x10],
     session: [0x00, 0x55, 0x88],
     degraded: [0x80, 0x60, 0x00],
+    // Slice 7 hotfix #2 — deeper purple on light bg keeps contrast budget.
+    metric_turn: [0x6e, 0x50, 0xaa],
   },
   glyphs: { ...DEFAULT_SKIN.glyphs },
 };
@@ -145,6 +153,7 @@ const MONOCHROME_SKIN: SkinDefinition = {
     heading: null,
     session: null,
     degraded: null,
+    metric_turn: null,
   },
   glyphs: {
     bullet: '*',

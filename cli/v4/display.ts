@@ -781,27 +781,35 @@ export class Display {
     const sk = this.skin;
     const SEP = sk.applyColors(' │ ', 'muted');
     const tri = this.triangle();
+    // v4.8.0 Slice 7 hotfix #2 — per-metric accent palette.
+    // Model: cyan (tool kind). Token counts: amber (warn). Bar/pct:
+    // semantic tier. Turn: purple (metric_turn). Timer: teal (success).
     const provModel =
       `${tri} ${sk.applyColors(args.provider, 'muted')}` +
       `${sk.applyColors(' · ', 'muted')}` +
-      sk.applyColors(args.model, 'agent');
+      sk.applyColors(args.model, 'tool');
 
     const pct = args.ctxMax > 0
       ? Math.min(100, Math.round((args.ctxUsed / args.ctxMax) * 100))
       : 0;
-    const barW = 10;
+    // 5-cell bar with single-space separators — reads as discrete dots
+    // rather than a continuous line. Total visible width ≈ 9 cells,
+    // similar to the prior 10-cell solid bar so 80-col tier stays tight.
+    const barW = 5;
     const filled = Math.round((pct / 100) * barW);
     const ctxKind: 'success' | 'warn' | 'error' =
       pct < 60 ? 'success' : pct < 85 ? 'warn' : 'error';
-    // v4.8.0 Slice 7 hotfix — hex-dot pair from tokens.bar replaces
-    // the generic shaded-block bar for a more distinctive Aiden look.
-    const bar =
-      sk.applyColors(glyphs.bar.filled.repeat(filled), ctxKind) +
-      sk.applyColors(glyphs.bar.empty.repeat(barW - filled), 'muted');
-    const ctxRatio = `${formatCompactTokens(args.ctxUsed)}/${formatCompactTokens(args.ctxMax)}`;
-    const ctxPctText = `${pct}%`;
+    const cells = Array.from({ length: barW }, (_, i) =>
+      i < filled ? glyphs.bar.filled : glyphs.bar.empty,
+    );
+    const bar = sk.applyColors(cells.join(' '), ctxKind);
+    const ctxRatio = sk.applyColors(
+      `${formatCompactTokens(args.ctxUsed)}/${formatCompactTokens(args.ctxMax)}`,
+      'warn',
+    );
+    const ctxPctText = sk.applyColors(`${pct}%`, ctxKind);
 
-    const elapsed = sk.applyColors(formatElapsedShort(args.elapsedMs), 'muted');
+    const elapsed = sk.applyColors(formatElapsedShort(args.elapsedMs), 'success');
 
     // Progressive disclosure: pick layout based on RAW terminal width.
     // `this.cols()` caps at 100 (frame budget for body content), but
@@ -816,17 +824,18 @@ export class Display {
       ? sk.applyColors(glyphs.status.dot, this.stateKind(args.state))
       : '';
     const turnSeg = args.turnCount !== undefined
-      ? `${sk.applyColors(glyphs.status.turn, 'muted')} ${sk.applyColors(String(args.turnCount), 'agent')}`
+      ? `${sk.applyColors(glyphs.status.turn, 'metric_turn')} ${sk.applyColors(String(args.turnCount), 'metric_turn')}`
       : '';
     // v4.8.0 Slice 7 hotfix — ⏱ slot now shows per-turn elapsed time
     // (was session uptime — over-engineered; user expects per-turn at
     // the right edge). `sessionMs` plumbed-but-unused stays for
     // backward compat with the field name.
     const sessionSeg = args.elapsedMs !== undefined
-      ? `${sk.applyColors(glyphs.status.timer, 'muted')} ${sk.applyColors(formatElapsedShort(args.elapsedMs), 'muted')}`
+      ? `${sk.applyColors(glyphs.status.timer, 'success')} ${sk.applyColors(formatElapsedShort(args.elapsedMs), 'success')}`
       : '';
-    const ctxSegFull = `${sk.applyColors(ctxRatio, 'muted')} ${bar} ${sk.applyColors(ctxPctText, ctxKind)}`;
-    const ctxSegCompact = `${bar} ${sk.applyColors(ctxPctText, ctxKind)}`;
+    // ctxRatio + ctxPctText are pre-painted (warn + ctxKind respectively).
+    const ctxSegFull = `${ctxRatio} ${bar} ${ctxPctText}`;
+    const ctxSegCompact = `${bar} ${ctxPctText}`;
 
     let segments: string[];
     if (cols >= 120 && stateDot && turnSeg && sessionSeg) {
@@ -946,11 +955,15 @@ export class Display {
    * `12:41:02  ▲ <input>`. Default OFF preserves `▲ <input>`.
    */
   promptPrefix(): string {
+    // v4.8.0 Slice 7 hotfix #2 — 2-space lead matches the rest of the
+    // surface family (▎ Aiden header, status footer, bottom hint).
+    // Timestamp variant unchanged — the timestamp gutter already
+    // provides its own consistent left edge.
     const tri = this.skin.applyColors('▲', 'brand');
     if (process.env.AIDEN_UI_TIMESTAMPS === '1') {
       return `${this.timestampPrefix()}  ${tri} `;
     }
-    return `${tri} `;
+    return `  ${tri} `;
   }
 
   /**
@@ -1614,7 +1627,12 @@ export class Display {
    * (post-stream rerender) so both paths produce identical output.
    */
   private applyFrameToRendered(rawBody: string): string {
-    const indent = frameGetIndent(0);
+    // v4.8.0 Slice 7 hotfix #2 — override frame.GUTTER (3) to 2 cells
+    // locally so Aiden reply prose aligns with the ▎ bar of agentHeader
+    // (col 2). The GUTTER constant stays at 3 for other consumers
+    // (markdown list/blockquote/code-block renderers in frame.ts) where
+    // a 3-cell gutter is part of their own visual algebra.
+    const indent = '  ';
     const bw     = frameGetBodyWidth(this.out);
     return rawBody
       .split('\n')

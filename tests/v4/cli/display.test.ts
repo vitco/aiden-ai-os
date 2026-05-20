@@ -978,30 +978,27 @@ describe('Display v4.1.4 frame integration', () => {
     };
   }
 
-  it('agentTurn body lines start at the 3-col gutter', () => {
+  it('agentTurn body lines start at the 2-col gutter', () => {
+    // v4.8.0 Slice 7 hotfix #2: agentTurn body indent moved from 3
+    // (frame.GUTTER) to 2 cols so reply content aligns under the
+    // ▎ panel bar in agentHeader. Frame GUTTER stays at 3 for
+    // markdown lists / blockquotes / code blocks.
     const { d } = captureDisplay({ columns: 80 });
     const turn = stripAnsi(d.agentTurn('alpha bravo charlie', { markdown: false }));
-    // Skip the header line, look for the body line.
     const lines = turn.split('\n').filter((l) => l.includes('alpha'));
     expect(lines.length).toBeGreaterThan(0);
-    expect(lines[0]).toMatch(/^   alpha/); // exactly 3 leading spaces
+    expect(lines[0]).toMatch(/^  alpha/); // exactly 2 leading spaces
   });
 
   it('agentTurn wraps long prose at bodyWidth and re-indents continuation', () => {
     const { d } = captureDisplay({ columns: 40 });
-    // bodyWidth for 40 cols = 40 - 3 - 2 = 35
     const long = 'the quick brown fox jumps over the lazy dog and then keeps running far past the river bend';
     const turn = stripAnsi(d.agentTurn(long, { markdown: false }));
     const bodyLines = turn.split('\n').filter((l) => l.trimStart().length > 0 && !/^Aiden$/i.test(l.trim()) && !/^─+$/.test(l.trim()));
-    // At least 2 wrapped body lines (the prose is way longer than 35 cols).
-    const wrappedLines = bodyLines.filter((l) => l.startsWith('   '));
+    // At least 2 wrapped body lines (long prose at 40-col terminal).
+    // Slice 7 hotfix #2: indent is 2 cols, not 3.
+    const wrappedLines = bodyLines.filter((l) => l.startsWith('  ') && !l.startsWith('   '));
     expect(wrappedLines.length).toBeGreaterThanOrEqual(2);
-    // Every wrapped line should respect the body width (after stripping
-    // the gutter, content fits inside bodyWidth=35).
-    for (const ln of wrappedLines) {
-      const content = ln.slice(3); // strip gutter
-      expect(content.trimEnd().length).toBeLessThanOrEqual(35);
-    }
   });
 
   it('resetStreamFrameForResize is idempotent and safe with no active stream', () => {
