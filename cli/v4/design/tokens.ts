@@ -176,6 +176,20 @@ export const glyphs = {
     bar: '▎',
   },
   /**
+   * v4.8.0 Slice 10d — rounded heavy frame for identity / credits
+   * surfaces (the "Built solo" scrollFooter being the first consumer).
+   * Distinct from `glyphs.chrome` which uses SHARP corners (`┌ ┐ └ ┘`)
+   * for table chrome — rounded corners signal "identity card" rather
+   * than "data table". Both glyph sets share `─` and `│` for sides
+   * (those live on `glyphs.chrome.hLine` / `vLine` to avoid duplication).
+   */
+  box: {
+    topLeft:     '╭',
+    topRight:    '╮',
+    bottomLeft:  '╰',
+    bottomRight: '╯',
+  },
+  /**
    * Status footer progress bar pair. v4.8.0 Slice 7 hotfix #3 — moved
    * from hex dots (⬢/⬡) back to the U+25CF/U+25CB circle pair: those
    * codepoints render in every monospace font (Consolas, Cascadia,

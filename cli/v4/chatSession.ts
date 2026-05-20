@@ -1921,10 +1921,13 @@ export class ChatSession implements ChatSessionLike {
     } catch { /* never let a missing marker crash boot */ }
 
     // Bottom prompt hint — final line of the boot card.
-    // v4.8.0 Slice 7 hotfix #2 — explicit \n\n gives a guaranteed blank
-    // line above the hint regardless of whether the preceding surface
-    // (capability card / two-column block) terminated with a newline.
-    display.write('\n\n');
+    // v4.8.0 Slice 10d — full-width muted `─` divider between the
+    // boot card (parchment / capability card / two-column block) and
+    // the input hint prevents the boot chrome from merging visually
+    // with the active prompt. Pattern: blank · rule · blank · hint.
+    display.write('\n');
+    display.write(`  ${display.rule()}\n`);
+    display.write('\n');
     display.write(display.bottomPromptHint() + '\n');
   }
 

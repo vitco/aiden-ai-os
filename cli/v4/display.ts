@@ -683,11 +683,12 @@ export class Display {
    * across lines.
    */
   scrollFooter(): string {
-    // v4.8.0 Slice 10b — migrated from `|`/`_` parchment frame to the
-    // Aiden-native orange-bar panel chrome that the rest of v4.8.0
-    // surfaces use. Content rows (Built solo + GitHub/Web/Contact)
-    // preserved verbatim so existing content-level assertions still
-    // pass; only the surrounding frame changes.
+    // v4.8.0 Slice 10d — rounded heavy frame for identity / credits.
+    // The Slice 10b/c orange-bar chrome lacked visual containment for
+    // an identity surface (the bar reads as panel-content, not as a
+    // credits card). This restores a heavy frame — but with rounded
+    // corners (╭╮╰╯) sourced from glyphs.box, and muted chrome so the
+    // brand `♥` + brand kv labels carry the visual weight inside.
     const sk = this.skin;
     const m = (s: string): string => sk.applyColors(s, 'muted');
     const lab = (s: string): string => sk.applyColors(s, 'brand');
@@ -700,18 +701,29 @@ export class Display {
     }
 
     const indent = '  ';
-    const bar = sk.applyColors(glyphs.panel.bar, 'brand');
-    const innerW = 64;
-    const divider = sk.applyColors(glyphs.chrome.hLine.repeat(innerW - 2), 'muted');
-    const line = (content: string): string => `${indent}${bar}  ${content}`;
+    const innerW = Math.min(this.cols() - 4, 70);
+    const tL = m(glyphs.box.topLeft);
+    const tR = m(glyphs.box.topRight);
+    const bL = m(glyphs.box.bottomLeft);
+    const bR = m(glyphs.box.bottomRight);
+    const side = m(glyphs.chrome.vLine);
+    const hRun = m(glyphs.chrome.hLine.repeat(innerW));
+    const pad = (visible: string, width: number): string => {
+      const v = visibleLength(visible);
+      return visible + ' '.repeat(Math.max(0, width - v));
+    };
+    const row = (content: string): string =>
+      `${indent}${side} ${pad(content, innerW - 2)} ${side}`;
 
     return [
       '',
-      line(`${heart}  ${val('Built solo')}`),
-      line(divider),
-      line(`${lab('GitHub:'.padEnd(10))}${val('github.com/taracodlabs/aiden')}`),
-      line(`${lab('Web:'.padEnd(10))}${val('aiden.taracod.com')}`),
-      line(`${lab('Contact:'.padEnd(10))}${val('contact@taracod.com')}`),
+      `${indent}${tL}${hRun}${tR}`,
+      row(`${heart}  ${val('Built solo')}`),
+      row(''),
+      row(`${lab('GitHub:'.padEnd(10))}${val('github.com/taracodlabs/aiden')}`),
+      row(`${lab('Web:'.padEnd(10))}${val('aiden.taracod.com')}`),
+      row(`${lab('Contact:'.padEnd(10))}${val('contact@taracod.com')}`),
+      `${indent}${bL}${hRun}${bR}`,
       '',
     ].join('\n');
   }
