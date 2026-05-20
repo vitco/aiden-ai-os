@@ -112,6 +112,23 @@ export async function runLoadingSequence(
 
   out.write('\n  ' + c.text(heading) + '\n\n');
 
+  // v4.8.0 Slice 10c — progress bar above the step rows. 10 cells
+  // (●/○) split proportionally across the steps; each completed step
+  // fills floor(10 * (i+1) / N) cells. Uses the same hex-dot glyphs
+  // as the status footer's context bar for visual consistency.
+  const BAR_CELLS = 10;
+  const buildBar = (completed: number): string => {
+    const filled = Math.min(BAR_CELLS, Math.floor((BAR_CELLS * completed) / steps.length));
+    const pct = Math.round((completed / steps.length) * 100);
+    const fillSeg  = c.primary('●'.repeat(filled));
+    const emptySeg = c.muted('○'.repeat(BAR_CELLS - filled));
+    const label = completed < steps.length
+      ? c.muted(steps[completed].label + '...')
+      : c.muted('done');
+    return `  ${fillSeg}${emptySeg}  ${c.text(String(pct).padStart(3) + '%')}   ${label}`;
+  };
+  out.write(buildBar(0) + '\n\n');
+
   // Pre-paint placeholder rows so the spinner overwrites in place.
   for (const step of steps) {
     const line =
@@ -120,7 +137,7 @@ export async function runLoadingSequence(
     out.write(line + '\n');
   }
 
-  // Walk back up to the top of the block.
+  // Walk back up to the top of the step block.
   out.write(`\x1b[${steps.length}A`);
 
   for (let i = 0; i < steps.length; i++) {
@@ -159,6 +176,13 @@ export async function runLoadingSequence(
       ' ' + lpad(statusText, statusCol) + '  ' + timing;
     out.write('\x1b[2K\r' + row + '\n');
     results.push({ label: step.label, ok, status, ms });
+    // v4.8.0 Slice 10c — repaint the progress bar above the step
+    // block after each step completes. Cursor is currently on the
+    // line below the just-completed step; walk up to the bar line
+    // (steps.length - i - 1 rows of remaining steps + 1 blank line
+    // separator + the bar itself), rewrite, then walk back down.
+    const upCount = (steps.length - i - 1) + 2;
+    out.write(`\x1b[${upCount}A\x1b[2K\r${buildBar(i + 1)}\x1b[${upCount}B\r`);
   }
 
   out.write('\n  ' + separator(Math.min(w - 4, 64)) + '\n');

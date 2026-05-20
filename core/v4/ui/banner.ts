@@ -112,9 +112,17 @@ export function renderBanner(opts: BannerOptions): string {
   // heavy `╔══╗` frame (legacy chrome). The art carries its own
   // visual weight as the boot-card identity anchor; framing it
   // inside a closed box collides with the asymmetric orange-bar
-  // language used by every other v4.8.0 surface. Version + credits
-  // lines retain the `framed` boolean only for backward compat —
-  // tests pass `framed: false` to assert the unframed shape.
+  // language used by every other v4.8.0 surface.
+  //
+  // v4.8.0 Slice 10c — emit raw 24-bit truecolor for the AIDEN art
+  // instead of routing through `c.primary` (which depth-detects via
+  // theme.ts and degrades to 256-color or 16-color when COLORTERM is
+  // unset — common on Windows ConPTY). Result on those terminals was
+  // a washed-out / grey AIDEN that didn't match the boot card's
+  // skinEngine-painted brand orange. Forcing truecolor here brings
+  // disclaimer + setupWizard banner in line with the boot card.
+  const ORANGE_ON  = '\x1b[38;2;255;107;53m';
+  const COLOR_OFF  = '\x1b[39m';
   const inner = w - 2;
   const artPad = Math.max(0, Math.floor((inner - ART_WIDTH) / 2));
 
@@ -122,7 +130,7 @@ export function renderBanner(opts: BannerOptions): string {
   lines.push('');
   for (const row of AIDEN_ART) {
     const padded = rpad(' '.repeat(artPad) + row, inner);
-    lines.push(`  ${c.primary(padded)}`);
+    lines.push(`  ${ORANGE_ON}${padded}${COLOR_OFF}`);
   }
   lines.push('');
   lines.push('  ' + dim(c.muted(versionLine)));

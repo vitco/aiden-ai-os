@@ -45,10 +45,25 @@ export interface DisclaimerOptions {
   version?: string;
 }
 
-const DISCLAIMER_PARA =
-  'Aiden is a semi-autonomous AI agent that can touch your files, ' +
-  'browser, and shell. Open source — read the code if you want. ' +
-  'Started as a hobby project, built solo, still rough in spots.';
+// v4.8.0 Slice 10c — replaced the single-paragraph prose with two
+// scannable bullet lists (capability + acknowledgments). Legal terms
+// surfaced as a checklist instead of buried inside prose.
+const DISCLAIMER_HEAD =
+  'Aiden is an autonomous AI engine that runs on your machine. Aiden can:';
+const CAPABILITY_BULLETS = [
+  'Read, write, and modify files on your computer',
+  'Execute shell commands and run code',
+  'Browse the web and interact with online services',
+  'Connect to AI providers using YOUR API keys (BYOK)',
+  'Generate and execute new skills based on your prompts',
+];
+const ACK_HEAD = 'By continuing, you acknowledge:';
+const ACK_BULLETS = [
+  'Aiden operates on your behalf with full local-system access',
+  'You are responsible for outcomes of commands you approve',
+  'Open source under AGPL-3.0 — read the code at github.com/taracodlabs/aiden',
+  'This is beta software, built solo, still rough in spots',
+];
 
 /**
  * Word-wrap `text` to `width` columns. Preserves single spaces; does
@@ -83,18 +98,35 @@ function clearScreen(out: NodeJS.WriteStream): void {
 }
 
 /**
- * Render the disclaimer body — banner + separator + wrapped paragraph.
- * Pure renderer; caller owns the write.
+ * Render the disclaimer body — v4.8.0 Slice 10c: banner + framed-panel
+ * capability list + acknowledgments. Orange `▎` bar on every line of
+ * the panel matches the rest of v4.8.0 chrome. `▸` bullets keep
+ * capability/ack items scannable rather than buried in prose.
  */
 function renderDisclaimerBody(version: string): string {
   const w = termWidth();
+  const innerW = Math.min(w - 4, 70);
   const body: string[] = [];
   body.push(renderBanner({ version }));
-  body.push('  ' + separator(Math.min(w - 4, 64)) + '\n');
-  body.push('\n');
-  const indent = '  ';
-  for (const line of wrap(DISCLAIMER_PARA, Math.min(w - 4, 70))) {
-    body.push(indent + c.text(line) + '\n');
+
+  // Slice 10c framed-panel chrome. Orange bar at col 2; content + 2
+  // inner spaces; muted `─` divider between sections.
+  const bar = c.primary('▎');
+  const divider = c.muted('─'.repeat(innerW - 2));
+  const line = (s: string) => `  ${bar}  ${s}\n`;
+
+  body.push(line(c.text(DISCLAIMER_HEAD)));
+  body.push(line(''));
+  for (const item of CAPABILITY_BULLETS) {
+    body.push(line(c.muted('▸ ') + c.text(item)));
+  }
+  body.push(line(''));
+  body.push(line(divider));
+  body.push(line(''));
+  body.push(line(c.text(ACK_HEAD)));
+  body.push(line(''));
+  for (const item of ACK_BULLETS) {
+    body.push(line(c.muted('▸ ') + c.text(item)));
   }
   body.push('\n');
   return body.join('');
