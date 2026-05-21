@@ -50,6 +50,8 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   providers: 'Configuration',
   personality: 'Configuration',
   skin: 'Configuration',
+  // v4.9.0 Slice 1a — unified theme system (parallel to /skin).
+  theme: 'Configuration',
   streaming: 'Configuration',
   reasoning: 'Configuration',
   verbose: 'Configuration',

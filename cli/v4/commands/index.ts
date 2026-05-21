@@ -22,6 +22,8 @@ import { compress } from './compress';
 import { usage } from './usage';
 import { yolo } from './yolo';
 import { skin } from './skin';
+// v4.9.0 Slice 1a — unified theme system.
+import { theme } from './theme';
 import { skills } from './skills';
 import { reloadMcp } from './reloadMcp';
 import { reasoning } from './reasoning';
@@ -72,6 +74,7 @@ export {
   usage,
   yolo,
   skin,
+  theme,
   skills,
   reloadMcp,
   reasoning,
@@ -128,6 +131,7 @@ export const allCommands: SlashCommand[] = [
   usage,
   yolo,
   skin,
+  theme,
   skills,
   plugins,
   auth,

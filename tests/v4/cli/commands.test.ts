@@ -79,9 +79,10 @@ describe('barrel exports', () => {
     // v4.6 Phase 3A added /spawn-pause (39 → 40).
     // v4.6 Phase 3b added /recovery (40 → 41).
     // v4.6 ONB1 slice 10 added /walkthrough (41 → 42).
-    expect(allCommands.length).toBe(42);
+    // v4.9.0 Slice 1a added /theme (42 → 43).
+    expect(allCommands.length).toBe(43);
     const names = new Set(allCommands.map((c) => c.name));
-    expect(names.size).toBe(42);
+    expect(names.size).toBe(43);
   });
 
   it('every command exposes name, description, category', () => {

@@ -1,0 +1,52 @@
+# Aiden Theme — Default
+# This is the bundled default theme. To customise, copy this file to
+# ~/.aiden/theme.yaml and edit any field. Aiden hot-reloads on save.
+# Bad values warn + fall back per-field; the theme system never crashes
+# Aiden on a typo. Slash commands: /theme reload, /theme reset, /theme edit.
+
+name: "default"
+description: "Aiden's signature brand-orange theme on a dark terminal."
+
+# ── Colors — hex strings ───────────────────────────────────────────────
+colors:
+  brand:
+    primary: "#FF6B35"   # signature brand orange
+    muted:   "#7a3119"   # 30%-luma brand for borders + dim brand surfaces
+  content:
+    primary:   "#e8ebf0" # brightest text — replies, headings on dark bg
+    secondary: "#b8a89a" # warm muted — gutter, secondary detail
+    tertiary:  "#6a6a6a" # captions, deprecated rows, dim status
+  semantic:
+    success: "#7fc28b"
+    warn:    "#e0a040"
+    error:   "#e05a5a"
+    info:    "#7da7c7"
+  metrics:
+    model:     "#9cdcfe" # status bar — model name (cyan)
+    tokens:    "#e0a040" # status bar — token ratio (amber)
+    turnCount: "#a48be0" # status bar — turn counter (purple)
+    timer:     "#7fc28b" # status bar — per-turn elapsed (teal/green)
+  surface:
+    bg:       "#0d0e10"
+    elevated: "#16181b"
+    border:   "#2a2a2a"
+    divider:  "#3a3a3a"
+
+# ── Glyphs ─────────────────────────────────────────────────────────────
+glyphs:
+  panel:
+    bar: "│"           # left-edge bar on /help, approval, Aiden reply chrome
+  trail:
+    gutter: "┊"        # tool-trail row gutter
+  status:
+    triangle: "▲"      # user-prompt prefix + brand mark
+    dot:      "●"
+    dotOpen:  "○"
+    sep:      "│"      # status footer column separator
+    timer:    "⌛"
+  bar:
+    filled: "●"        # context-bar filled cell
+    empty:  "○"        # context-bar empty cell
+  shimmer:
+    block: "█"         # activity-indicator sliding block
+    track: "─"         # activity-indicator track

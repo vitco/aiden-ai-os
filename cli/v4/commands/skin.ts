@@ -19,6 +19,15 @@ export const skin: SlashCommand = {
   category: 'system',
   icon: '🎨',
   handler: async (ctx) => {
+    // v4.9.0 Slice 1a — /skin is now an alias for the new /theme system.
+    // The legacy color skins (~/.aiden/skins/*.yaml, RGB-tuple format)
+    // continue to work alongside the new theme system; /skin still
+    // manages the SkinEngine palette. Theme tokens (panel chrome,
+    // status footer glyphs, shimmer) are controlled by /theme.
+    ctx.display.warn(
+      '/skin is deprecated in v4.9 — use /theme for full visual customisation. ' +
+      '/skin continues to work for legacy colour skins.',
+    );
     const engine = ctx.skin;
     if (!engine) {
       ctx.display.warn('Skin engine not wired in this context.');

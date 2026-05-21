@@ -21,6 +21,21 @@
 // that imports from `display/toolTrail` directly.
 export { TRAIL_PIPE } from '../display/toolTrail';
 
+/**
+ * v4.9.0 Slice 1a — `colors` and `glyphs` were previously exported with
+ * `as const` (frozen literal-typed object). They are now mutable
+ * singletons so the ThemeRegistry can swap values at runtime when a
+ * user theme is loaded from `~/.aiden/theme.yaml`. Every existing
+ * consumer (`import { colors, glyphs } from '../design/tokens'`)
+ * continues to work because property reads now reflect the LIVE
+ * current values.
+ *
+ * `BASELINE_COLORS` / `BASELINE_GLYPHS` are deep-frozen snapshots
+ * captured at module load. The registry's `resetToDefault()` restores
+ * from these. Consumers that need the unmodified default (e.g. tests)
+ * can import these directly.
+ */
+
 // ── Colors ────────────────────────────────────────────────────────────────
 
 /**
@@ -73,7 +88,7 @@ export const colors = {
     /** Section dividers — between boot card and REPL, between events. */
     divider:  '#3a3a3a',
   },
-} as const;
+};
 
 // ── Glyphs ────────────────────────────────────────────────────────────────
 
@@ -223,7 +238,41 @@ export const glyphs = {
     block: '█',
     track: '─',
   },
-} as const;
+};
+
+/**
+ * Deep-frozen snapshots of the baseline values, captured at module
+ * load. The ThemeRegistry uses these to reset to defaults via
+ * `resetToDefault()`, and tests can import them as the source of
+ * truth even after a user theme has been applied to the mutable
+ * `colors` / `glyphs` exports above.
+ */
+function deepFreeze<T>(o: T): T {
+  if (o === null || typeof o !== 'object') return o;
+  for (const k of Object.keys(o as object)) {
+    deepFreeze((o as Record<string, unknown>)[k]);
+  }
+  return Object.freeze(o);
+}
+
+function deepClone<T>(o: T): T {
+  if (o === null || typeof o !== 'object') return o;
+  if (Array.isArray(o)) return (o as unknown as unknown[]).map(deepClone) as unknown as T;
+  const out: Record<string, unknown> = {};
+  for (const k of Object.keys(o as object)) {
+    out[k] = deepClone((o as Record<string, unknown>)[k]);
+  }
+  return out as T;
+}
+
+export const BASELINE_COLORS = deepFreeze(deepClone(colors));
+export const BASELINE_GLYPHS = deepFreeze(deepClone(glyphs));
+
+/** Used by ThemeRegistry to restore baseline values into the live singletons. */
+export function _restoreBaselineForTokens(): void {
+  Object.assign(colors, deepClone(BASELINE_COLORS));
+  Object.assign(glyphs, deepClone(BASELINE_GLYPHS));
+}
 
 // ── Spacing ───────────────────────────────────────────────────────────────
 

@@ -43,6 +43,7 @@
     "dist/",
     "config/",
     "skills/",
+    "themes/",
     "plugins/aiden-plugin-cdp-browser/",
     "plugins/aiden-plugin-claude-pro/",
     "plugins/aiden-plugin-chatgpt-plus/",

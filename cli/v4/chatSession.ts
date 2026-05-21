@@ -92,6 +92,8 @@ import {
 } from './bracketedPaste';
 import { compressPaste } from './pasteCompression';
 import { installPasteInterceptor, expandPasteLabels } from './pasteIntercept';
+// v4.9.0 Slice 1a — theme hot-reload watcher.
+import { startThemeWatcher, stopThemeWatcher } from '../../core/v4/theme/themeWatcher';
 import { expand, hasInterpolation, countSpans } from './shellInterpolation';
 import { installResizeGuard } from './resizeGuard';
 
@@ -592,6 +594,16 @@ export class ChatSession implements ChatSessionLike {
         ? (): void => { /* test prompt API: no interceptor */ }
         : installPasteInterceptor(process.stdin);
 
+    // v4.9.0 Slice 1a — start the theme hot-reload watcher. Honours
+    // `~/.aiden/theme.yaml` if it exists; otherwise no-op until the
+    // user creates one. Disposed in the `finally` block alongside
+    // the paste interceptor.
+    if (this.opts.paths && !this.opts.promptApi) {
+      try {
+        startThemeWatcher(require('node:path').join(this.opts.paths.root, 'theme.yaml'));
+      } catch { /* watcher start failure must not crash REPL */ }
+    }
+
     // Tier-3-essentials: hard-clear the screen on terminal resize so
     // dropdown re-renders + previous prompt frames don't ghost into
     // the new viewport. No-op on non-TTY / MCP serve mode.
@@ -706,6 +718,7 @@ export class ChatSession implements ChatSessionLike {
       if (exitHandler)    process.off('exit',    exitHandler);
       if (pasteEnabled) disableBracketedPaste(stdout);
       restorePasteInterceptor();
+      try { stopThemeWatcher(); } catch { /* defensive */ }
       restoreResizeGuard();
     }
   }
