@@ -401,15 +401,19 @@ describe('Display.activityIndicator (v4.1.4 Part 1.6)', () => {
     handle.stop();
   });
 
-  it('Slice 11: initial paint starts with breathing-space newline', () => {
-    // v4.8.0 Slice 11 — the indicator's first paint prepends `\n`
-    // so there is one visible row of breathing space above it. Prior
-    // behaviour butted the indicator flush against whatever the
-    // caller had just written (usually the user-prompt row).
+  it('Slice 2 hotfix #2: initial paint does NOT prepend a blank `\\n`', () => {
+    // v4.8.0 Slice 11 originally prepended `\n` for breathing space.
+    // v4.8.1 Slice 2 hotfix #2 reverted that — `chatSession.ts:1155`'s
+    // dim rule already separates the user-input row from the indicator
+    // visually, and the leading `\n` stacked with downstream emits
+    // produced 2+ blanks between the rule and `▎ Aiden`. Initial paint
+    // now writes just `${buildLine()}\n` so the indicator occupies the
+    // row immediately below the rule with no extra blank above it.
     const { d, chunks } = makeDisplay({ tty: true });
     const handle = d.activityIndicator('thinking');
     const initial = chunks.join('');
-    expect(initial.startsWith('\n')).toBe(true);
+    expect(initial.startsWith('\n')).toBe(false);
+    expect(initial.endsWith('\n')).toBe(true);
     handle.stop();
   });
 

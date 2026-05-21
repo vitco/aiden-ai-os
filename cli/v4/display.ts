@@ -1231,14 +1231,20 @@ export class Display {
       out.write(`${ANSI_UP_ERASE}\n`);
     };
 
-    // Initial paint — only on TTY. v4.8.0 Slice 11 — prepend a blank
-    // `\n` so the indicator gets one visible row of breathing space
-    // above it. Prior behaviour butted the indicator flush against
-    // the user-prompt row, which read as cramped. The trailing `\n`
-    // on the verb row sits the cursor below the indicator, ready
-    // for the first tick to walk back up.
+    // Initial paint — only on TTY.
+    //
+    // v4.8.0 Slice 11 originally prepended a `\n` here for "breathing
+    // space" above the indicator. v4.8.1 Slice 2 hotfix #2 reverted
+    // that: the prior dim-rule line (chatSession.ts:1155) already
+    // separates the user-input row from the indicator visually, and
+    // the leading `\n` stacked with `chatSession.ts:1151` (also
+    // dropped in hotfix #1) and the indicator's erase-emits-`\n`
+    // handoff was producing 2 visible blanks between the rule and
+    // `▎ Aiden`. With the leading `\n` gone, the layout is:
+    //   user → rule → [indicator paints + erases] → ▎ Aiden
+    // = exactly one blank row (the erased indicator's residue).
     if (isTty) {
-      out.write(`\n${buildLine()}\n`);
+      out.write(`${buildLine()}\n`);
       printed = true;
       startTick();
     }

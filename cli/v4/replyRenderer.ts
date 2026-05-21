@@ -723,36 +723,44 @@ export function getReplyRenderer(): { render: (text: string) => string } {
       const cw = rows.reduce((m, r) => Math.max(m, visibleLength(r[i] ?? '')), 0);
       return Math.max(hw, cw, 1);
     });
-    // v4.8.1 Slice 2 hotfix — proportional-to-natural allocation.
-    // The prior fair-share growth gave every "needs-more-width" column
-    // an equal +1 per round, so a "Notable Features" column (natural
-    // 30+) grew at the same rate as a "Use case" column (natural 17+)
-    // and ended up only marginally wider. Now: if total natural width
-    // fits the budget, use natural widths directly (no wrap needed).
-    // Otherwise scale each column's allocation proportionally to its
-    // natural width, with a `MIN_COL_W` floor so tiny labels still
-    // render readably.
-    const MIN_COL_W   = 4;
-    const totalNatW   = naturalW.reduce((a, b) => a + b, 0);
+    // v4.8.1 Slice 2 hotfix #2 — header-floor + proportional allocation.
+    //
+    // Each column's minimum is `max(headerWidth, MIN_COL_W)` so column
+    // headers NEVER wrap — they are the column identifier; wrapping
+    // them ("Framework" → "Framew/ork") fragments scanability worse
+    // than wrapping body cells. Body content above the header width
+    // is what gets compressed under width pressure.
+    //
+    // Algorithm:
+    //   1. Compute `minPerCol = max(headerW[i], MIN_COL_W)` per column.
+    //   2. If sum(minPerCol) >= contentBudget (very narrow terminal),
+    //      use minPerCol as-is — body cells will wrap to fit, headers
+    //      stay intact.
+    //   3. Else if sum(naturalW) <= contentBudget, use natural widths
+    //      (no wrap needed anywhere).
+    //   4. Else: floor at minPerCol, distribute remaining budget
+    //      proportionally to each column's "extra need above min",
+    //      then hand rounding leftover to widest-natural cols first.
+    const MIN_COL_W = 4;
+    const headerW: number[] = headers.map((h) => visibleLength(h));
+    const minPerCol = naturalW.map((_, i) => Math.max(headerW[i], MIN_COL_W));
+    const totalMin  = minPerCol.reduce((a, b) => a + b, 0);
+    const totalNatW = naturalW.reduce((a, b) => a + b, 0);
     let colWidths: number[];
-    if (totalNatW <= contentBudget) {
+    if (totalMin >= contentBudget) {
+      colWidths = minPerCol.slice();
+    } else if (totalNatW <= contentBudget) {
       colWidths = naturalW.slice();
     } else {
-      // Step 1: floor every column at min(natural, MIN_COL_W).
-      colWidths = naturalW.map((w) => Math.min(w, MIN_COL_W));
-      const floored = colWidths.reduce((a, b) => a + b, 0);
-      // Step 2: distribute the remaining budget proportionally to
-      // each column's "extra need" (naturalW - floor).
-      const extraNeed = naturalW.map((w) => Math.max(0, w - MIN_COL_W));
+      colWidths = minPerCol.slice();
+      const extraNeed = naturalW.map((w, i) => Math.max(0, w - minPerCol[i]));
       const totalNeed = extraNeed.reduce((a, b) => a + b, 0);
-      const pool      = Math.max(0, contentBudget - floored);
+      const pool      = contentBudget - totalMin;
       if (totalNeed > 0) {
         for (let i = 0; i < cols; i += 1) {
           colWidths[i] += Math.floor((extraNeed[i] * pool) / totalNeed);
         }
       }
-      // Step 3: hand any rounding leftover to the widest-natural
-      // columns first so they absorb the extra ahead of small labels.
       let leftover = contentBudget - colWidths.reduce((a, b) => a + b, 0);
       const order = naturalW.map((_, i) => i).sort((a, b) => naturalW[b] - naturalW[a]);
       for (let k = 0; leftover > 0 && k < cols * 2; k += 1) {
