@@ -22,6 +22,8 @@ import {
   installClient,
   planInstall,
   readClient,
+  uninstallClient,
+  planUninstall,
 } from '../../../core/v4/mcp/install/clients';
 import {
   buildAidenEntryObject,
@@ -29,26 +31,39 @@ import {
 import { detectWsl, buildAidenEntry } from '../../../core/v4/mcp/install/wslDetect';
 import { countBackups, findLatestBackup } from '../../../core/v4/mcp/install/backup';
 import { runHealthCheck } from '../../../core/v4/mcp/install/healthCheck';
+import { resolveProfile, PROFILE_NAMES } from '../../../core/v4/mcp/install/profiles';
 
 export interface IO {
   writeOut: (t: string) => void;
   writeErr: (t: string) => void;
 }
 
-const SUPPORTED: ReadonlySet<string> = new Set(['claude', 'cursor']);
+const SUPPORTED: ReadonlySet<string> = new Set(['claude', 'cursor', 'vscode']);
 
 function isClientId(s: string | undefined): s is ClientId {
   return typeof s === 'string' && SUPPORTED.has(s);
 }
 
 function usage(io: IO, action: string): number {
-  io.writeErr(`Usage: aiden mcp ${action} <client> [--dry-run] [--print-snippet] [--yes]\n`);
+  io.writeErr(`Usage: aiden mcp ${action} <client> [--dry-run] [--print-snippet] [--yes] [--profile <name>]\n`);
   io.writeErr(`Supported clients: ${Array.from(SUPPORTED).join(', ')}\n`);
+  io.writeErr(`Profiles: ${PROFILE_NAMES.join(', ')}\n`);
   return 1;
 }
 
+/** Pull `--profile <name>` from extraArgs if present. Throws on missing arg. */
+function extractProfileFlag(extraArgs: string[]): string | undefined {
+  const idx = extraArgs.indexOf('--profile');
+  if (idx === -1) return undefined;
+  const value = extraArgs[idx + 1];
+  if (!value || value.startsWith('--')) {
+    throw new Error(`--profile requires a name. Available: ${PROFILE_NAMES.join(', ')}`);
+  }
+  return value;
+}
+
 export async function runClientCommand(
-  action:    'init' | 'doctor' | 'repair',
+  action:    'init' | 'doctor' | 'repair' | 'uninstall',
   client:    string | undefined,
   extraArgs: string[],
   io:        IO,
@@ -57,18 +72,41 @@ export async function runClientCommand(
   const dryRun       = extraArgs.includes('--dry-run');
   const printSnippet = extraArgs.includes('--print-snippet');
   const yes          = extraArgs.includes('--yes');
+  let profileName: string | undefined;
+  try {
+    profileName = extractProfileFlag(extraArgs);
+  } catch (err) {
+    io.writeErr(`${(err as Error).message}\n`);
+    return 1;
+  }
 
-  if (action === 'init')   return doInit(client,   io, { dryRun, printSnippet, yes });
-  if (action === 'doctor') return doDoctor(client, io);
-  return doRepair(client, io, { yes });
+  if (action === 'init')      return doInit(client,      io, { dryRun, printSnippet, yes, profileName });
+  if (action === 'doctor')    return doDoctor(client,    io);
+  if (action === 'repair')    return doRepair(client,    io, { yes, profileName });
+  return doUninstall(client, io, { dryRun, yes });
 }
 
-interface InitOpts { dryRun: boolean; printSnippet: boolean; yes: boolean }
+interface InitOpts { dryRun: boolean; printSnippet: boolean; yes: boolean; profileName?: string }
 
 async function doInit(client: ClientId, io: IO, opts: InitOpts): Promise<number> {
+  // v4.9.0 Slice 2b — resolve profile (explicit --profile or client default).
+  // Profile name flows into both the spawn args AND the _aiden.profile marker.
+  let profile;
+  try {
+    profile = resolveProfile(opts.profileName, client);
+  } catch (err) {
+    io.writeErr(`${(err as Error).message}\n`);
+    return 1;
+  }
   const wsl     = detectWsl();
-  const entry   = buildAidenEntry({ wsl, target: wsl.inWsl ? 'host' : undefined });
-  const planned = planInstall(client, { command: entry.command, args: entry.args });
+  const baseEntry = buildAidenEntry({ wsl, target: wsl.inWsl ? 'host' : undefined });
+  // Append `--profile <name>` to args so the wired serve command
+  // launches with the right tool allowlist.
+  const entry = {
+    command: baseEntry.command,
+    args:    [...baseEntry.args, '--profile', profile.name],
+  };
+  const planned = planInstall(client, { command: entry.command, args: entry.args, profile: profile.name });
   if (!planned) {
     io.writeErr(`Could not resolve config path for ${client}.\n`);
     return 1;
@@ -76,8 +114,16 @@ async function doInit(client: ClientId, io: IO, opts: InitOpts): Promise<number>
 
   if (opts.printSnippet) {
     // Emit just the Aiden entry as a JSON blob the user can paste.
-    const obj = buildAidenEntryObject({ command: entry.command, args: entry.args });
-    io.writeOut(JSON.stringify({ mcpServers: { aiden: obj } }, null, 2) + '\n');
+    // Use the resolved schema so VS Code gets `servers.aiden` + type:'stdio'.
+    const obj = buildAidenEntryObject({
+      command: entry.command,
+      args:    entry.args,
+      profile: profile.name,
+      schema:  planned.resolution.schema,
+    });
+    const top: Record<string, unknown> = {};
+    top[planned.resolution.schema.topKey] = { aiden: obj };
+    io.writeOut(JSON.stringify(top, null, 2) + '\n');
     return 0;
   }
 
@@ -147,11 +193,15 @@ async function doInit(client: ClientId, io: IO, opts: InitOpts): Promise<number>
     io.writeOut(`  The entry is written; you can retry with /aiden mcp doctor ${client}.\n`);
   }
 
-  // Restart guidance.
+  // Restart guidance — per-client hint.
   io.writeOut(`\nRestart ${planned.resolution.displayName} to load Aiden as an MCP server.\n`);
   if (client === 'cursor') {
     io.writeOut('  (In Cursor: Developer → Reload Window also picks up the change.)\n');
   }
+  if (client === 'vscode') {
+    io.writeOut('  (Run VS Code\'s "Developer: Reload Window" command to reload the workspace MCP config without restarting VS Code.)\n');
+  }
+  io.writeOut(`Profile: ${profile.name} — ${profile.description}\n`);
   return 0;
 }
 
@@ -200,6 +250,9 @@ async function doDoctor(client: ClientId, io: IO): Promise<number> {
 
   const managed = entry._aiden?.managed === true;
   io.writeOut(`  ${managed ? '✓' : '⚠'} Managed by Aiden: ${managed ? 'yes' : 'no — entry exists but was authored externally'}\n`);
+  if (entry._aiden?.profile) {
+    io.writeOut(`  Profile (pinned): ${entry._aiden.profile}\n`);
+  }
 
   io.writeOut(`  Backups: ${countBackups(resolution.configPath)} file(s)\n`);
 
@@ -215,11 +268,11 @@ async function doDoctor(client: ClientId, io: IO): Promise<number> {
   return allGood ? 0 : 1;
 }
 
-async function doRepair(client: ClientId, io: IO, opts: { yes: boolean }): Promise<number> {
+async function doRepair(client: ClientId, io: IO, opts: { yes: boolean; profileName?: string }): Promise<number> {
   const { resolution, entry, exists, text } = readClient(client);
   if (!exists) {
     io.writeOut(`${resolution.displayName}: config doesn't exist. Running init instead.\n`);
-    return doInit(client, io, { dryRun: false, printSnippet: false, yes: opts.yes });
+    return doInit(client, io, { dryRun: false, printSnippet: false, yes: opts.yes, profileName: opts.profileName });
   }
 
   // Try to parse the config; if it's broken, offer a restore.
@@ -245,15 +298,72 @@ async function doRepair(client: ClientId, io: IO, opts: { yes: boolean }): Promi
   }
 
   const wsl      = detectWsl();
-  const expected = buildAidenEntry({ wsl, target: wsl.inWsl ? 'host' : undefined });
-  const cmdOk    = entry?.command === expected.command;
-  const argsOk   = JSON.stringify(entry?.args) === JSON.stringify(expected.args);
-  if (entry && cmdOk && argsOk) {
+  let profile;
+  try {
+    profile = resolveProfile(opts.profileName ?? entry?._aiden?.profile, client);
+  } catch (err) {
+    io.writeErr(`${(err as Error).message}\n`);
+    return 1;
+  }
+  const expectedBase = buildAidenEntry({ wsl, target: wsl.inWsl ? 'host' : undefined });
+  const expectedArgs = [...expectedBase.args, '--profile', profile.name];
+  const cmdOk        = entry?.command === expectedBase.command;
+  const argsOk       = JSON.stringify(entry?.args) === JSON.stringify(expectedArgs);
+  const profileOk    = entry?._aiden?.profile === profile.name;
+  if (entry && cmdOk && argsOk && profileOk) {
     io.writeOut(`${resolution.displayName}: entry already correct, nothing to repair.\n`);
     return 0;
   }
-  io.writeOut(`${resolution.displayName}: updating stale entry to current values.\n`);
-  return doInit(client, io, { dryRun: false, printSnippet: false, yes: true });
+  io.writeOut(`${resolution.displayName}: updating stale entry to current values (profile: ${profile.name}).\n`);
+  return doInit(client, io, { dryRun: false, printSnippet: false, yes: true, profileName: profile.name });
+}
+
+interface UninstallOpts { dryRun: boolean; yes: boolean }
+
+async function doUninstall(client: ClientId, io: IO, opts: UninstallOpts): Promise<number> {
+  const planned = planUninstall(client);
+  if (!planned.willRemove) {
+    io.writeOut(`Aiden not configured for ${planned.resolution.displayName}. Nothing to do.\n`);
+    return 0;
+  }
+
+  const managed = planned.entry?._aiden?.managed === true;
+  if (!managed && !opts.yes) {
+    io.writeOut(`The aiden entry in ${planned.resolution.displayName}'s config wasn't installed by\n`);
+    io.writeOut(`'aiden mcp init' (no _aiden.managed marker). Proceed anyway? [y/N]\n`);
+    if (process.stdin.isTTY) {
+      const answer = await readOneLine();
+      if (!answer || !/^y/i.test(answer)) {
+        io.writeOut('Aborted.\n');
+        return 0;
+      }
+    } else {
+      io.writeOut('Non-interactive shell — pass --yes to confirm removal of an unmanaged entry.\n');
+      return 1;
+    }
+  }
+
+  if (opts.dryRun) {
+    io.writeOut(`[dry-run] Would remove aiden entry from: ${planned.resolution.configPath}\n`);
+    io.writeOut(`[dry-run] Managed by Aiden: ${managed ? 'yes' : 'no (unmanaged)'}\n`);
+    io.writeOut(`[dry-run] New content (${planned.resolution.format}):\n`);
+    io.writeOut(planned.newText);
+    return 0;
+  }
+
+  const result = uninstallClient(client);
+  if (result.outcome === 'error') {
+    io.writeErr(`Uninstall failed: ${result.error}\n`);
+    return 1;
+  }
+  if (result.outcome === 'noop') {
+    io.writeOut(`Aiden not configured for ${planned.resolution.displayName}. Nothing to do.\n`);
+    return 0;
+  }
+  io.writeOut(`✓ Removed aiden entry from ${result.configPath}\n`);
+  if (result.backupPath) io.writeOut(`  Backup: ${result.backupPath}\n`);
+  io.writeOut(`\nRestart ${planned.resolution.displayName} to drop the now-disconnected Aiden MCP server.\n`);
+  return 0;
 }
 
 /** Read one line from stdin. Best-effort; tolerates non-TTY callers. */

@@ -25,6 +25,7 @@ import {
 import {
   mergeAidenEntry,
   readAidenEntry,
+  removeAidenEntry,
   buildAidenEntryObject,
   emptyConfig,
   type AidenEntry,
@@ -38,8 +39,20 @@ export interface InstallOptions {
   args: string[];
   /** Env vars to forward (will be `${VAR}` placeholders). */
   envKeys?: string[];
+  /** Profile name pinned into the entry's _aiden.profile. */
+  profile?: string;
   /** Path-resolution overrides (tests). */
   pathOverride?: ClientPathResolution;
+}
+
+export interface UninstallResult {
+  /** 'removed' | 'noop' (entry absent) | 'error'. */
+  outcome:    'removed' | 'noop' | 'error';
+  configPath: string;
+  backupPath: string | null;
+  /** True when the removed entry had _aiden.managed === true. */
+  wasManaged: boolean;
+  error?:     string;
 }
 
 export interface InstallResult {
@@ -68,7 +81,7 @@ export function readClient(clientId: ClientId, override?: ClientPathResolution):
     return { resolution, entry: null, exists: false, text: null };
   }
   const text = readFileSync(resolution.configPath, 'utf8');
-  return { resolution, entry: readAidenEntry(text), exists: true, text };
+  return { resolution, entry: readAidenEntry(text, resolution.schema), exists: true, text };
 }
 
 /**
@@ -86,13 +99,15 @@ export function planInstall(
   }
   const existingText = existsSync(resolution.configPath)
     ? readFileSync(resolution.configPath, 'utf8')
-    : emptyConfig(resolution.format);
+    : emptyConfig(resolution.format, resolution.schema);
   const entry = buildAidenEntryObject({
     command:  opts.command,
     args:     opts.args,
     envKeys:  opts.envKeys,
+    profile:  opts.profile,
+    schema:   resolution.schema,
   });
-  const newText = mergeAidenEntry(existingText, entry, resolution.format);
+  const newText = mergeAidenEntry(existingText, entry, resolution.format, resolution.schema);
   return { resolution, newText, parentMissing: false };
 }
 
@@ -160,4 +175,90 @@ export function installClient(clientId: ClientId, opts: InstallOptions): Install
       error:      (err as Error).message,
     };
   }
+}
+
+/**
+ * v4.9.0 Slice 2b — surgical removal of `<topKey>.aiden` from a
+ * client's config. Preserves every other server entry + every other
+ * top-level key. Creates a timestamped backup before writing.
+ *
+ * Returns `outcome: 'noop'` when the config file is missing or the
+ * entry isn't present — uninstall is idempotent.
+ */
+export function uninstallClient(
+  clientId: ClientId,
+  override?: ClientPathResolution,
+): UninstallResult {
+  const resolution = override ?? resolveClientPath(clientId);
+  if (!existsSync(resolution.configPath)) {
+    return {
+      outcome:    'noop',
+      configPath: resolution.configPath,
+      backupPath: null,
+      wasManaged: false,
+    };
+  }
+  const existingText = readFileSync(resolution.configPath, 'utf8');
+  const existingEntry = readAidenEntry(existingText, resolution.schema);
+  if (!existingEntry) {
+    return {
+      outcome:    'noop',
+      configPath: resolution.configPath,
+      backupPath: null,
+      wasManaged: false,
+    };
+  }
+  const { text: newText, removed } = removeAidenEntry(
+    existingText, resolution.format, resolution.schema,
+  );
+  if (!removed) {
+    return {
+      outcome:    'noop',
+      configPath: resolution.configPath,
+      backupPath: null,
+      wasManaged: existingEntry._aiden?.managed === true,
+    };
+  }
+  let backupPath: string | null = null;
+  try {
+    backupPath = backupConfig(resolution.configPath);
+    atomicWrite(resolution.configPath, newText);
+    return {
+      outcome:    'removed',
+      configPath: resolution.configPath,
+      backupPath,
+      wasManaged: existingEntry._aiden?.managed === true,
+    };
+  } catch (err) {
+    return {
+      outcome:    'error',
+      configPath: resolution.configPath,
+      backupPath,
+      wasManaged: existingEntry._aiden?.managed === true,
+      error:      (err as Error).message,
+    };
+  }
+}
+
+/** Preview uninstall without writing. */
+export function planUninstall(
+  clientId:  ClientId,
+  override?: ClientPathResolution,
+): {
+  resolution: ClientPathResolution;
+  entry:      AidenEntry | null;
+  newText:    string;
+  willRemove: boolean;
+} {
+  const resolution = override ?? resolveClientPath(clientId);
+  if (!existsSync(resolution.configPath)) {
+    return { resolution, entry: null, newText: '', willRemove: false };
+  }
+  const existingText = readFileSync(resolution.configPath, 'utf8');
+  const entry = readAidenEntry(existingText, resolution.schema);
+  if (!entry) {
+    return { resolution, entry: null, newText: existingText, willRemove: false };
+  }
+  const { text, removed } = removeAidenEntry(existingText, resolution.format, resolution.schema);
+  return { resolution, entry, newText: text, willRemove: removed };
 }

@@ -32,20 +32,41 @@ export interface AidenEntry {
   command: string;
   args:    string[];
   env?:    Record<string, string>;
-  _aiden?: { managed: true; version: number };
+  /** VS Code requires this discriminator; harmless on other clients. */
+  type?:   'stdio';
+  _aiden?: { managed: true; version: number; profile?: string };
 }
+
+/** Schema for one client family. See clientPaths.ClientSchema. */
+export interface MergeSchema {
+  topKey: 'mcpServers' | 'servers';
+  requiresType?: boolean;
+}
+
+const DEFAULT_SCHEMA: MergeSchema = { topKey: 'mcpServers' };
 
 /** Produce the canonical Aiden entry. */
 export function buildAidenEntryObject(opts: {
-  command: string;
-  args:    string[];
+  command:  string;
+  args:     string[];
   envKeys?: string[];
+  /** Profile pinned into the entry's _aiden.profile field. */
+  profile?: string;
+  /** Schema dictates whether `type: 'stdio'` discriminator is added. */
+  schema?:  MergeSchema;
 }): AidenEntry {
   const entry: AidenEntry = {
     command: opts.command,
     args:    opts.args,
-    _aiden:  { managed: true, version: 1 },
+    _aiden:  {
+      managed: true,
+      version: 1,
+      ...(opts.profile ? { profile: opts.profile } : {}),
+    },
   };
+  if (opts.schema?.requiresType) {
+    entry.type = 'stdio';
+  }
   if (opts.envKeys && opts.envKeys.length > 0) {
     entry.env = {};
     for (const k of opts.envKeys) entry.env[k] = `\${${k}}`;
@@ -56,58 +77,59 @@ export function buildAidenEntryObject(opts: {
 /**
  * Build the empty starter content for a brand-new config file. Used
  * when a client's parent dir exists but the config file doesn't.
+ * The starter mirrors the client's top-level schema so the next
+ * `modify()` call has a stable shape to edit into.
  */
-export function emptyConfig(format: 'json' | 'jsonc'): string {
-  // Identical content for both formats — the difference only matters
-  // for downstream merges where the user may have added comments.
+export function emptyConfig(format: 'json' | 'jsonc', schema: MergeSchema = DEFAULT_SCHEMA): string {
   void format;
-  return '{\n  "mcpServers": {}\n}\n';
+  return `{\n  "${schema.topKey}": {}\n}\n`;
 }
 
 /**
  * Merge `entry` into the existing JSON / JSONC text under
- * `mcpServers.aiden`. Returns the new text. Existing siblings under
- * `mcpServers.*` are preserved untouched; other top-level keys
- * (Claude Desktop has many) are preserved untouched.
+ * `<topKey>.aiden` (where `topKey` is `'mcpServers'` for Claude/Cursor
+ * or `'servers'` for VS Code). Returns the new text. Existing
+ * siblings under `<topKey>.*` are preserved untouched; other top-
+ * level keys (Claude Desktop has many) are preserved untouched.
+ *
+ * v4.9.0 Slice 2b — `schema` parameter added (default keeps Slice 2a
+ * mcpServers behaviour). VS Code passes `{ topKey: 'servers' }`.
  */
 export function mergeAidenEntry(
   existingText: string,
   entry:        AidenEntry,
   format:       'json' | 'jsonc',
+  schema:       MergeSchema = DEFAULT_SCHEMA,
 ): string {
+  const topKey = schema.topKey;
   if (format === 'json') {
     let doc: Record<string, unknown>;
     try {
       doc = JSON.parse(existingText) as Record<string, unknown>;
     } catch {
-      // Corrupt JSON — fall back to a fresh shell. Caller's backup
-      // means the user can recover the original file if needed.
       doc = {};
     }
     if (typeof doc !== 'object' || doc === null) doc = {};
-    const servers = (doc.mcpServers as Record<string, unknown>) ?? {};
+    const servers = (doc[topKey] as Record<string, unknown>) ?? {};
     servers.aiden = entry as unknown as Record<string, unknown>;
-    doc.mcpServers = servers;
+    doc[topKey] = servers;
     return JSON.stringify(doc, null, 2) + '\n';
   }
 
   // JSONC path: use modify() to produce a minimal edit that preserves
   // comments + formatting outside the touched key path.
   const formatOpts = { tabSize: 2, insertSpaces: true };
-  const path = ['mcpServers', 'aiden'];
+  const path = [topKey, 'aiden'];
 
-  // If the file is empty or doesn't have mcpServers yet, prepare a
-  // skeleton first via plain JSON.parse-and-stringify. Once
-  // mcpServers exists, modify() handles the surgical edit cleanly.
   const tree = parseTree(existingText);
   const root = tree;
   let text = existingText;
   if (!root || root.type !== 'object') {
-    text = emptyConfig('jsonc');
+    text = emptyConfig('jsonc', schema);
   } else {
-    const mcpNode = findNodeAtLocation(root, ['mcpServers']);
+    const mcpNode = findNodeAtLocation(root, [topKey]);
     if (!mcpNode || mcpNode.type !== 'object') {
-      const edits = modify(text, ['mcpServers'], {}, { formattingOptions: formatOpts });
+      const edits = modify(text, [topKey], {}, { formattingOptions: formatOpts });
       text = applyEdits(text, edits);
     }
   }
@@ -118,17 +140,60 @@ export function mergeAidenEntry(
 }
 
 /**
+ * Remove the Aiden entry from the existing text. Returns the new
+ * text + a boolean reporting whether anything was actually removed.
+ * Preserves all other `<topKey>.*` siblings + other top-level keys.
+ */
+export function removeAidenEntry(
+  existingText: string,
+  format:       'json' | 'jsonc',
+  schema:       MergeSchema = DEFAULT_SCHEMA,
+): { text: string; removed: boolean } {
+  const topKey = schema.topKey;
+  if (format === 'json') {
+    let doc: Record<string, unknown>;
+    try {
+      doc = JSON.parse(existingText) as Record<string, unknown>;
+    } catch {
+      return { text: existingText, removed: false };
+    }
+    if (typeof doc !== 'object' || doc === null) {
+      return { text: existingText, removed: false };
+    }
+    const servers = doc[topKey] as Record<string, unknown> | undefined;
+    if (!servers || typeof servers !== 'object' || !('aiden' in servers)) {
+      return { text: existingText, removed: false };
+    }
+    delete servers.aiden;
+    doc[topKey] = servers;
+    return { text: JSON.stringify(doc, null, 2) + '\n', removed: true };
+  }
+
+  const tree = parseTree(existingText);
+  if (!tree) return { text: existingText, removed: false };
+  const aidenNode = findNodeAtLocation(tree, [topKey, 'aiden']);
+  if (!aidenNode) return { text: existingText, removed: false };
+  const edits = modify(existingText, [topKey, 'aiden'], undefined, {
+    formattingOptions: { tabSize: 2, insertSpaces: true },
+  });
+  return { text: applyEdits(existingText, edits), removed: true };
+}
+
+/**
  * Read the current Aiden entry (or null when absent) from text.
  * Tolerates both formats; jsonc-parser handles plain JSON too.
+ * Pass `schema` for clients whose topKey differs from the default
+ * `mcpServers` (e.g. VS Code's `servers`).
  */
-export function readAidenEntry(existingText: string): AidenEntry | null {
+export function readAidenEntry(
+  existingText: string,
+  schema:       MergeSchema = DEFAULT_SCHEMA,
+): AidenEntry | null {
   const tree = parseTree(existingText);
   if (!tree) return null;
-  const node = findNodeAtLocation(tree, ['mcpServers', 'aiden']);
+  const node = findNodeAtLocation(tree, [schema.topKey, 'aiden']);
   if (!node) return null;
   try {
-    // jsonc-parser parses the node's slice; safe even with comments
-    // sprinkled inside the object.
     const segment = existingText.slice(node.offset, node.offset + node.length);
     return JSON.parse(segment) as AidenEntry;
   } catch {

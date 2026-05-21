@@ -425,6 +425,28 @@ export async function runMcpSubcommand(
         }
       }
 
+      // v4.9.0 Slice 2b — `--profile <name>` resolves a tool allowlist
+      // and installs it into the env BEFORE buildMcpRuntime runs (which
+      // internally calls readToolBridgeEnv). Flag wins over inherited
+      // env vars so the client-config-pinned profile is authoritative.
+      const profileIdx = extraArgs.indexOf('--profile');
+      if (profileIdx !== -1) {
+        const profileName = extraArgs[profileIdx + 1];
+        if (!profileName) {
+          writeErr('--profile requires a name.\n');
+          return 1;
+        }
+        try {
+          const { resolveProfile, applyProfileToEnv } =
+            await import('../../../core/v4/mcp/install/profiles');
+          const profile = resolveProfile(profileName, '');
+          applyProfileToEnv(profile);
+        } catch (err) {
+          writeErr(`${(err as Error).message}\n`);
+          return 1;
+        }
+      }
+
       const { registry, skillLoader, toolContext, logger } =
         await buildMcpRuntime(opts);
 
@@ -492,15 +514,16 @@ export async function runMcpSubcommand(
 
     case 'init':
     case 'doctor':
-    case 'repair': {
-      // v4.9.0 Slice 2a — client-config install / diagnose / fix.
+    case 'repair':
+    case 'uninstall': {
+      // v4.9.0 Slice 2a / 2b — client-config install / diagnose / fix / remove.
       const { runClientCommand } = await import('./mcpClientInstall');
       return runClientCommand(action, target, extraArgs, { writeOut, writeErr });
     }
 
     default: {
       writeErr(`Unknown 'aiden mcp' action: ${action}\n`);
-      writeErr(`Actions: serve | status | tools | init <client> | doctor <client> | repair <client>\n`);
+      writeErr(`Actions: serve | status | tools | init <client> | doctor <client> | repair <client> | uninstall <client>\n`);
       return 1;
     }
   }
