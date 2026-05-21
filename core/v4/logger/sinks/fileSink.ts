@@ -33,16 +33,28 @@ export interface FileSinkOptions {
   dir: string;
   /** File stem — final path is `<dir>/<name>.log`. */
   name: string;
+  /**
+   * v4.9.0 Slice 3 — output shape per line.
+   * - `'human'` (default): grep-friendly pretty single-line (legacy).
+   * - `'ndjson'`: one JSON record per line, for log aggregators
+   *   (systemd-journald sees stdout NDJSON; the file mirror in daemon
+   *   mode wants the same structured shape so `jq` can parse it).
+   */
+  format?: 'human' | 'ndjson';
 }
 
 export class FileSink implements LoggerSink {
+  readonly name:        string;
   private readonly filePath: string;
-  private readonly dir: string;
+  private readonly dir:      string;
+  private readonly fmt:      'human' | 'ndjson';
   private dirReady = false;
 
   constructor(opts: FileSinkOptions) {
     this.dir      = opts.dir;
     this.filePath = path.join(opts.dir, `${opts.name}.log`);
+    this.fmt      = opts.format ?? 'human';
+    this.name     = `file:${this.filePath}`;
   }
 
   write(record: LogRecord): void {
@@ -82,6 +94,16 @@ export class FileSink implements LoggerSink {
    *   2026-05-08T01:32:50.001Z [warn] [channels.telegram] Polling 409 {"streak":1}
    */
   private format(r: LogRecord): string {
+    if (this.fmt === 'ndjson') {
+      const payload: Record<string, unknown> = {
+        ts:    r.ts.toISOString(),
+        level: r.level,
+        scope: r.scope || undefined,
+        msg:   r.msg,
+      };
+      if (r.ctx) Object.assign(payload, r.ctx);
+      return safeJson(payload) + '\n';
+    }
     const scope = r.scope ? ` [${r.scope}]` : '';
     const ctx   = r.ctx && Object.keys(r.ctx).length > 0
       ? ' ' + safeJson(r.ctx)

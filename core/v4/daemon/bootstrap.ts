@@ -88,6 +88,17 @@ import { runCronMigration } from './cron/migration';
 import { createCronEmitter } from './cron/cronEmitter';
 import { pwClose } from '../../playwrightBridge';
 import { VERSION } from '../../version';
+// v4.9.0 Slice 3 — structured logger + crash recovery.
+import path from 'node:path';
+import {
+  CoreLogger,
+  FileSink,
+  StderrSink,
+  RedactingSink,
+  type Logger,
+  type LogLevel,
+} from '../logger';
+import { reclaimStuckRuns } from './runs/reclaim';
 
 export interface DaemonBootstrapHandle {
   /** True when the foundation actually initialized (AIDEN_DAEMON=1). */
@@ -154,6 +165,38 @@ const NOOP_HANDLE: DaemonBootstrapHandle = Object.freeze({
 // Process-wide singleton — the second call returns the same handle.
 let _singleton: DaemonBootstrapHandle | null = null;
 
+/**
+ * v4.9.0 Slice 3 — track whether the process-wide crash handlers
+ * already wrapped this process. Reset by the test helper. The guard
+ * prevents duplicate handler chains when bootstrap runs twice (which
+ * the singleton normally prevents anyway, but tests sometimes punch
+ * through `_resetDaemonBootstrapForTests`).
+ */
+let _crashHandlersInstalled = false;
+
+/**
+ * v4.9.0 Slice 3 — build a structured daemon logger composed of:
+ *   stderr (human, warn+)  — visible to systemd / journalctl
+ *   file   (NDJSON)        — `<aidenRoot>/logs/daemon.log`, rotated at 5 MB
+ * Both sinks are wrapped in `RedactingSink` so secret-shaped tokens
+ * never reach disk or stderr. Level is `info` by default; the
+ * `AIDEN_DAEMON_LOG_LEVEL` env var promotes to `debug` for diagnostics.
+ */
+function buildDaemonLogger(logsDir: string): Logger {
+  const envLvl = (process.env.AIDEN_DAEMON_LOG_LEVEL ?? '').toLowerCase();
+  const level: LogLevel =
+    envLvl === 'debug' || envLvl === 'info' || envLvl === 'warn' || envLvl === 'error'
+      ? (envLvl as LogLevel)
+      : 'info';
+  return new CoreLogger({
+    level,
+    sinks: [
+      new RedactingSink(new StderrSink({ minLevel: 'warn' })),
+      new RedactingSink(new FileSink({ dir: logsDir, name: 'daemon', format: 'ndjson' })),
+    ],
+  });
+}
+
 export interface BootstrapOptions {
   /**
    * Existing Express app to mount health endpoints on. When omitted,
@@ -205,19 +248,26 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
   if (_singleton) return _singleton;
 
   const cfg = getDaemonConfig();
-  const log = opts.log ?? ((level, msg) => {
-    if (level === 'error') console.error(msg);
-    else if (level === 'warn') console.warn(msg);
-    else                       console.log(msg);
-  });
 
   if (!cfg.enabled) {
     _singleton = NOOP_HANDLE;
     return NOOP_HANDLE;
   }
 
+  // v4.9.0 Slice 3 — promote startup logging to the structured pipeline
+  // BEFORE the first emit. Sub-modules receive the `log(level, msg)`
+  // shape they were built against; the adapter forwards to the
+  // CoreLogger which redacts before fan-out to stderr + file.
+  const aidenRootForLog = resolveAidenRoot();
+  const daemonLogger = buildDaemonLogger(path.join(aidenRootForLog, 'logs'));
+  const log = opts.log ?? ((level, msg) => {
+    if (level === 'error')      daemonLogger.error(msg);
+    else if (level === 'warn')  daemonLogger.warn(msg);
+    else                        daemonLogger.info(msg);
+  });
+
   try {
-    const aidenRoot  = resolveAidenRoot();
+    const aidenRoot  = aidenRootForLog;
     const dbPath     = daemonDbPath(aidenRoot);
     const lockPath   = daemonRuntimeLockPath(aidenRoot);
     const markerPath = daemonCleanShutdownMarkerPath(aidenRoot);
@@ -298,6 +348,63 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
     const boot = evaluateBootState({ db, markerPath, instanceId: tracker.instanceId });
     if (boot.crashDetected) {
       log('warn', '[daemon] crash recovery: prior instance crashed; affected runs marked resume_pending=1');
+    }
+
+    // v4.9.0 Slice 3 — defence-in-depth: sweep any `running` rows owned
+    // by a non-current instance. `evaluateBootState` already covers the
+    // common case, but a row racing the crash window could slip past it.
+    // Idempotent: no-op when no rows match.
+    try {
+      const swept = reclaimStuckRuns(db, { currentInstanceId: tracker.instanceId });
+      if (swept.reclaimed > 0) {
+        log('warn',
+          `[daemon] startup reclaim swept ${swept.reclaimed} orphaned run(s) ` +
+          `from prior incarnations: ids=[${swept.runIds.join(',')}]`);
+      }
+    } catch (e) {
+      log('warn', `[daemon] startup reclaim failed (non-fatal): ${e instanceof Error ? e.message : String(e)}`);
+    }
+
+    // v4.9.0 Slice 3 — process-wide crash handlers. Either signal
+    // means "this daemon is about to die unexpectedly". Reclaim our
+    // still-`running` rows BEFORE the exit so a follow-up boot sees
+    // an unambiguous `interrupted` shape, then exit 1 so service
+    // managers (systemd / launchd) know to restart us.
+    //
+    // We install `process.on(...)` (not `.once`) so the handler covers
+    // the rare double-crash. The exit is guarded by a 100ms timeout so
+    // a flush of the file sink has a chance to land.
+    if (!_crashHandlersInstalled) {
+      _crashHandlersInstalled = true;
+      const crashedInstanceId = tracker.instanceId;
+      const reclaimAndExit = (eventName: 'uncaughtException' | 'unhandledRejection', reason: unknown): void => {
+        try {
+          const err = reason instanceof Error
+            ? { type: reason.name, message: reason.message, stack: reason.stack }
+            : { type: 'NonError', message: String(reason) };
+          daemonLogger.error(`[daemon] ${eventName} — terminating after run reclaim`, {
+            event:      'daemon.crashed',
+            component:  'daemon.bootstrap',
+            incarnationId: crashedInstanceId,
+            error:      err,
+          });
+        } catch { /* logging must not block the reclaim path */ }
+        try {
+          const swept = reclaimStuckRuns(db, { instanceId: crashedInstanceId });
+          if (swept.reclaimed > 0) {
+            try {
+              daemonLogger.warn(
+                `[daemon] crash-handler reclaim marked ${swept.reclaimed} run(s) interrupted`,
+                { event: 'daemon.crash_reclaim', runIds: swept.runIds },
+              );
+            } catch { /* noop */ }
+          }
+        } catch { /* never block exit on reclaim failure */ }
+        // 100ms grace for the file sink to flush before we tear down.
+        setTimeout(() => { try { process.exit(1); } catch { /* noop */ } }, 100);
+      };
+      process.on('uncaughtException', (err) => reclaimAndExit('uncaughtException', err));
+      process.on('unhandledRejection', (reason) => reclaimAndExit('unhandledRejection', reason));
     }
 
     // Module singletons.
@@ -675,6 +782,10 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
 /** Test-only — clears the singleton so subsequent calls re-bootstrap. */
 export function _resetDaemonBootstrapForTests(): void {
   _singleton = null;
+  // v4.9.0 Slice 3 — also rearm the crash-handler installer guard
+  // so a fresh bootstrap in the same test process can install its
+  // own handlers without tripping the once-per-process check.
+  _crashHandlersInstalled = false;
 }
 
 /** Diagnostic — returns the current handle (or null if not yet bootstrapped). */
@@ -727,10 +838,19 @@ export function installDaemonAgentBuilder(
   if (!handle.active || !handle.dispatcher || !handle.triggerBus || !handle.runStore) {
     return false;
   }
+  // v4.9.0 Slice 3 — fall back to the daemon's own structured logger
+  // (built lazily here in case the caller skipped passing one). When
+  // bootstrap already constructed a logger, the singleton's startup
+  // log path used the same composition.
+  const fallbackLogger = (() => {
+    try { return buildDaemonLogger(path.join(resolveAidenRoot(), 'logs')); }
+    catch { return null; }
+  })();
   const logFn = log ?? ((level, msg) => {
-    if (level === 'error') console.error(msg);
-    else if (level === 'warn') console.warn(msg);
-    else                       console.log(msg);
+    if (!fallbackLogger) return;
+    if (level === 'error')      fallbackLogger.error(msg);
+    else if (level === 'warn')  fallbackLogger.warn(msg);
+    else                        fallbackLogger.info(msg);
   });
   try {
     const realRunner = createRealAgentRunner({

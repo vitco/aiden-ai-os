@@ -15,3 +15,4 @@ export { FileSink } from './sinks/fileSink';
 export { StderrSink, StdoutJsonSink } from './sinks/stdSink';
 export { NullSink, MemorySink } from './sinks/nullSink';
 export { MultiSink } from './sinks/multiSink';
+export { RedactingSink } from './redact';
