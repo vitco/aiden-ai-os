@@ -157,7 +157,44 @@ export function installPasteInterceptor(stdin: NodeJS.ReadStream): () => void {
       } else {
         const beginIdx = text.indexOf(PASTE_BEGIN, cursor);
         if (beginIdx === -1) {
-          out += text.slice(cursor);
+          // v4.8.1 Slice 2 hotfix #5 — fallback for unmarked multi-line
+          // pastes. Not every terminal honours bracketed-paste mode
+          // (`\x1b[?2004h`): SSH without -t, certain ConPTY paths,
+          // tmux/screen passthrough, and various IDE terminals deliver
+          // pasted text WITHOUT `\x1b[200~` / `\x1b[201~` markers.
+          // Pre-hotfix that bare text passed through unchanged → inquirer
+          // treats every embedded `\n` as Enter and silently submits each
+          // line one-by-one. The user sees only the last (still-buffered)
+          // line; the earlier lines fire as tiny rapid-fire prompts.
+          //
+          // Heuristic: a single stdin chunk with MORE THAN ONE `\n` OR
+          // an INTERNAL `\n` (not at the very end) is almost certainly
+          // a paste. Typed input emits one keystroke per chunk and only
+          // one trailing `\n` when Enter is pressed; programmatic single-
+          // line stdin feeders likewise end with a single trailing `\n`.
+          // Both cases fall through to the existing pass-through path.
+          //
+          // When the heuristic fires, funnel the chunk through the same
+          // `compressSync` + label path that marker-wrapped multi-line
+          // pastes use — identical user-visible `[paste #N: X lines, Y KB]`
+          // experience regardless of whether the terminal cooperated.
+          const remainder = text.slice(cursor);
+          const nlCount = (remainder.match(/\n/g) ?? []).length;
+          const hasInternalNl = nlCount > 1 || (nlCount === 1 && !remainder.endsWith('\n'));
+          if (hasInternalNl) {
+            const trimmed = remainder.replace(/\n+$/, '').replace(/\r\n/g, '\n');
+            try {
+              const { id, label } = compressSync(trimmed);
+              originals.set(id, trimmed);
+              out += label;
+            } catch {
+              // Disk failure: collapse newlines so internal `\n` doesn't
+              // trigger the very auto-submit this fallback is preventing.
+              out += trimmed.replace(/\n/g, ' ');
+            }
+          } else {
+            out += remainder;
+          }
           cursor = text.length;
         } else {
           out += text.slice(cursor, beginIdx);
