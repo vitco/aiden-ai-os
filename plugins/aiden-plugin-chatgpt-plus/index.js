@@ -37,7 +37,16 @@ const CHATGPT_PLUS = {
   displayName: 'ChatGPT Plus',
   description:
     'Sign in with your ChatGPT Plus subscription. Uses your existing ChatGPT login — no API key needed. Inference is routed through the Codex Responses API.',
-  defaultModels: ['gpt-5', 'gpt-5-mini'],
+  // v4.9.0 — `defaultModels[0]` is what `setupWizard.ts:810` picks
+  // as a new ChatGPT-Plus user's first model. The Codex OAuth backend
+  // rejects `gpt-5` outright with a 400 ("not supported when using
+  // Codex with a ChatGPT account") for new accounts; `gpt-5.5` is the
+  // first non-codex slug in the registry's modelIds and works
+  // reliably. `gpt-5` stays in the array so users who specifically
+  // want it can still see it in /model. `gpt-5-mini` was removed —
+  // it's a direct OpenAI API name and is NOT valid on the Codex OAuth
+  // endpoint (see providers/v4/registry.ts:117–119).
+  defaultModels: ['gpt-5.5', 'gpt-5'],
 
   clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
   issuer: 'https://auth.openai.com',
