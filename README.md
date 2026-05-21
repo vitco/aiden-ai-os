@@ -94,7 +94,7 @@ Windows · Linux · WSL · macOS (API Mode)
 ![Built solo](https://img.shields.io/badge/Built-solo-B8A893?style=flat-square)
 ![By Taracod](https://img.shields.io/badge/By-Taracod-FF6B35?style=flat-square)
 ![White Lotus](https://img.shields.io/badge/Brand-White_Lotus-FFB088?style=flat-square)
-![v4.6.1](https://img.shields.io/badge/Latest-v4.6.1-4ADE80?style=flat-square)
+![v4.8.1](https://img.shields.io/badge/Latest-v4.8.1-4ADE80?style=flat-square)
 
 </div>
 
@@ -131,6 +131,32 @@ Drop a file in `~/Documents/inbox/anything.txt` and Aiden acts on it. The agent 
 <br>
 
 ![Aiden in action](docs/screenshots/autonomy.png)
+
+<br>
+
+## What's new in v4.8
+
+**Aiden's UI got an identity, and pasting actually works now.**
+
+### v4.8.1 — Paste handling + visual polish
+
+- **Robust paste handling.** Stateful parser across stdin chunk boundaries, 800ms watchdog for missing paste-end markers, degraded marker form normalisation, universal CRLF/CR → LF, and timing-based accumulation that catches line-by-line paste delivery. Works across Windows ConPTY, SSH without `-t`, tmux/screen passthrough, and VS Code's integrated terminal. Typed prefix is preserved when paste arrives mid-input.
+- **Markdown tables render as proper grids.** Proportional column-width distribution with header-floor minimums so short labels never wrap mid-word. Model nudged via prompt to prefer sectioned lists for very wide comparisons.
+- **Version reporting reads runtime `package.json`.** Boot card and `/version` no longer report stale numbers after `/update install`.
+- **`/update install` cleanups.** Dropped the Node 20+ deprecation warning. Install progress shown via sliding-shimmer indicator. Install-method detection broadened to Windows user-mode globals.
+- **Loading indicator + spacing.** Indicator aligned at col 2 matching other surfaces; conditional erase preserves clean 1-blank rhythm between turns.
+- **Status bar timer glyph (`⌛`).** Visible at all terminal widths (mid + compact tiers previously dropped it).
+- **Single approval panel** per `file_write` (no duplicate event-row + panel stack).
+
+### v4.8.0 — Events backbone + visual identity
+
+- **Watch the agent work.** Seven `ui_*` events (`ui_task_update`, `ui_task_done`, `ui_command_result`, `ui_test_result`, `ui_approval_request`, `ui_toast`, `ui_artifact_created`) let the model emit structured progress signals instead of writing them as prose. The REPL paints them as inline rows separate from the reply text. System prompt nudges the model to fire events during multi-step work.
+- **Aiden-native visual chrome.** Orange `│` panel bars with asymmetric top-divider chrome (no closing corners). Token-sourced design system (`cli/v4/design/tokens.ts`) — palette, glyphs, spacing in one place.
+- **Packed status bar.** Cyan model name · amber token ratio · semantic-tiered context bar (`●●●●●●○○○○`) · purple turn counter · teal `⌛` per-turn timer · state dot. Progressive disclosure on narrower terminals.
+- **Sliding-block loading indicator.** 4-cell `█` segment slides L→R on a muted `─` track at 250ms/cell.
+- **Onboarding refresh.** 24-bit ANSI AIDEN banner, capability-bullet disclaimer, 10-cell progress bar in the loading sequence, rounded heavy-frame "Built solo" card.
+- **Markdown polish.** Code blocks get a top-divider with brand-orange language label. Bullet lists use `●`/`○`; task lists use `✔️`/`○`.
+- **ChatGPT Plus + gpt-5 routing fix.** Auxiliary cheap-LLM calls (`risk_assess`, `compression`, `session_summary`, `skill_describe`) route through Groq + `llama-3.1-8b-instant` by default, falling back to the parent provider only when Groq isn't configured. Fixes the v4.6.x bug where every auxiliary call returned 400 from the Codex backend.
 
 <br>
 
@@ -295,6 +321,47 @@ To set the default at the env level:
 export AIDEN_DEFAULT_PROVIDER=groq
 export AIDEN_DEFAULT_MODEL=llama-3.3-70b-versatile
 ```
+
+### Recommended models
+
+| Use case | Best models |
+|---|---|
+| **General-purpose / quality** | Claude Sonnet 4.6 / Opus, GPT-5, Gemini 2.5 Pro |
+| **Speed + free tier** | Groq Llama 3.3 70B, Cerebras Llama 3.3 70B |
+| **Fully local** | Ollama with Qwen 2.5 32B, Llama 3.3 70B, or DeepSeek R1 |
+| **Open weights via subscription** | Nous Portal (Hermes-3-405B) |
+| **Long context** | Gemini 2.5 Pro (2M tokens) |
+
+> 💡 **Quality scales with model capability.** Aiden's output quality depends heavily on the model you pick. For real work, prefer the highest-capability model your budget allows — Claude Sonnet 4.6, GPT-5, or Gemini 2.5 Pro. Smaller models work for simple tasks but agentic loops benefit from stronger reasoning.
+
+> 💡 **ChatGPT Plus / Claude Pro subscribers**: use the OAuth flow instead of an API key. Pick `chatgpt-plus` or `claude-pro` as your provider during `/model` setup, then sign in via browser. No separate API costs — uses your existing subscription's model allowances.
+
+<br>
+
+## Skills
+
+Aiden ships with 74 bundled skills and supports installing more from the community registry.
+
+### What are skills?
+
+Skills are composable workflows. Each skill has a `SKILL.md` prompt, optional helper scripts, and declared tool requirements. Examples: GitHub PR/issue automation, NSE/Upstox/Zerodha trading flows, Censys/Shodan lookups, Windows Defender management.
+
+### Managing skills
+
+| Action | Command |
+|---|---|
+| List installed skills | `/skills` |
+| Browse the community registry | Visit [skills.taracod.com](https://skills.taracod.com) |
+| Install a skill from registry | `/skills install <name>` |
+| Remove a skill | `/skills remove <name>` |
+| Reload skills (after edits) | `/skills reload` |
+
+### Contributing skills
+
+Skills live in [`skills/`](skills/) under Apache-2.0. PRs welcome. Each skill needs:
+- A `SKILL.md` describing what it does and when to use it
+- Optional `tools.json` declaring required tools
+- Optional helper scripts in `lib/`
 
 <br>
 
@@ -484,6 +551,12 @@ The future `skills.taracod.com` marketplace will ship community skills under the
 Aiden can touch your files, run shell commands, and access the web. It's autonomous within the limits you set. Things will go wrong sometimes. Use at your own risk, read the code if you're nervous, and report what breaks.
 
 **Built solo. Started as a hobby project. Still rough in spots. Getting better every week.**
+
+### Welcome
+
+- **Contributors** — bug reports, skill submissions, provider adapters, and documentation PRs are all welcome. See [Contributing](#contributing) above for the workflow.
+- **Sponsors / investors** — Aiden is built by one person funding it from client work. If you'd like to help Aiden grow faster, reach out at [contact@taracod.com](mailto:contact@taracod.com) or sponsor via [Razorpay](https://razorpay.me/@whitelotus9625).
+- **Beta testers** — try it on your workflow, file issues, share what works and what doesn't. Honest feedback shapes the roadmap.
 
 ---
 
