@@ -225,6 +225,12 @@ const UI_EVENTS_GUIDANCE = [
   'Markdown text in your reply is for explanation, not status. Status goes',
   'through events. Skip events entirely on single-shot queries that aren\'t',
   'multi-step work.',
+  '',
+  '## Comparison formatting',
+  '',
+  'For comparison requests, prefer sectioned lists or narrow tables (3 cols max).',
+  'Wide tables (4+ columns or cells over ~30 chars) render imperfectly in the',
+  'CLI grid — break long content into sections with headers + bullets instead.',
 ].join('\n');
 
 /**

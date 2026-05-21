@@ -1142,17 +1142,15 @@ export class ChatSession implements ChatSessionLike {
     // Phase 22 Task 4: status bar reflects the live phase. Set on
     // entry, cleared in both success and error paths below.
     this.setStatusState({ kind: 'generating', sinceMs: Date.now() });
-    // Tier-3.1a: dim full-width rule between the user input echo and
-    // the agent reply for clean visual rhythm.
-    //
-    // v4.8.1 Slice 2 hotfix — dropped the prior Phase 26.2.3 trailing
-    // blank `\n`. With Slice 11's activityIndicator leading `\n` and
-    // the indicator's erase-emits-`\n` cursor handoff to `agentHeader`,
-    // that extra blank stacked on top of those gaps and produced 4–5
-    // visible blanks between the user prompt and `▎ Aiden`. The rule
-    // line + indicator+erase handoff alone gives the one-blank-between-
-    // beats rhythm Shiva flagged in smoke.
-    this.opts.display.write(`  ${this.opts.display.rule()}\n`);
+    // v4.8.1 Slice 2 hotfix #3 — removed the prior Tier-3.1a dim
+    // rule between the user input echo and the agent reply. The dim
+    // colour read as a near-blank row in live smoke, and stacked
+    // with the indicator's erase-blank residue produced two visible
+    // separator rows above `▎ Aiden`. With the rule gone, the layout
+    // is:
+    //   user input → [indicator paints, erases — 1 blank row] → ▎ Aiden
+    // = exactly one blank row between user input and Aiden header,
+    // matching the rhythm Shiva flagged in smoke.
     const turnStartedAt = Date.now();
     const userMsg: Message = { role: 'user', content: userInput };
 
