@@ -1,0 +1,32 @@
+# Aiden Theme — Dracula
+# Palette inspired by the public Dracula theme by Zeno Rocha
+# (draculatheme.com). High-contrast dark with vivid accents, widely
+# re-implemented across editors and terminals. Hex values are the
+# public palette. Glyphs unchanged from default.
+
+name: "dracula"
+description: "Inspired by Dracula (draculatheme.com). High-contrast dark with vivid accents."
+
+colors:
+  brand:
+    primary: "#FF79C6"
+    muted:   "#BD7AA3"
+  content:
+    primary:   "#F8F8F2"
+    secondary: "#BFBFBF"
+    tertiary:  "#6272A4"
+  semantic:
+    success: "#50FA7B"
+    warn:    "#F1FA8C"
+    error:   "#FF5555"
+    info:    "#8BE9FD"
+  metrics:
+    model:     "#8BE9FD"
+    tokens:    "#F1FA8C"
+    timer:     "#8BE9FD"
+    turnCount: "#BD93F9"
+  surface:
+    bg:       "#282A36"
+    elevated: "#21222C"
+    border:   "#44475A"
+    divider:  "#1E1F29"

@@ -1,0 +1,32 @@
+# Aiden Theme — Light
+# Dark text on light terminal background. Brand orange retained as the
+# single warm accent. For users on light-theme terminals (Apple Terminal
+# default profile, Windows Terminal Light, light VS Code integrated, etc.).
+# Glyphs unchanged from default.
+
+name: "light"
+description: "Light terminal. Dark text on light background. Brand orange accent."
+
+colors:
+  brand:
+    primary: "#D9531E"
+    muted:   "#A03D0E"
+  content:
+    primary:   "#1A1A1A"
+    secondary: "#555555"
+    tertiary:  "#888888"
+  semantic:
+    success: "#2E8B2E"
+    warn:    "#B8860B"
+    error:   "#C8202C"
+    info:    "#1F5FA8"
+  metrics:
+    model:     "#1F5FA8"
+    tokens:    "#B8860B"
+    timer:     "#1F5FA8"
+    turnCount: "#7B3FBF"
+  surface:
+    bg:       "#F8F8F8"
+    elevated: "#EFEFEF"
+    border:   "#D0D0D0"
+    divider:  "#E5E5E5"

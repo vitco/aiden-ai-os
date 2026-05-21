@@ -1,0 +1,31 @@
+# Aiden Theme — Monochrome
+# Pure greyscale. Two semantic accents (error red + success green) are
+# retained for readability of state signals. Everything else greyscale.
+# Glyphs unchanged from default — themes change colors, not shapes.
+
+name: "monochrome"
+description: "Pure greyscale. Semantic accents retained for error/success readability."
+
+colors:
+  brand:
+    primary: "#C8CCD4"
+    muted:   "#888888"
+  content:
+    primary:   "#C8CCD4"
+    secondary: "#888888"
+    tertiary:  "#555555"
+  semantic:
+    success: "#7DC97D"
+    warn:    "#999999"
+    error:   "#D97777"
+    info:    "#AAAAAA"
+  metrics:
+    model:     "#AAAAAA"
+    tokens:    "#AAAAAA"
+    timer:     "#888888"
+    turnCount: "#BBBBBB"
+  surface:
+    bg:       "#0A0A0A"
+    elevated: "#1A1A1A"
+    border:   "#444444"
+    divider:  "#3A3A3A"

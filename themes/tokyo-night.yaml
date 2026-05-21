@@ -1,0 +1,32 @@
+# Aiden Theme — Tokyo Night
+# Palette inspired by the public Tokyo Night theme by Folke Lemaitre
+# (folke/tokyonight.nvim). Cool nocturnal palette widely re-implemented
+# across editors and terminals. Hex values are the public palette.
+# Glyphs unchanged from default.
+
+name: "tokyo-night"
+description: "Inspired by Tokyo Night (folke/tokyonight.nvim). Cool nocturnal palette."
+
+colors:
+  brand:
+    primary: "#7AA2F7"
+    muted:   "#3D59A1"
+  content:
+    primary:   "#C0CAF5"
+    secondary: "#9AA5CE"
+    tertiary:  "#565F89"
+  semantic:
+    success: "#9ECE6A"
+    warn:    "#E0AF68"
+    error:   "#F7768E"
+    info:    "#7DCFFF"
+  metrics:
+    model:     "#7DCFFF"
+    tokens:    "#E0AF68"
+    timer:     "#7DCFFF"
+    turnCount: "#BB9AF7"
+  surface:
+    bg:       "#1A1B26"
+    elevated: "#24283B"
+    border:   "#3B4261"
+    divider:  "#1F2335"
