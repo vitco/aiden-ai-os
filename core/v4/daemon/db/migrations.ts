@@ -421,6 +421,76 @@ CREATE INDEX IF NOT EXISTS idx_spans_external_trace
   ON spans(external_trace_id) WHERE external_trace_id IS NOT NULL;
 `;
 
+// v4.9.0 Slice 12a — Hook system tables. Source of truth lives at
+// `core/v4/daemon/db/schema/v11.sql`.
+const V11_SQL = `
+CREATE TABLE IF NOT EXISTS hooks (
+  hook_id        TEXT    PRIMARY KEY,
+  name           TEXT    NOT NULL,
+  version        TEXT,
+  source         TEXT    NOT NULL,
+  runtime        TEXT    NOT NULL,
+  manifest_path  TEXT    NOT NULL,
+  code_hash      TEXT    NOT NULL,
+  enabled        INTEGER NOT NULL DEFAULT 0,
+  trust_state    TEXT    NOT NULL,
+  created_at     TEXT    NOT NULL,
+  updated_at     TEXT    NOT NULL,
+  UNIQUE(manifest_path)
+);
+CREATE TABLE IF NOT EXISTS hook_subscriptions (
+  subscription_id TEXT    PRIMARY KEY,
+  hook_id         TEXT    NOT NULL REFERENCES hooks(hook_id) ON DELETE CASCADE,
+  event           TEXT    NOT NULL,
+  matcher_json    TEXT,
+  authority       TEXT    NOT NULL,
+  mode            TEXT    NOT NULL,
+  priority        INTEGER NOT NULL DEFAULT 0,
+  timeout_ms      INTEGER NOT NULL,
+  on_error        TEXT    NOT NULL,
+  on_timeout      TEXT    NOT NULL,
+  enabled         INTEGER NOT NULL DEFAULT 1
+);
+CREATE INDEX IF NOT EXISTS idx_hook_subscriptions_event ON hook_subscriptions(event, enabled);
+CREATE TABLE IF NOT EXISTS hook_capability_grants (
+  grant_id     TEXT    PRIMARY KEY,
+  hook_id      TEXT    NOT NULL REFERENCES hooks(hook_id) ON DELETE CASCADE,
+  capability   TEXT    NOT NULL,
+  scope_json   TEXT    NOT NULL,
+  granted_by   TEXT,
+  granted_at   TEXT    NOT NULL,
+  revoked_at   TEXT
+);
+CREATE TABLE IF NOT EXISTS hook_executions (
+  hook_execution_id TEXT    PRIMARY KEY,
+  hook_id           TEXT    NOT NULL REFERENCES hooks(hook_id),
+  subscription_id   TEXT    REFERENCES hook_subscriptions(subscription_id),
+  event             TEXT    NOT NULL,
+  run_id            TEXT,
+  trace_id          TEXT,
+  span_id           TEXT,
+  parent_span_id    TEXT,
+  tool_call_id      TEXT,
+  status            TEXT    NOT NULL,
+  decision          TEXT,
+  elapsed_ms        INTEGER NOT NULL,
+  cpu_ms            INTEGER,
+  max_rss_kb        INTEGER,
+  exit_code         INTEGER,
+  payload_hash      TEXT,
+  response_hash     TEXT,
+  stdout_preview    TEXT,
+  stderr_preview    TEXT,
+  error_kind        TEXT,
+  error_message     TEXT,
+  started_at        TEXT    NOT NULL,
+  finished_at       TEXT    NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_hook_executions_run   ON hook_executions(run_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_hook_executions_hook  ON hook_executions(hook_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_hook_executions_event ON hook_executions(event, started_at);
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -432,6 +502,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 8, name: 'v4.9 slice 4 — daemon identity + incarnations', sql: V8_SQL },
   { version: 9, name: 'v4.9 slice 5 — durable run queue',              sql: V9_SQL },
   { version: 10, name: 'v4.9 slice 7 — external trace adoption',       sql: V10_SQL },
+  { version: 11, name: 'v4.9 slice 12a — hook system',                  sql: V11_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

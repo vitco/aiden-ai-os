@@ -60,7 +60,9 @@ export const ID_PREFIXES = [
   'req',  // external request id (e.g. webhook delivery)
   'tool', // tool invocation
   'mem',  // memory write
-  'hook', // hook firing
+  'hook', // hook firing (legacy generic id)
+  'hsub', // v4.9.0 Slice 12a — hook subscription
+  'hexec',// v4.9.0 Slice 12a — hook execution (subprocess invocation)
 ] as const;
 export type IdPrefix = (typeof ID_PREFIXES)[number];
 
@@ -134,6 +136,8 @@ export const newRequestId     = (): string => makeId('req');
 export const newToolCallId    = (): string => makeId('tool');
 export const newMemoryId      = (): string => makeId('mem');
 export const newHookId        = (): string => makeId('hook');
+export const newHookSubId     = (): string => makeId('hsub');
+export const newHookExecId    = (): string => makeId('hexec');
 
 export interface ParsedId {
   prefix: IdPrefix;

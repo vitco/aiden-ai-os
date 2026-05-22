@@ -17,6 +17,8 @@ export {
   newToolCallId,
   newMemoryId,
   newHookId,
+  newHookSubId,
+  newHookExecId,
   parseId,
   isIdWithPrefix,
   type IdPrefix,

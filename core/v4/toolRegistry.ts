@@ -375,7 +375,13 @@ export class ToolRegistry {
       // require avoids pulling daemon code into the v4 core import
       // graph at module load (would break headless / cli-test imports
       // that don't open a DB).
-      const dispatch = async (): Promise<unknown> => handler.execute(args, context);
+      //
+      // v4.9.0 Slice 12a Phase 3 — inside the tool span, fire
+      // `tool.call.pre` + `tool.call.post` hooks via `runToolWithHooks`.
+      // Mandatory pre-hook blocks surface as HookBlockedError, caught
+      // by the outer try/catch and mapped to a structured error result.
+      const dispatch = async (a: Record<string, unknown>): Promise<unknown> =>
+        handler.execute(a, context);
       let result: unknown;
       try {
         const sliced = sliceSpanShim();
@@ -385,10 +391,24 @@ export class ToolRegistry {
           result = await sliced.withToolSpan(
             sliced.db,
             { toolName: call.name, inputFingerprint: inputFp, sideEffectClass: sideEffect },
-            async () => dispatch(),
+            async (childCtx) => sliced.runToolWithHooks(
+              {
+                db:         sliced.db,
+                toolName:   call.name,
+                toolCallId: call.id,
+                args,
+                ctx: {
+                  runId:        childCtx.runId,
+                  traceId:      childCtx.traceId,
+                  spanId:       childCtx.spanId,
+                  parentSpanId: childCtx.parentSpanId,
+                },
+              },
+              dispatch,
+            ),
           );
         } else {
-          result = await dispatch();
+          result = await dispatch(args);
         }
         const inner = result as
           | { degraded?: unknown; degradedReason?: unknown }
@@ -403,6 +423,17 @@ export class ToolRegistry {
         }
         return out;
       } catch (err) {
+        // v4.9.0 Slice 12a — hook blocks surface as a structured
+        // rejection so the model gets the hook's `reason` / `model_message`
+        // verbatim instead of a bare exception string.
+        if (err instanceof HookBlockedError) {
+          return {
+            id: call.id,
+            name: call.name,
+            result: null,
+            error: err.modelMessage ?? err.message,
+          };
+        }
         const message = err instanceof Error ? err.message : String(err);
         return { id: call.id, name: call.name, result: null, error: message };
       }
@@ -418,6 +449,7 @@ export class ToolRegistry {
 import { getCurrentDaemonDb } from './daemon/bootstrap';
 import { withToolSpan, shortInputFingerprint } from './daemon/spans/spanHelpers';
 import { currentContext as _identityCurrentContext } from './identity';
+import { runToolWithHooks, HookBlockedError } from './hooks/toolHookGate';
 
 function classifySideEffectForHandler(h: ToolHandler): 'read' | 'write' | 'mutating' | 'destructive' {
   if (h.riskTier === 'dangerous') return 'destructive';
@@ -432,6 +464,7 @@ interface ToolSpanShim {
   classifySideEffect(handler: ToolHandler): 'read' | 'write' | 'mutating' | 'destructive';
   fingerprint(args: Record<string, unknown>): string;
   withToolSpan: typeof withToolSpan;
+  runToolWithHooks: typeof runToolWithHooks;
 }
 const _toolSpanShim: ToolSpanShim = {
   get db()            { return getCurrentDaemonDb(); },
@@ -439,5 +472,6 @@ const _toolSpanShim: ToolSpanShim = {
   classifySideEffect: classifySideEffectForHandler,
   fingerprint:        shortInputFingerprint,
   withToolSpan,
+  runToolWithHooks,
 };
 function sliceSpanShim(): ToolSpanShim { return _toolSpanShim; }
