@@ -350,6 +350,67 @@ CREATE INDEX IF NOT EXISTS idx_incarnations_daemon
   ON daemon_incarnations(daemon_id, started_at DESC);
 `;
 
+// v4.9.0 Slice 5 — durable run queue. Source of truth lives at
+// `core/v4/daemon/db/schema/v9.sql`; kept in sync via the migrations
+// test snapshot check.
+const V9_SQL = `
+CREATE TABLE IF NOT EXISTS run_attempts (
+  attempt_id     TEXT    PRIMARY KEY,
+  run_id         INTEGER NOT NULL,
+  attempt_number INTEGER NOT NULL,
+  incarnation_id TEXT    NOT NULL,
+  started_at     TEXT    NOT NULL,
+  ended_at       TEXT,
+  status         TEXT    NOT NULL,
+  finish_reason  TEXT,
+  error_class    TEXT,
+  error_message  TEXT,
+  FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_run_attempts_run
+  ON run_attempts(run_id, attempt_number);
+CREATE INDEX IF NOT EXISTS idx_run_attempts_incarnation
+  ON run_attempts(incarnation_id);
+
+CREATE TABLE IF NOT EXISTS spans (
+  span_id        TEXT    PRIMARY KEY,
+  trace_id       TEXT    NOT NULL,
+  parent_span_id TEXT,
+  run_id         INTEGER,
+  attempt_id     TEXT,
+  incarnation_id TEXT    NOT NULL,
+  kind           TEXT    NOT NULL,
+  name           TEXT    NOT NULL,
+  started_at     TEXT    NOT NULL,
+  ended_at       TEXT,
+  status         TEXT,
+  attrs_json     TEXT,
+  error_class    TEXT,
+  error_message  TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_spans_trace  ON spans(trace_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_spans_run    ON spans(run_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_spans_parent ON spans(parent_span_id);
+
+CREATE TABLE IF NOT EXISTS run_idempotency_keys (
+  namespace        TEXT    NOT NULL,
+  key              TEXT    NOT NULL,
+  fingerprint      TEXT    NOT NULL,
+  run_id           INTEGER,
+  trigger_event_id INTEGER,
+  span_id          TEXT,
+  status           TEXT    NOT NULL,
+  created_at       TEXT    NOT NULL,
+  expires_at       TEXT,
+  result_ref       TEXT,
+  PRIMARY KEY (namespace, key)
+);
+CREATE INDEX IF NOT EXISTS idx_idempotency_expires
+  ON run_idempotency_keys(expires_at) WHERE expires_at IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_idempotency_run
+  ON run_idempotency_keys(run_id) WHERE run_id IS NOT NULL;
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -359,6 +420,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 6, name: 'v4.6 phase 1 — sub-agent lineage',             sql: V6_SQL },
   { version: 7, name: 'v4.6 phase 3b — self-improvement loop',        sql: V7_SQL },
   { version: 8, name: 'v4.9 slice 4 — daemon identity + incarnations', sql: V8_SQL },
+  { version: 9, name: 'v4.9 slice 5 — durable run queue',              sql: V9_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

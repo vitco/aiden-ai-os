@@ -495,7 +495,19 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
     }
 
     // Module singletons.
-    const triggerBus            = createTriggerBus({ db });
+    // v4.9.0 Slice 5 — opt the trigger bus into the durable
+    // run-idempotency anchor. Every accepted trigger_event with a
+    // non-null idempotency_key now also writes a row to
+    // `run_idempotency_keys` in the same transaction.
+    const triggerBus            = createTriggerBus({
+      db,
+      enableRunIdempotency:   true,
+      onIdempotencyConflict:  (info) => {
+        log('warn',
+          `[trigger-bus] duplicate ingress namespace=trigger:${info.source} ` +
+          `key=${info.key} — reusing existing run anchor`);
+      },
+    });
     const idempotencyStore      = createIdempotencyStore({ db });
     const runStore              = createRunStore({ db });
     const restartFailureCounter = createRestartFailureCounter({ db, threshold: cfg.restartFailureThreshold });
@@ -543,6 +555,25 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
       resourceRegistry,
       log,
     });
+
+    // v4.9.0 Slice 5 — POST /api/runs durable ingress. Returns 202
+    // only after the trigger_event + run_idempotency_keys rows commit.
+    // Read AIDEN_DAEMON_BIND directly here — the `bindHost` const
+    // below shadows it but isn't in scope yet.
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const { mountRunsRoutes } = require('./api/runs') as typeof import('./api/runs');
+      const ingressBindHost = process.env.AIDEN_DAEMON_BIND ?? '127.0.0.1';
+      mountRunsRoutes({
+        app,
+        triggerBus,
+        log,
+        apiKeyRequired: ingressBindHost !== '127.0.0.1' && ingressBindHost !== 'localhost',
+      });
+      log('info', '[api/runs] POST /api/runs durable ingress mounted');
+    } catch (e) {
+      log('error', `[api/runs] mount failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
 
     // v4.5 Phase 3 — bind safety check. When AIDEN_DAEMON_BIND opts
     // into a non-loopback interface, require AIDEN_API_KEY + refuse

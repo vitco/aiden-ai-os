@@ -10,6 +10,7 @@ export {
   newIncarnationId,
   newTriggerId,
   newRunId,
+  newAttemptId,
   newTraceId,
   newSpanId,
   newRequestId,

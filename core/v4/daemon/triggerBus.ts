@@ -96,6 +96,17 @@ function safeJsonParse(s: string): Record<string, unknown> {
 
 export interface CreateTriggerBusOptions {
   db: Db;
+  /**
+   * v4.9.0 Slice 5 — when set, every `insert()` with a non-null
+   * `idempotencyKey` writes a `run_idempotency_keys` row in the same
+   * statement sequence. The bus stays in-process with the existing DB
+   * connection; no separate handle is plumbed through callers. When
+   * omitted (tests, legacy callers), insertion behaviour is exactly
+   * the v4.5 shape — backwards-compatible.
+   */
+  enableRunIdempotency?: boolean;
+  /** Optional warn callback for ingress-idempotency rejections. */
+  onIdempotencyConflict?: (info: { source: string; sourceKey: string; key: string }) => void;
 }
 
 export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
@@ -109,36 +120,68 @@ export function createTriggerBus(opts: CreateTriggerBusOptions): TriggerBus {
     insert(ev: TriggerEventInput): { id: number; inserted: boolean } {
       const now = Date.now();
       const payloadJson = JSON.stringify(ev.payload ?? {});
-      const result = db
-        .prepare(
-          `INSERT OR IGNORE INTO trigger_events
-             (source, source_key, idempotency_key, payload_json,
-              status, attempts, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)`,
-        )
-        .run(
-          ev.source,
-          ev.sourceKey,
-          ev.idempotencyKey ?? null,
-          payloadJson,
-          now,
-          now,
-        );
-      if (result.changes > 0) {
-        return { id: Number(result.lastInsertRowid), inserted: true };
-      }
-      // Dedup hit — return the existing id.
-      const existing = db
-        .prepare(
-          'SELECT id FROM trigger_events WHERE source = ? AND idempotency_key = ?',
-        )
-        .get(ev.source, ev.idempotencyKey ?? null) as { id: number } | undefined;
-      if (!existing) {
-        // Defensive — shouldn't happen unless idempotency_key was null,
-        // in which case INSERT OR IGNORE wouldn't have skipped.
-        throw new Error('triggerBus.insert: INSERT OR IGNORE produced no row but no existing match found');
-      }
-      return { id: existing.id, inserted: false };
+      // v4.9.0 Slice 5 — wrap insert + idempotency write in a single
+      // transaction so a crash between them can't leave a stranded
+      // trigger_events row without an idempotency anchor.
+      let outcome: { id: number; inserted: boolean } | null = null;
+      const tx = db.transaction((): void => {
+        const result = db
+          .prepare(
+            `INSERT OR IGNORE INTO trigger_events
+               (source, source_key, idempotency_key, payload_json,
+                status, attempts, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'pending', 0, ?, ?)`,
+          )
+          .run(
+            ev.source,
+            ev.sourceKey,
+            ev.idempotencyKey ?? null,
+            payloadJson,
+            now,
+            now,
+          );
+        if (result.changes > 0) {
+          const newId = Number(result.lastInsertRowid);
+          // Slice 5 — anchor the run-idempotency row keyed on
+          // (`trigger:<source>`, `<sourceKey>::<idempotencyKey>`). We
+          // skip if idempotencyKey is null (nothing to dedupe against).
+          if (opts.enableRunIdempotency && ev.idempotencyKey) {
+            const ns  = `trigger:${ev.source}`;
+            const key = `${ev.sourceKey}::${ev.idempotencyKey}`;
+            const fp  = ev.idempotencyKey;
+            db.prepare(
+              `INSERT OR IGNORE INTO run_idempotency_keys
+                 (namespace, key, fingerprint, trigger_event_id,
+                  status, created_at)
+               VALUES (?, ?, ?, ?, 'accepted', ?)`,
+            ).run(ns, key, fp, newId, new Date(now).toISOString());
+          }
+          outcome = { id: newId, inserted: true };
+          return;
+        }
+        // Dedup hit — return the existing id.
+        const existing = db
+          .prepare(
+            'SELECT id FROM trigger_events WHERE source = ? AND idempotency_key = ?',
+          )
+          .get(ev.source, ev.idempotencyKey ?? null) as { id: number } | undefined;
+        if (!existing) {
+          throw new Error('triggerBus.insert: INSERT OR IGNORE produced no row but no existing match found');
+        }
+        if (opts.enableRunIdempotency && ev.idempotencyKey && opts.onIdempotencyConflict) {
+          // Slice 5 — surface the dedup-as-duplicate event for visibility.
+          try {
+            opts.onIdempotencyConflict({
+              source:    ev.source,
+              sourceKey: ev.sourceKey,
+              key:       `${ev.sourceKey}::${ev.idempotencyKey}`,
+            });
+          } catch { /* notification must never throw */ }
+        }
+        outcome = { id: existing.id, inserted: false };
+      });
+      tx();
+      return outcome!;
     },
 
     claim(opts2: { source?: TriggerSource; leaseMs?: number; ownerId: string } = { ownerId: '' }): ClaimedEvent | null {

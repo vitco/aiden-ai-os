@@ -54,6 +54,7 @@ export const ID_PREFIXES = [
   'inc',  // single daemon process incarnation
   'trg',  // trigger event
   'run',  // agent run (one turn or daemon-fired job)
+  'att',  // v4.9.0 Slice 5 — execution attempt within a run
   'trc',  // trace (top-level correlation across runs/spans)
   'spn',  // span (sub-unit of a trace)
   'req',  // external request id (e.g. webhook delivery)
@@ -126,6 +127,7 @@ export const newDaemonId      = (): string => makeId('dmn');
 export const newIncarnationId = (): string => makeId('inc');
 export const newTriggerId     = (): string => makeId('trg');
 export const newRunId         = (): string => makeId('run');
+export const newAttemptId     = (): string => makeId('att');
 export const newTraceId       = (): string => makeId('trc');
 export const newSpanId        = (): string => makeId('spn');
 export const newRequestId     = (): string => makeId('req');
