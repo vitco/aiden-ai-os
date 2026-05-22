@@ -369,15 +369,27 @@ export class ToolRegistry {
         }
       }
 
+      // v4.9.0 Slice 6 — wrap the handler call in a tool span when the
+      // daemon foundation is up AND an ExecutionContext is active. NOOP
+      // outside daemon mode or outside a runWithContext frame. Lazy
+      // require avoids pulling daemon code into the v4 core import
+      // graph at module load (would break headless / cli-test imports
+      // that don't open a DB).
+      const dispatch = async (): Promise<unknown> => handler.execute(args, context);
+      let result: unknown;
       try {
-        const result = await handler.execute(args, context);
-        // v4.1.3-repl-polish: lift `degraded` + `degradedReason` from the
-        // handler's inner result to the outer ToolCallResult so the CLI
-        // trail row can render the partial-yellow state. Tools opt in by
-        // setting these on the object they return; without this lift the
-        // flags would sit on `out.result.degraded` where callbacks.ts
-        // can't see them. Strict typeof checks avoid promoting truthy-
-        // but-wrong-shape junk (numbers, strings, nested objects).
+        const sliced = sliceSpanShim();
+        if (sliced && sliced.db && sliced.hasContext()) {
+          const sideEffect = sliced.classifySideEffect(handler);
+          const inputFp    = sliced.fingerprint(args);
+          result = await sliced.withToolSpan(
+            sliced.db,
+            { toolName: call.name, inputFingerprint: inputFp, sideEffectClass: sideEffect },
+            async () => dispatch(),
+          );
+        } else {
+          result = await dispatch();
+        }
         const inner = result as
           | { degraded?: unknown; degradedReason?: unknown }
           | null
@@ -397,3 +409,35 @@ export class ToolRegistry {
     };
   }
 }
+
+// v4.9.0 Slice 6 — static imports for the span-shim bridge. Earlier
+// attempts used lazy `require()` to keep daemon code out of the import
+// graph when the test harness doesn't compile it; that path broke
+// under vite-node which doesn't intercept CJS require for `.ts`
+// targets. Static ESM imports work in both vitest + production builds.
+import { getCurrentDaemonDb } from './daemon/bootstrap';
+import { withToolSpan, shortInputFingerprint } from './daemon/spans/spanHelpers';
+import { currentContext as _identityCurrentContext } from './identity';
+
+function classifySideEffectForHandler(h: ToolHandler): 'read' | 'write' | 'mutating' | 'destructive' {
+  if (h.riskTier === 'dangerous') return 'destructive';
+  if (h.mutates === false)        return 'read';
+  if (h.mutates === true)         return 'mutating';
+  return 'read';
+}
+
+interface ToolSpanShim {
+  db: import('./daemon/db/connection').Db | null;
+  hasContext(): boolean;
+  classifySideEffect(handler: ToolHandler): 'read' | 'write' | 'mutating' | 'destructive';
+  fingerprint(args: Record<string, unknown>): string;
+  withToolSpan: typeof withToolSpan;
+}
+const _toolSpanShim: ToolSpanShim = {
+  get db()            { return getCurrentDaemonDb(); },
+  hasContext:         () => _identityCurrentContext() !== undefined,
+  classifySideEffect: classifySideEffectForHandler,
+  fingerprint:        shortInputFingerprint,
+  withToolSpan,
+};
+function sliceSpanShim(): ToolSpanShim { return _toolSpanShim; }

@@ -1092,7 +1092,31 @@ export class AidenAgent {
 
       let output: ProviderCallOutput;
       try {
-        output = await this.callProvider(messages, effectiveTools, runOptions);
+        // v4.9.0 Slice 6 — wrap the provider call in an LLM span when
+        // the daemon foundation is up AND a runWithContext frame is
+        // active. NOOP otherwise. patchAttrs back-fills tokens +
+        // finish_reason from the response after the call returns.
+        const shim = llmSpanShim();
+        if (shim && shim.db && shim.hasContext()) {
+          output = await shim.withLlmSpan(
+            shim.db,
+            { model: this.modelId ?? 'unknown', provider: this.providerId ?? 'unknown' },
+            async (_ctx, patchAttrs) => {
+              const out = await this.callProvider(messages, effectiveTools, runOptions);
+              patchAttrs({
+                input_tokens:        out.usage?.inputTokens ?? 0,
+                output_tokens:       out.usage?.outputTokens ?? 0,
+                total_tokens:        (out.usage?.inputTokens ?? 0) + (out.usage?.outputTokens ?? 0),
+                cache_read_tokens:   out.usage?.cacheReadTokens ?? 0,
+                cache_write_tokens:  out.usage?.cacheWriteTokens ?? 0,
+                finish_reason:       out.finishReason,
+              });
+              return out;
+            },
+          );
+        } else {
+          output = await this.callProvider(messages, effectiveTools, runOptions);
+        }
       } catch (err) {
         const error = err instanceof Error ? err : new Error(String(err));
         // v4.6 prep — external abort takes priority over fallback. An
@@ -1702,3 +1726,23 @@ function stringifyToolResult(result: unknown): string {
     return String(result);
   }
 }
+
+// v4.9.0 Slice 6 — static imports for the LLM span bridge. Same
+// reasoning as toolRegistry: vite-node doesn't intercept CJS require
+// for `.ts` modules, so the lazy `require()` form returned null in
+// tests. Static ESM imports work everywhere.
+import { getCurrentDaemonDb as _getCurrentDaemonDb } from './daemon/bootstrap';
+import { withLlmSpan as _withLlmSpan } from './daemon/spans/spanHelpers';
+import { currentContext as _llmCurrentContext } from './identity';
+
+interface LlmSpanShim {
+  db: import('./daemon/db/connection').Db | null;
+  hasContext(): boolean;
+  withLlmSpan: typeof _withLlmSpan;
+}
+const _llmSpanShim: LlmSpanShim = {
+  get db()      { return _getCurrentDaemonDb(); },
+  hasContext:   () => _llmCurrentContext() !== undefined,
+  withLlmSpan:  _withLlmSpan,
+};
+function llmSpanShim(): LlmSpanShim { return _llmSpanShim; }

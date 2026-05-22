@@ -32,24 +32,52 @@ const LEVEL_THRESHOLD: Readonly<Record<LogLevel, number>> = {
 export interface StderrSinkOptions {
   /** Drop records below this level. Defaults to `'warn'` so info noise stays in files. */
   minLevel?: LogLevel;
+  /**
+   * v4.9.0 Slice 6 — when true, render a short `HH:MM:SS` timestamp +
+   * dim-color `runId` last-8-char suffix when an ambient context made
+   * `ctx.runId` available. Defaults to false to preserve the v4.5
+   * ISO/no-runId shape that downstream parsers expect.
+   */
+  pretty?: boolean;
 }
 
 export class StderrSink implements LoggerSink {
+  readonly name = 'stderr';
   private readonly minLevel: number;
+  private readonly pretty:   boolean;
 
   constructor(opts: StderrSinkOptions = {}) {
     this.minLevel = LEVEL_THRESHOLD[opts.minLevel ?? 'warn'];
+    this.pretty   = opts.pretty ?? false;
   }
 
   write(r: LogRecord): void {
     if (LEVEL_THRESHOLD[r.level] < this.minLevel) return;
     const scope = r.scope ? ` [${r.scope}]` : '';
     try {
-      process.stderr.write(
-        `${r.ts.toISOString()} [${r.level}]${scope} ${r.msg}\n`,
-      );
+      if (this.pretty) {
+        const ts = formatShortTime(r.ts);
+        const runId = typeof r.ctx?.runId === 'string' ? r.ctx.runId : '';
+        // Dim ANSI 2 = faint; 22 = reset intensity. Suffix renders as
+        // ` (run_…last8)` only when an ambient runId is present.
+        const suffix = runId.length >= 8
+          ? ` \x1b[2m(${runId.slice(-8)})\x1b[22m`
+          : '';
+        process.stderr.write(
+          `${ts} [${r.level}]${scope} ${r.msg}${suffix}\n`,
+        );
+      } else {
+        process.stderr.write(
+          `${r.ts.toISOString()} [${r.level}]${scope} ${r.msg}\n`,
+        );
+      }
     } catch { /* dropped */ }
   }
+}
+
+function formatShortTime(d: Date): string {
+  const pad = (n: number): string => (n < 10 ? `0${n}` : String(n));
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
 /**

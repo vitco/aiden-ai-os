@@ -182,11 +182,32 @@ let _singleton: DaemonBootstrapHandle | null = null;
  */
 let _currentDaemonId:      string | null = null;
 let _currentIncarnationId: string | null = null;
+// v4.9.0 Slice 6 — module-level reference to the active daemon DB
+// handle. Cached after `openDaemonDb(dbPath)` returns so tool/LLM span
+// wrappers can pull it via `getCurrentDaemonDb()` without re-opening.
+let _currentDaemonDb: import('./db/connection').Db | null = null;
+// v4.9.0 Slice 6 — and a reference to the daemon logger, for the
+// same reason: spans + log enrichments need a logger handle without
+// each cross-cutting site plumbing its own.
+let _currentDaemonLogger: Logger | null = null;
+/** v4.9.0 Slice 6 — read the daemon's structured Logger (or null). */
+export function getCurrentDaemonLogger(): Logger | null { return _currentDaemonLogger; }
 
 /** v4.9.0 Slice 4 — read the persistent daemon id (`dmn_...`) or null. */
 export function getCurrentDaemonId():      string | null { return _currentDaemonId; }
 /** v4.9.0 Slice 4 — read this boot's incarnation id (`inc_...`) or null. */
 export function getCurrentIncarnationId(): string | null { return _currentIncarnationId; }
+
+/**
+ * v4.9.0 Slice 6 — read the active daemon DB handle, or null when
+ * AIDEN_DAEMON=0 / bootstrap hasn't run / bootstrap failed. Lets
+ * cross-cutting modules (tool dispatcher, agent loop) opt into
+ * span instrumentation without requiring CLI-level wiring. NOOP-safe:
+ * returns null silently when the daemon foundation isn't up.
+ */
+export function getCurrentDaemonDb(): import('./db/connection').Db | null {
+  return _currentDaemonDb;
+}
 
 /**
  * v4.9.0 Slice 3 — track whether the process-wide crash handlers
@@ -214,7 +235,10 @@ function buildDaemonLogger(logsDir: string): Logger {
   return new CoreLogger({
     level,
     sinks: [
-      new RedactingSink(new StderrSink({ minLevel: 'warn' })),
+      // v4.9.0 Slice 6 — pretty stderr (short timestamp + dim runId
+      // last-8 suffix when ambient context is present). File sink
+      // stays NDJSON with full IDs for log aggregators.
+      new RedactingSink(new StderrSink({ minLevel: 'warn', pretty: true })),
       new RedactingSink(new FileSink({ dir: logsDir, name: 'daemon', format: 'ndjson' })),
     ],
     // v4.9.0 Slice 4 — every daemon log line gets stamped with the
@@ -306,6 +330,9 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
   // CoreLogger which redacts before fan-out to stderr + file.
   const aidenRootForLog = resolveAidenRoot();
   const daemonLogger = buildDaemonLogger(path.join(aidenRootForLog, 'logs'));
+  // v4.9.0 Slice 6 — stash for cross-cutting consumers (tool dispatcher
+  // span wrap, LLM call span wrap). NOOP-safe via `getCurrentDaemonLogger()`.
+  _currentDaemonLogger = daemonLogger;
   const log = opts.log ?? ((level, msg) => {
     if (level === 'error')      daemonLogger.error(msg);
     else if (level === 'warn')  daemonLogger.warn(msg);
@@ -352,6 +379,8 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
     }
 
     const db = openDaemonDb(dbPath);
+    // v4.9.0 Slice 6 — cache for cross-cutting consumers.
+    _currentDaemonDb = db;
     const tracker = createInstanceTracker({ db, version: VERSION });
     tracker.start();
 
@@ -949,6 +978,9 @@ export function _resetDaemonBootstrapForTests(): void {
   // v4.9.0 Slice 4 — clear identity holders too.
   _currentDaemonId      = null;
   _currentIncarnationId = null;
+  // v4.9.0 Slice 6 — clear cross-cutting refs too.
+  _currentDaemonDb     = null;
+  _currentDaemonLogger = null;
 }
 
 /** Diagnostic — returns the current handle (or null if not yet bootstrapped). */

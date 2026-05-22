@@ -143,8 +143,8 @@ interface SinkCounter {
  * v4.9.0 Slice 4 — optional callback that returns ambient context
  * fields to merge into every log record's `ctx`. Used by the daemon
  * boot-logger to stamp `daemonId` / `incarnationId` / `runId` /
- * `traceId` / `spanId` automatically. MUST NOT throw — the Hermes
- * "no log formatter throws because context is missing" rule applies.
+ * `traceId` / `spanId` automatically. MUST NOT throw — the project rule
+ * "no log formatter throws because context is missing" applies.
  */
 export type LogContextProvider = () => Record<string, unknown> | undefined;
 
@@ -251,7 +251,7 @@ export class CoreLogger implements Logger {
     // v4.9.0 Slice 4 — merge ambient context fields. Caller-supplied
     // `ctx` wins on key collision (callers stamp run-specific data with
     // intent; identity fields are the default backdrop). The provider
-    // is wrapped in try/catch — Hermes rule "no log formatter throws
+    // is wrapped in try/catch — project rule "no log formatter throws
     // because context is missing".
     let merged: Record<string, unknown> | undefined = ctx;
     if (this.getContext) {
