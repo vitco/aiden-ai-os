@@ -288,9 +288,11 @@ describe('ChatSession.run', () => {
       }),
     );
     await session.run();
-    // Phase 23.6: status footer is ▲ provider · model │ ctx-bar │ elapsed.
+    // Phase 23.6 + v4.9.0 pre-ship UI: status footer is
+    // `provider · model │ ctx-bar │ elapsed` — leading ▲ dropped
+    // (prompt arrow owns the marker; footer ▲ was a duplicate).
     const text = out.join('');
-    expect(text).toMatch(/▲ groq/);
+    expect(text).toMatch(/groq/);
     expect(text).toContain('llama-3.3-70b-versatile');
     expect(text).toMatch(/ │ /); // vertical-bar separator
     // Elapsed segment ends with a unit suffix.

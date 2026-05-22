@@ -1510,9 +1510,8 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
     withCols(110, () => {
       const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
       const out = stripAnsi(d.statusFooter(BASE));
-      // Slice 9 hotfix: turn glyph dropped; bare colored number now
-      // carries the meaning (matches the timer pattern).
-      expect(out).toMatch(/│ 4 │/);
+      // v4.9.0 pre-ship UI: turn glyph (`↻`) restored before the number.
+      expect(out).toMatch(/│ ↻ 4 │/);
       expect(sepCount(out)).toBe(3);
     });
   });
@@ -1521,8 +1520,8 @@ describe('Display v4.8.0 Slice 7 statusFooter — packed info density', () => {
     withCols(140, () => {
       const d = new Display({ skin: new SkinEngine({ forceMono: true }) });
       const out = stripAnsi(d.statusFooter(BASE));
-      // Slice 9 hotfix: bare turn number + ⌛ hourglass on timer.
-      expect(out).toMatch(/│ 4 │/);
+      // v4.9.0 pre-ship UI: ↻ turn icon + ⌛ hourglass timer.
+      expect(out).toMatch(/│ ↻ 4 │/);
       expect(out).toContain('⌛');
       expect(sepCount(out)).toBe(4);
     });

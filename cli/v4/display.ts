@@ -341,6 +341,23 @@ const AIDEN_BANNER = String.raw`
 ╚═╝  ╚═╝╚═╝╚═════╝ ╚══════╝╚═╝  ╚═══╝
 `;
 
+/**
+ * v4.9.0 pre-ship UI hotfix — pure context-bar helpers. Extracted
+ * for testability + to fix the "always empty" symptom. Scale:
+ * 0% → 0 cells, 1-19% → 1, 20-39% → 2, 40-59% → 3, 60-79% → 4,
+ * 80-100% → 5. `renderContextBar` returns the glyph array.
+ */
+export function computeContextBarFill(pct: number, barW = 5): number {
+  if (pct <= 0)   return 0;
+  if (pct >= 100) return barW;
+  return Math.min(barW, Math.floor(pct / 20) + 1);
+}
+export function renderContextBar(filled: number, barW = 5): string[] {
+  return Array.from({ length: barW }, (_, i) =>
+    i < filled ? glyphs.bar.filled : glyphs.bar.empty,
+  );
+}
+
 export class Display {
   private skin: SkinEngine;
   private out: NodeJS.WriteStream;
@@ -787,28 +804,26 @@ export class Display {
   }): string {
     const sk = this.skin;
     const SEP = sk.applyColors(' │ ', 'muted');
-    const tri = this.triangle();
-    // v4.8.0 Slice 7 hotfix #2 — per-metric accent palette.
-    // Model: cyan (tool kind). Token counts: amber (warn). Bar/pct:
-    // semantic tier. Turn: purple (metric_turn). Timer: teal (success).
+    // v4.9.0 pre-ship UI hotfix — dropped the leading `▲` from
+    // provModel (prompt `▲` owns the marker; footer `▲` read as
+    // a duplicate orphan). Slice 7 per-metric palette preserved.
     const provModel =
-      `${tri} ${sk.applyColors(args.provider, 'muted')}` +
+      `${sk.applyColors(args.provider, 'muted')}` +
       `${sk.applyColors(' · ', 'muted')}` +
       sk.applyColors(args.model, 'tool');
 
     const pct = args.ctxMax > 0
       ? Math.min(100, Math.round((args.ctxUsed / args.ctxMax) * 100))
       : 0;
-    // 5-cell bar with single-space separators — reads as discrete dots
-    // rather than a continuous line. Total visible width ≈ 9 cells,
-    // similar to the prior 10-cell solid bar so 80-col tier stays tight.
+    // v4.9.0 pre-ship UI hotfix — bar math extracted to
+    // `computeContextBarFill` (1 cell per 20% bucket, ≥1 when any
+    // context used). Old `Math.round(pct/100 * barW)` floored to 0
+    // below ~10% so the bar stayed empty all session at typical use.
     const barW = 5;
-    const filled = Math.round((pct / 100) * barW);
+    const filled = computeContextBarFill(pct, barW);
     const ctxKind: 'success' | 'warn' | 'error' =
       pct < 60 ? 'success' : pct < 85 ? 'warn' : 'error';
-    const cells = Array.from({ length: barW }, (_, i) =>
-      i < filled ? glyphs.bar.filled : glyphs.bar.empty,
-    );
+    const cells = renderContextBar(filled, barW);
     const bar = sk.applyColors(cells.join(' '), ctxKind);
     const ctxRatio = sk.applyColors(
       `${formatCompactTokens(args.ctxUsed)}/${formatCompactTokens(args.ctxMax)}`,
@@ -830,11 +845,10 @@ export class Display {
     const stateDot = args.state
       ? sk.applyColors(glyphs.status.dot, this.stateKind(args.state))
       : '';
-    // v4.8.0 Slice 9 hotfix — turn glyph dropped; bare colored number
-    // matches the timer pattern. Color alone (purple metric_turn)
-    // carries the semantic.
+    // v4.9.0 pre-ship UI hotfix — turn glyph (`↻`) restored;
+    // matches the leading-icon-then-number pattern of `⌛ Ns`.
     const turnSeg = args.turnCount !== undefined
-      ? sk.applyColors(String(args.turnCount), 'metric_turn')
+      ? `${sk.applyColors(glyphs.status.turn, 'metric_turn')} ${sk.applyColors(String(args.turnCount), 'metric_turn')}`
       : '';
     // v4.8.0 Slice 9 hotfix — ⌛ restored ahead of the bare elapsed
     // string. Wider font support than the retired ⏱. `sessionMs` arg
