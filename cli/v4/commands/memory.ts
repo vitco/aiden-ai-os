@@ -106,6 +106,29 @@ async function withMemorySpan<T>(
 interface RunMemoryCliOptions extends MemoryCliOptions {
   /** Override the aiden root (tests). */
   rootDir?: string;
+  /**
+   * v4.9.0 Slice 10 — injectable LLM callback for the reviewer. When
+   * absent, `review --now` reports "no LLM configured" instead of
+   * routing through a real provider. The CLI binding (aidenCLI.ts)
+   * wires a real provider callback in production; tests pass a stub.
+   */
+  reviewerCallLLM?: (prompt: string) => Promise<string>;
+  /**
+   * v4.9.0 Slice 10 — injectable recent-turns supplier. When absent,
+   * `review --now` reports "no session context". The CLI binding
+   * wires the active session's last N messages; tests pass a stub.
+   */
+  reviewerRecentTurns?: () => Promise<Array<{ role: string; content: string }>>;
+  /**
+   * v4.9.0 Slice 10 — override the loaded config (tests). When absent,
+   * the CLI loads config.yaml via the standard ConfigProvider.
+   */
+  reviewerConfig?: {
+    enabled?:        boolean;
+    mode?:           'off' | 'on_quit' | 'every_n_turns';
+    timeoutMs?:      number;
+    maxCandidates?:  number;
+  };
 }
 
 /** Entry — `aiden memory <action> [args...]`. Returns desired process exit. */
@@ -136,6 +159,11 @@ export async function runMemorySubcommand(
     case 'backup':   return cmdBackup(paths, out, err, json);
     case 'restore':  return cmdRestore(positional[0], paths, out, err, json, yes);
     case 'diff':     return cmdDiff(paths, out, err);
+    // v4.9.0 Slice 10 — post-turn reviewer surface.
+    case 'pending':  return cmdPending(paths, out, json);
+    case 'approve':  return cmdApprove(positional[0], args, paths, guard, mgr, out, err, json);
+    case 'reject':   return cmdReject(positional[0], args, paths, out, err, json);
+    case 'review':   return cmdReview(args, paths, opts, out, err, json);
     case '--help':
     case 'help':     return cmdHelp(out);
     default:
@@ -157,7 +185,11 @@ function cmdHelp(write: (s: string) => void): number {
     '  edit <memory|user>                   Print path so you can open in $EDITOR.\n' +
     '  backup                               Snapshot both files to memory-backups/<ts>/.\n' +
     '  restore <timestamp>                  Restore both files from a snapshot.\n' +
-    '  diff                                 Diff current state against latest backup.\n',
+    '  diff                                 Diff current state against latest backup.\n' +
+    '  pending                              List candidates from `## Pending review` blocks.\n' +
+    '  approve <mem_id> | --all             Promote a pending candidate to a live entry.\n' +
+    '  reject <mem_id> | --all              Discard a pending candidate (logged).\n' +
+    '  review --now | --status              Run / inspect the post-turn memory reviewer.\n',
   );
   return 0;
 }
@@ -398,3 +430,185 @@ function splitEntries(raw: string): string[] {
   if (!raw.trim()) return [];
   return raw.split(ENTRY_SEPARATOR).map((e) => e.trim()).filter((e) => e.length > 0);
 }
+
+// ── v4.9.0 Slice 10 — post-turn reviewer surface ────────────────────────
+
+import { runReview } from '../../../core/v4/memory/reviewer';
+import {
+  listAllPending,
+  dropCandidate,
+  type PendingCandidate,
+} from '../../../core/v4/memory/reviewer/pendingStore';
+
+async function cmdPending(
+  paths: import('../../../core/v4/paths').AidenPaths,
+  out:   (s: string) => void,
+  json:  boolean,
+): Promise<number> {
+  const pending = await listAllPending(paths.memoryMd, paths.userMd);
+  if (json) {
+    out(JSON.stringify({ pending }, null, 2) + '\n');
+    return 0;
+  }
+  if (pending.length === 0) { out('no pending candidates\n'); return 0; }
+  out(`${pending.length} pending candidate(s):\n`);
+  for (const c of pending) {
+    out(`  ${c.memId}  [${c.file}]  ${c.text}\n    ↳ ${c.rationale}  (proposed ${c.proposedAt})\n`);
+  }
+  return 0;
+}
+
+async function cmdApprove(
+  memIdRaw: string | undefined,
+  args:     string[],
+  paths:    import('../../../core/v4/paths').AidenPaths,
+  guard:    MemoryGuard,
+  mgr:      MemoryManager,
+  out:      (s: string) => void,
+  err:      (s: string) => void,
+  json:     boolean,
+): Promise<number> {
+  const all = args.includes('--all');
+  const pending = await listAllPending(paths.memoryMd, paths.userMd);
+  const targets: PendingCandidate[] = all
+    ? pending
+    : (memIdRaw ? pending.filter((c) => c.memId === memIdRaw) : []);
+  if (targets.length === 0) {
+    if (json) { out(JSON.stringify({ ok: false, reason: 'no_match' }) + '\n'); }
+    else      { err('approve: no pending candidate matched (use `--all` for batch, or pass a mem_id)\n'); }
+    return 1;
+  }
+  let approved = 0;
+  void mgr;
+  for (const c of targets) {
+    const ctx = buildCliCtx('memory_approve');
+    const filePath = c.file === 'user' ? paths.userMd : paths.memoryMd;
+    // v4.9.0 Slice 10 — DROP the pending candidate row BEFORE calling
+    // guardedAdd. Otherwise MemoryManager.add's substring-dedup sees
+    // the candidate text inside the pending block and short-circuits
+    // to `deduped: true` without appending a live entry.
+    await dropCandidate(filePath, c.memId);
+    await withMemorySpan(ctx, 'approve', c.file, async () => guard.guardedAdd(c.file, c.text));
+    approved += 1;
+  }
+  if (json) { out(JSON.stringify({ ok: true, approved }) + '\n'); }
+  else      { out(`approved ${approved} candidate(s)\n`); }
+  return 0;
+}
+
+async function cmdReject(
+  memIdRaw: string | undefined,
+  args:     string[],
+  paths:    import('../../../core/v4/paths').AidenPaths,
+  out:      (s: string) => void,
+  err:      (s: string) => void,
+  json:     boolean,
+): Promise<number> {
+  const all = args.includes('--all');
+  const pending = await listAllPending(paths.memoryMd, paths.userMd);
+  const targets = all ? pending : (memIdRaw ? pending.filter((c) => c.memId === memIdRaw) : []);
+  if (targets.length === 0) {
+    if (json) { out(JSON.stringify({ ok: false, reason: 'no_match' }) + '\n'); }
+    else      { err('reject: no pending candidate matched\n'); }
+    return 1;
+  }
+  let rejected = 0;
+  for (const c of targets) {
+    const ctx = buildCliCtx('memory_reject');
+    await withMemorySpan(ctx, 'reject', c.file, async () => {
+      await dropCandidate(c.file === 'user' ? paths.userMd : paths.memoryMd, c.memId);
+      return null;
+    });
+    rejected += 1;
+  }
+  if (json) { out(JSON.stringify({ ok: true, rejected }) + '\n'); }
+  else      { out(`rejected ${rejected} candidate(s)\n`); }
+  return 0;
+}
+
+async function cmdReview(
+  args:  string[],
+  paths: import('../../../core/v4/paths').AidenPaths,
+  opts:  RunMemoryCliOptions,
+  out:   (s: string) => void,
+  err:   (s: string) => void,
+  json:  boolean,
+): Promise<number> {
+  const cfg = {
+    enabled:       opts.reviewerConfig?.enabled       ?? true,
+    mode:          opts.reviewerConfig?.mode          ?? ('on_quit' as const),
+    timeoutMs:     opts.reviewerConfig?.timeoutMs     ?? 30_000,
+    maxCandidates: opts.reviewerConfig?.maxCandidates ?? 5,
+  };
+
+  if (args.includes('--status')) {
+    if (json) { out(JSON.stringify({ enabled: cfg.enabled, mode: cfg.mode, last_review: null, pending: (await listAllPending(paths.memoryMd, paths.userMd)).length }, null, 2) + '\n'); }
+    else {
+      const pendingCount = (await listAllPending(paths.memoryMd, paths.userMd)).length;
+      out(`review enabled: ${cfg.enabled}, mode: ${cfg.mode}, last review: never, pending: ${pendingCount}\n`);
+    }
+    return 0;
+  }
+
+  if (!args.includes('--now')) {
+    err('review: pass --now to trigger a pass, or --status to inspect config\n');
+    return 2;
+  }
+
+  if (!cfg.enabled || cfg.mode === 'off') {
+    if (json) { out(JSON.stringify({ outcome: 'disabled', reason: cfg.mode === 'off' ? 'mode_off' : 'config_disabled' }) + '\n'); }
+    else      { out('review disabled (config: memory.review.enabled=false or mode=off)\n'); }
+    return 0;
+  }
+
+  if (!opts.reviewerCallLLM) {
+    if (json) { out(JSON.stringify({ outcome: 'no_llm_configured' }) + '\n'); }
+    else      { err('review --now: no LLM callback wired (the CLI binding must inject reviewerCallLLM)\n'); }
+    return 1;
+  }
+
+  const recentTurns = opts.reviewerRecentTurns
+    ? await opts.reviewerRecentTurns()
+    : [];
+
+  const liveMemoryRaw = await import('node:fs').then((m) => m.promises.readFile(paths.memoryMd, 'utf8').catch(() => ''));
+  const liveUserRaw   = await import('node:fs').then((m) => m.promises.readFile(paths.userMd,   'utf8').catch(() => ''));
+
+  // Wrap the review in a memory span so doctor / spans table track it.
+  const ctx = buildCliCtx('memory_review');
+  let outcome: import('../../../core/v4/memory/reviewer').ReviewOutcome | null = null;
+  await withMemorySpan(ctx, 'review', 'memory', async () => {
+    outcome = await runReview({
+      recentTurns, liveMemoryRaw, liveUserRaw,
+      memoryPath: paths.memoryMd, userPath: paths.userMd,
+      callLLM:        opts.reviewerCallLLM!,
+      maxCandidates:  cfg.maxCandidates,
+      timeoutMs:      cfg.timeoutMs,
+      log: (level, msg) => {
+        if (level === 'error') err(msg + '\n');
+        else                   out(msg + '\n');
+      },
+    });
+    return outcome;
+  });
+
+  if (json) {
+    out(JSON.stringify(outcome, null, 2) + '\n');
+  } else {
+    const o = outcome!;
+    if (o.outcome === 'ok') {
+      out(`review ok: proposed=${o.candidatesProposed.length} duration=${o.durationMs}ms\n`);
+      for (const c of o.candidatesProposed) {
+        out(`  ${c.memId}  [${c.file}]  ${c.text}\n`);
+      }
+    } else if (o.outcome === 'timeout') {
+      out(`review timed out after ${o.durationMs}ms (no candidates produced — user unaffected)\n`);
+    } else if (o.outcome === 'error') {
+      out(`review error (fail-open): ${o.error} (no candidates produced)\n`);
+    } else {
+      out(`review disabled: ${(o as { reason?: string }).reason ?? ''}\n`);
+    }
+  }
+  return 0;
+}
+
