@@ -65,7 +65,7 @@ interface DaemonStatusSnapshot {
 
 export const daemonStatus: SlashCommand = {
   name: 'daemon',
-  description: 'Show v4.5 daemon status (read-only). Use `aiden daemon` for lifecycle.',
+  description: 'Show daemon status (read-only). Use `aiden daemon` for lifecycle.',
   category: 'system',
   icon: '⚙',
   handler: async (ctx) => {

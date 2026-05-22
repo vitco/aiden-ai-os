@@ -458,7 +458,7 @@ async function runAddEmail(
   out(`poll interval: ${spec.pollIntervalMs}ms\n`);
   out(`allow-senders: ${spec.allowedSenders.join(', ')}\n`);
   out(`⚠ Password stored in plaintext in daemon.db (chmod 600 on POSIX,\n`);
-  out(`  user-private on Windows). Encryption-at-rest is deferred to v4.6+.\n`);
+  out(`  user-private on Windows). Encryption-at-rest is deferred to a future release.\n`);
   out(`Restart the daemon to activate the trigger.\n`);
   // Note: runAddEmail returns a Promise<number>, so the outer switch must
   // await it. (Already handled — runTriggerSubcommand is async.)

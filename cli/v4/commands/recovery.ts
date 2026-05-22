@@ -35,7 +35,7 @@ function pad(value: string | number, width: number): string {
 
 export const recovery: SlashCommand = {
   name: 'recovery',
-  description: 'Inspect recurring failure patterns + recoveries (v4.6 Phase 3b).',
+  description: 'Inspect recurring failure patterns + recoveries.',
   category: 'system',
   icon: '🩹',
   handler: async (ctx) => {

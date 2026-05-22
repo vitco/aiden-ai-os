@@ -297,7 +297,7 @@ async function runInstallMacOS(io: CtxIO): Promise<number> {
 async function runInstallWindows(io: CtxIO): Promise<number> {
   io.out(windowsServiceGuidance());
   io.out('\n');
-  io.out('See docs/v4.5/daemon-windows.md for the full walkthrough.\n');
+  io.out('See docs/daemon-windows.md for the full walkthrough.\n');
   return 0;
 }
 
