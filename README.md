@@ -105,6 +105,13 @@ Windows · Linux · WSL · macOS (API Mode)
 
 
 
+https://github.com/user-attachments/assets/1081e5c5-f1ec-4980-b710-1640981ec58b
+
+
+
+
+
+
 > A semi-autonomous AI agent that runs on your machine. Touches your files, browser, and shell. Remembers what matters. Built solo. Open source. Still rough in spots.
 
 <br>
@@ -130,7 +137,13 @@ Drop a file in `~/Documents/inbox/anything.txt` and Aiden acts on it. The agent 
 
 <br>
 
-![Aiden in action](docs/screenshots/autonomy.png)
+
+
+
+
+https://github.com/user-attachments/assets/7a66bc19-8b17-4b01-be85-3aa5945a1b3b
+
+
 
 <br>
 
@@ -219,6 +232,13 @@ Full v4.5 internals: [`docs/v4.5/`](docs/v4.5/) (overview, triggers, architectur
 | **MCP** | Model Context Protocol bridge — stdio + HTTP transports, schema discovery, tool dispatch. |
 | **Security moat** | Tiered approval engine (`safe` / `caution` / `dangerous`), dangerous-command pattern classifier, honesty enforcement (post-loop scan rewrites false claims), memory guard, planner-guard tool narrowing, SSRF-safe URL fetcher, secret/PII pre-write scanner, skill-teacher (auto-create skills from successful flows). |
 
+
+
+
+https://github.com/user-attachments/assets/a76bf4a5-28ca-43b5-8975-5ef0a66ee90d
+
+
+
 <br>
 
 ## Architecture
@@ -228,6 +248,13 @@ Aiden is a local-first agent loop: provider adapters feed a 90-turn ceiling, eve
 Detailed diagrams + module map in [`docs/v4.5/architecture.md`](docs/v4.5/architecture.md).
 
 <br>
+
+
+
+
+https://github.com/user-attachments/assets/323c9aa7-959a-425a-a5b3-4bae2b1a14bc
+
+
 
 ## Install + first run
 
@@ -283,6 +310,10 @@ Remove-Item -Recurse -Force $env:LOCALAPPDATA\aiden
 <br>
 
 <img width="938" height="1049" alt="preview (3)" src="https://github.com/user-attachments/assets/4e32ae38-74ad-433d-b986-0a15bc2dffec" />
+
+
+
+https://github.com/user-attachments/assets/398e1d48-cc5a-4fb5-a195-05dbef824198
 
 
 ## Recommended terminal setup
@@ -487,6 +518,21 @@ Common issues live in [`docs/v4.5/troubleshooting.md`](docs/v4.5/troubleshooting
 - **Boot stuck on wizard** — non-TTY stdin (CI / piped); set provider env var or use `--no-ui`
 - **`/help` doesn't list a command** — that command likely needs an active session field; run from a real REPL
 - **`npm install` permission errors on Windows** — install into a real folder (not a drive root like `S:\`)
+
+
+
+
+https://github.com/user-attachments/assets/3acc997f-1d71-45d1-9955-11b67abd0c50
+
+
+
+https://github.com/user-attachments/assets/9e734168-cf76-4cc0-975a-379e5402ee90
+
+
+
+https://github.com/user-attachments/assets/5e7011a5-630d-43bd-8ed3-67084c7645db
+
+
 
 <br>
 
