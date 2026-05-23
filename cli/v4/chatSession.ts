@@ -1927,6 +1927,10 @@ export class ChatSession implements ChatSessionLike {
     // .update_check.json cache so subsequent boots stay quiet until
     // a newer release ships.
     try {
+      // v4.9.1 — modal sits BELOW the welcome banner with a blank
+      // separator. Prevents the box from visually overlapping the
+      // boot card on first-paint (smoke-reported regression).
+      display.write('\n');
       await this.maybeShowBootUpdatePrompt();
     } catch { /* never let the update prompt crash boot */ }
 
@@ -1986,12 +1990,23 @@ export class ChatSession implements ChatSessionLike {
 
     if (choice === 'install') {
       if (method.inProcessInstallSupported) {
-        this.opts.display.write(`Installing aiden-runtime ${status.latest}…\n`);
-        const result = await ei.executeInstall({ packageSpec: `aiden-runtime@${status.latest}` });
+        // v4.9.1 — drive a live progress bar off the executor's
+        // phase callback. The bar degrades cleanly on non-TTY, NO_COLOR,
+        // and dumb terminals — see cli/v4/ui/progressBar.ts.
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const pb = require('./ui/progressBar') as typeof import('./ui/progressBar');
+        const bar = pb.startProgressBar({
+          label:  `Installing aiden-runtime ${status.latest}...`,
+          phases: ['spawning', 'resolving', 'downloading', 'extracting', 'verifying', 'installed'],
+        });
+        const result = await ei.executeInstall({
+          packageSpec: `aiden-runtime@${status.latest}`,
+          onPhase: (p) => { bar.setPhase(p); bar.setPercent(pb.npmInstallPhasePercent(p)); },
+        });
         if (result.success) {
-          this.opts.display.write(`  ✓ aiden-runtime ${result.installedVersion ?? status.latest} installed.\n`);
-          this.opts.display.dim('Restart Aiden to apply: type /quit then re-run `aiden`.');
+          bar.complete(`aiden-runtime ${result.installedVersion ?? status.latest} installed. Restart Aiden to apply: type /quit then re-run \`aiden\`.`);
         } else {
+          bar.fail('Install failed.');
           this.opts.display.warn(result.error ?? 'Install failed (no error message).');
         }
       } else {

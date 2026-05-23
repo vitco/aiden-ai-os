@@ -141,9 +141,10 @@ describe('executeInstall — permission denied', () => {
       platform: 'linux',
     });
     expect(result.success).toBe(false);
+    // v4.9.1 — message wording refreshed (platformInstructions builder).
     expect(result.error).toContain('permission denied');
     expect(result.error).toContain('sudo npm install -g aiden-runtime@latest');
-    expect(result.error).toContain('npm config set prefix ~/.npm-global');
+    expect(result.error).toMatch(/npm config set prefix "[^"]*\.npm-global"/);
   });
 
   it('detects EPERM / "access is denied" → Windows admin remediation', async () => {
@@ -169,7 +170,9 @@ describe('executeInstall — permission denied', () => {
       spawnImpl: spawnImpl as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
       platform: 'darwin',
     });
-    expect(result.error).toContain('macOS / Linux');
+    // v4.9.1 — message wording refreshed; "darwin" now appears in headline,
+    // sudo path still the first remediation.
+    expect(result.error).toMatch(/sudo|darwin/);
     expect(result.error).toContain('sudo npm');
   });
 
@@ -183,7 +186,8 @@ describe('executeInstall — permission denied', () => {
         spawnImpl: spawnImpl as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
         platform,
       });
-      expect(result.error).toContain('user-local npm prefix');
+      // v4.9.1 — phrasing refreshed; Option 2 now reads "user-local prefix".
+      expect(result.error).toMatch(/user-local prefix/);
       expect(result.error).toContain('npm config set prefix');
     }
   });

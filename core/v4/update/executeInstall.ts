@@ -43,6 +43,10 @@
  */
 
 import { spawn as defaultSpawn, type SpawnOptions } from 'node:child_process';
+import os from 'node:os';
+import { splitStderr, logFilteredWarnings } from './depWarningFilter';
+import { permissionDeniedInstructions } from './platformInstructions';
+import { detectNpmPhase } from '../../../cli/v4/ui/progressBar';
 
 /** 90 s wall-clock cap. Generous on cold caches / slow networks. */
 export const INSTALL_TIMEOUT_MS = 90_000;
@@ -88,6 +92,17 @@ export interface ExecuteInstallOptions {
    * macOS / Linux branches independently.
    */
   platform?:    NodeJS.Platform;
+  /**
+   * v4.9.1 — phase callback fired as npm output is parsed. Lets the
+   * caller drive a progress bar without coupling the executor to
+   * the renderer. Phases: spawning → resolving → downloading →
+   * extracting → verifying → installed | failed.
+   */
+  onPhase?:     (phase: string) => void;
+  /** v4.9.1 — override home dir for tests / mock-platform smoke. */
+  home?:        string;
+  /** v4.9.1 — override env for shell detection. */
+  env?:         NodeJS.ProcessEnv;
 }
 
 const DEFAULT_PACKAGE_SPEC = 'aiden-runtime@latest';
@@ -108,6 +123,9 @@ export async function executeInstall(
   const timeoutMs   = opts.timeoutMs   ?? INSTALL_TIMEOUT_MS;
   const packageSpec = opts.packageSpec ?? DEFAULT_PACKAGE_SPEC;
   const platform    = opts.platform    ?? process.platform;
+  const home        = opts.home        ?? os.homedir();
+  const env         = opts.env         ?? process.env;
+  const onPhase     = opts.onPhase     ?? ((_p: string) => { /* noop */ });
 
   return new Promise<InstallResult>((resolve) => {
     const args: string[] = ['install', '-g', packageSpec];
@@ -124,6 +142,7 @@ export async function executeInstall(
       stdio: ['ignore', 'pipe', 'pipe'],
     };
 
+    onPhase('spawning');
     let child;
     try {
       child = spawn(cmd, args, spawnOpts);
@@ -138,11 +157,22 @@ export async function executeInstall(
 
     let stdoutBuf = '';
     let stderrBuf = '';
+    // v4.9.1 — parse phase signal off each chunk.
+    const tryEmitPhase = (chunk: string): void => {
+      for (const ln of chunk.split(/\r?\n/)) {
+        const p = detectNpmPhase(ln);
+        if (p) onPhase(p);
+      }
+    };
     child.stdout?.on('data', (chunk: Buffer | string) => {
-      stdoutBuf += chunk.toString();
+      const s = chunk.toString();
+      stdoutBuf += s;
+      tryEmitPhase(s);
     });
     child.stderr?.on('data', (chunk: Buffer | string) => {
-      stderrBuf += chunk.toString();
+      const s = chunk.toString();
+      stderrBuf += s;
+      tryEmitPhase(s);
     });
 
     // Timeout — kill the child + resolve as a failure with the captured
@@ -167,7 +197,10 @@ export async function executeInstall(
     child.on('close', (code) => {
       clearTimeout(timer);
       const stdout = stdoutBuf;
-      const stderr = stderrBuf;
+      // v4.9.1 — strip Node DEP* noise from stderr before any surfacing
+      // to the user. Filtered lines land in ~/.aiden/logs/update.log.
+      const { kept: stderr, filtered } = splitStderr(stderrBuf);
+      if (filtered) void logFilteredWarnings(filtered);
       const exitCode = code ?? -1;
 
       if (timedOut) {
@@ -182,15 +215,17 @@ export async function executeInstall(
 
       // Permission-denied: surface platform-specific remediations.
       if (isPermissionDenied(stdout, stderr, exitCode)) {
+        onPhase('failed');
         resolve({
           success: false,
-          error:   permissionDeniedMessage(platform),
+          error:   permissionDeniedMessage(platform, home, env),
           stdout, stderr, exitCode,
         });
         return;
       }
 
       if (exitCode !== 0) {
+        onPhase('failed');
         resolve({
           success: false,
           error:   `Install failed (npm exit ${exitCode}). ` +
@@ -203,6 +238,7 @@ export async function executeInstall(
 
       // Success — parse installed version from npm output. Pattern:
       // "+ aiden-runtime@4.1.3" or "added 1 package ... aiden-runtime@4.1.3"
+      onPhase('installed');
       const installedVersion = parseInstalledVersion(stdout) ?? parseInstalledVersion(stderr) ?? undefined;
       resolve({
         success: true,
@@ -242,40 +278,18 @@ function isPermissionDenied(
 }
 
 /**
- * Build the platform-specific copy-paste remediation. Provides three
- * distinct paths — system-wide-with-elevation (Windows admin),
- * sudo (macOS/Linux), or user-local-prefix (cross-platform) — so the
- * user has options without us trying to self-escalate to UAC/sudo
- * from inside the running REPL.
+ * v4.9.1 — Build the platform-specific copy-paste remediation. Delegates
+ * to `platformInstructions.ts` for the heavy lifting so the same builder
+ * powers both EPERM remediation + stale-prefix warnings + the future
+ * `aiden update --setup-user-prefix` helper.
  */
-function permissionDeniedMessage(platform: NodeJS.Platform): string {
-  const userLocal =
-    'Or use a user-local npm prefix to avoid privileges entirely:\n' +
-    '              npm config set prefix ~/.npm-global\n' +
-    '              export PATH=~/.npm-global/bin:$PATH    # add to your shell profile\n' +
-    '              npm install -g aiden-runtime@latest';
-
-  if (platform === 'win32') {
-    return [
-      'Install failed: permission denied (npm needs Administrator for global install).',
-      '',
-      'To update manually:',
-      '  Windows:  Open PowerShell as Administrator, then:',
-      '              npm install -g aiden-runtime@latest',
-      '',
-      userLocal,
-    ].join('\n');
-  }
-  // darwin / linux / others — sudo path.
-  return [
-    'Install failed: permission denied (npm needs sudo for global install).',
-    '',
-    'To update manually:',
-    '  macOS / Linux:',
-    '              sudo npm install -g aiden-runtime@latest',
-    '',
-    userLocal,
-  ].join('\n');
+function permissionDeniedMessage(
+  platform: NodeJS.Platform,
+  home:     string,
+  env:      NodeJS.ProcessEnv,
+): string {
+  const instr = permissionDeniedInstructions({ platform, home, env });
+  return [instr.headline, '', ...instr.steps].join('\n');
 }
 
 /**

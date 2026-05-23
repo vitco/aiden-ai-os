@@ -630,7 +630,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
   program
     .command('voice [args...]')
     .description(
-      'Voice diagnostics + one-shot TTS / transcribe (Phase v4.1-voice-cli). ' +
+      'Voice diagnostics + one-shot TTS / transcribe. ' +
       'Usage: aiden voice doctor | tts "<text>" | transcribe <file>',
     )
     .allowUnknownOption()
@@ -679,7 +679,7 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
   program
     .command('cron [args...]')
     .description(
-      'Cron diagnostics + one-shot list / run (Phase v4.1 hardened cron). ' +
+      'Cron diagnostics + one-shot list / run. ' +
       'Usage: aiden cron status | list | run <id>',
     )
     .allowUnknownOption()
