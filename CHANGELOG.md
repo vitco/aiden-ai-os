@@ -1,3 +1,20 @@
+## v4.9.3 — 2026-05-24
+
+The boot greeter.
+
+### Added
+- **Boot greeter** — Aiden now notices things on boot and may speak first. Detects last session's open items, update availability, time of day, and cwd changes. Says ONE thing, or stays silent. Silent on first-ever launch — `renderFirstRunHint` owns that moment. Passive decay rules prevent re-offering ignored items.
+- **`/greeter on | off | status`** slash command. Off is durable until re-enabled.
+- **`~/.aiden/.greeter-history.json`** state file tracks offer acceptance passively (no runtime hooks, no LLM calls — pure templated speech).
+
+### Known follow-ups for v4.10
+- Daemon-crash and hook-auto-disable scanners (Tier-1 templates wired, scanners deferred until daemon log + hook registry surfaces stabilize).
+- Git status scanner (needs per-cwd allowlist UX).
+- Real PTY integration tests (needs node-pty + cross-platform native compilation; in-process forced-TTY tests cover wiring for now).
+- Typing-suggestion cursor misalignment in REPL input area (carried from v4.9.0 — proper save/restore refactor needs the test-harness work planned for v4.10).
+
+---
+
 ## v4.9.2 — 2026-05-23
 
 Hotfix for Windows update install + REPL confirmation UX.
