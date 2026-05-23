@@ -6,19 +6,9 @@
  */
 /**
  * cli/v4/ui/progressBar.ts — v4.9.1 reusable progress animation.
- *
- * Phase-aware progress bar for long-running CLI operations (npm
- * install, future: large file transfers, batch jobs). Designed to
- * degrade cleanly across terminals + accessibility modes.
- *
- * Render modes (auto-detected, no caller config needed):
- *   - TTY + color           → `[████████░░░░░░░░░░] 42%  downloading  3.2s`
- *   - TTY + NO_COLOR=1      → same glyphs, no ANSI sequences
- *   - TTY + TERM=dumb / CI=1→ `#-` fallback for legacy / log-capturing terminals
- *   - Non-TTY (piped)       → plain text status lines once per second
- *
- * Cursor is hidden during animation, restored on complete / fail /
- * SIGINT. The interval is `unref()`ed so it never blocks process exit.
+ * Auto-detects TTY / NO_COLOR / TERM=dumb / CI to pick render mode
+ * (block glyphs vs `#-`, color vs plain, animated vs once-per-second
+ * non-TTY lines). Cursor hidden during animation, restored on exit.
  */
 
 import { Writable } from 'node:stream';
@@ -135,8 +125,7 @@ export function startProgressBar(opts: ProgressBarOptions): ProgressBar {
     try { out.write(s); } catch { /* swallow — never break caller */ }
   };
 
-  // Hide the cursor only when we expect to repaint in place. The
-  // SIGINT handler restores it.
+  // SIGINT: restore cursor + clear the partial line before bubbling.
   const onSigint = (): void => {
     try { write(ANSI_CLEAR_LINE + ANSI_SHOW_CURSOR); } catch { /* noop */ }
   };
@@ -144,8 +133,7 @@ export function startProgressBar(opts: ProgressBarOptions): ProgressBar {
     try { process.once('SIGINT', onSigint); } catch { /* noop */ }
   }
 
-  // Label line (paint once, immediately — provides context even if the
-  // bar itself never appears for a sub-300ms op).
+  // Label line paints once, immediately.
   write(`${mode.color ? ANSI_MUTED : ''}${opts.label}${mode.color ? ANSI_RESET : ''}\n`);
 
   const paint = (): void => {
@@ -157,13 +145,9 @@ export function startProgressBar(opts: ProgressBarOptions): ProgressBar {
       if (!painted) { write(ANSI_HIDE_CURSOR); painted = true; }
       write(ANSI_CLEAR_LINE + line);
     } else {
-      // Non-TTY: print once per second, plain text, newline-terminated.
       write(line + '\n');
     }
   };
-
-  // Animated mode repaints on a timer; non-TTY paints on each setPhase
-  // / setPercent so callers drive the cadence.
   let timer: NodeJS.Timeout | null = null;
   if (mode.animated) {
     timer = setInterval(paint, tickMs);
@@ -191,11 +175,7 @@ export function startProgressBar(opts: ProgressBarOptions): ProgressBar {
   };
 }
 
-/**
- * Map an npm install phase name to a default percent. Lets callers
- * with no fine-grained progress signal still produce a meaningful
- * bar shape.
- */
+/** npm install phase → default percent. Best-effort bar shaping. */
 export function npmInstallPhasePercent(phase: string): number {
   switch (phase) {
     case 'spawning':    return 3;
@@ -209,10 +189,7 @@ export function npmInstallPhasePercent(phase: string): number {
   }
 }
 
-/**
- * Detect the current npm phase from a stdout/stderr line. Order of
- * checks reflects observed npm 9/10/11 output ordering.
- */
+/** Detect npm phase from a stdout/stderr line. Checks ordered for npm 9/10/11. */
 export function detectNpmPhase(line: string): string | null {
   const l = line.toLowerCase();
   if (l.includes('added ') && l.includes('package'))   return 'verifying';

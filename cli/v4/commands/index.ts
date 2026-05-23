@@ -62,6 +62,9 @@ import { spawnPause } from './spawnPause';
 import { recovery } from './recovery';
 // ONB1 slice 10 — new-user guided tour.
 import { walkthrough } from './walkthrough';
+// v4.9.1 amendment — REPL slash surfaces for memory + hooks (mirrors CLI).
+import { memory } from './memorySlash';
+import { hooks }  from './hooksSlash';
 
 export {
   help,
@@ -113,6 +116,9 @@ export {
   recovery,
   // ONB1 slice 10 — new-user guided tour.
   walkthrough,
+  // v4.9.1 amendment.
+  memory,
+  hooks,
 };
 
 /** All built-in system commands, in canonical order. */
@@ -167,6 +173,9 @@ export const allCommands: SlashCommand[] = [
   recovery,
   // ONB1 slice 10 — new-user guided tour.
   walkthrough,
+  // v4.9.1 amendment — REPL slash surfaces mirroring CLI subcommands.
+  memory,
+  hooks,
   clear,
   quit,
 ];

@@ -97,6 +97,9 @@ export const SUBSECTION_MAP: Readonly<Record<string, Subsection>> = {
   recovery: 'System',
   // v4.6 ONB1 slice 10 — new-user guided tour.
   walkthrough: 'System',
+  // v4.9.1 amendment — REPL surfaces for memory + hooks (daemon already mapped).
+  memory: 'System',
+  hooks:  'System',
 
   // ── Authentication ──
   auth: 'Authentication',

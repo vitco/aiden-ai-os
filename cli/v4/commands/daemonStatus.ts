@@ -22,6 +22,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type { SlashCommand } from '../commandRegistry';
+import { runDaemonSubcommand } from './daemon';
 import {
   daemonDbPath,
   openDaemonDb,
@@ -63,33 +64,57 @@ interface DaemonStatusSnapshot {
   dailyBudget:       BudgetSummary | null;
 }
 
+/**
+ * v4.9.1 amendment — `/daemon` defaults to `doctor` and routes
+ * `doctor` / `logs` to the existing `runDaemonSubcommand`. The pure-
+ * REPL `/daemon status` (in-process snapshot) stays inline. Lifecycle
+ * ops shell-hint — they need terminal control we can't grant inside chat.
+ */
+export const DAEMON_SHELL_ONLY = new Set(['install', 'uninstall', 'start', 'stop', 'restart']);
+
+type RunDaemon = (action: string, args: string[], opts: {
+  writeOut?: (s: string) => void; writeErr?: (s: string) => void;
+}) => Promise<number>;
+
+export async function dispatchDaemonSlash(opts: {
+  action: string;
+  args:   string[];
+  write:  (s: string) => void;
+  warn:   (s: string) => void;
+  runDaemon:  RunDaemon;
+  /** Optional inline `status` painter — production wires `printSnapshot`. */
+  paintStatus?: () => void;
+}): Promise<void> {
+  const a = (opts.action || 'doctor').toLowerCase();
+  if (DAEMON_SHELL_ONLY.has(a)) {
+    opts.write(`⚠ /daemon ${a} not available inside chat (requires terminal control)\n`);
+    opts.write('  Quit (/quit) and run from shell:\n\n');
+    const tail = opts.args.length > 0 ? ' ' + opts.args.join(' ') : '';
+    opts.write(`    aiden daemon ${a}${tail}\n`);
+    return;
+  }
+  if (a === 'status' && opts.paintStatus) {
+    try { opts.paintStatus(); }
+    catch (e) { opts.warn(`/daemon status: failed to read state (${e instanceof Error ? e.message : String(e)})`); }
+    return;
+  }
+  await opts.runDaemon(a, opts.args, { writeOut: opts.write, writeErr: opts.write });
+}
+
 export const daemonStatus: SlashCommand = {
   name: 'daemon',
-  description: 'Show daemon status (read-only). Use `aiden daemon` for lifecycle.',
+  description: 'Daemon diagnostics (doctor / status / logs).',
   category: 'system',
   icon: '⚙',
   handler: async (ctx) => {
-    const sub = (ctx.args[0] ?? 'status').toLowerCase();
-    if (sub !== 'status') {
-      ctx.display.printError(
-        'Usage: /daemon status\n' +
-        'For lifecycle commands (install / start / stop / restart / logs), use the top-level CLI:\n' +
-        '  aiden daemon install\n' +
-        '  aiden daemon start\n' +
-        '  aiden daemon stop\n' +
-        '  aiden daemon status\n' +
-        '  aiden daemon logs',
-      );
-      return {};
-    }
-    try {
-      const snapshot = readSnapshot();
-      printSnapshot(snapshot, ctx);
-    } catch (e) {
-      ctx.display.warn(
-        `/daemon status: failed to read state (${e instanceof Error ? e.message : String(e)})`,
-      );
-    }
+    await dispatchDaemonSlash({
+      action: ctx.args[0] ?? 'doctor',
+      args:   ctx.args.slice(1),
+      write:  (s) => ctx.display.write(s),
+      warn:   (s) => ctx.display.warn(s),
+      runDaemon: runDaemonSubcommand,
+      paintStatus: () => printSnapshot(readSnapshot(), ctx),
+    });
     return {};
   },
 };

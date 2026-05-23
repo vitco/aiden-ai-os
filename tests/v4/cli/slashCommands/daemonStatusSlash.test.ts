@@ -134,12 +134,13 @@ describe('/daemon status — running daemon', () => {
   });
 });
 
-describe('/daemon — unknown subarg', () => {
-  it('prints usage hint pointing at the top-level CLI', async () => {
+describe('/daemon — lifecycle ops', () => {
+  it('prints shell hint pointing at the top-level CLI (v4.9.1 amendment)', async () => {
     const ctx = mkCtx(['install']);
     await daemonStatus.handler(ctx);
-    const errs = ctx._errs.join('');
-    expect(errs).toMatch(/Usage: \/daemon status/);
-    expect(errs).toMatch(/aiden daemon install/);
+    // v4.9.1 — lifecycle hints now flow through display.write (not printError).
+    const out = ctx._lines.join('') + ctx._errs.join('');
+    expect(out).toMatch(/not available inside chat/);
+    expect(out).toMatch(/aiden daemon install/);
   });
 });

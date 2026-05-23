@@ -2,6 +2,9 @@
 
 Same-day hotfix for the Windows update flow + install UX polish.
 
+### Added (post-release amendment)
+- **REPL slash commands** for memory + hooks + daemon — manage Aiden without quitting the chat. Read-only and safe-mutating ops execute inline; destructive ops (`/memory remove`, `/hooks trust`, `/daemon start`) show a shell hint with the correct CLI command.
+
 ### Fixed
 - **Windows update permission denied** — `/update install` now shows correct PowerShell instructions (not bash `export` syntax)
 - **Update modal overlap** — update prompt no longer stacks on welcome banner
