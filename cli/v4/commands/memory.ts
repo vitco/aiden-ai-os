@@ -189,10 +189,14 @@ export async function runMemorySubcommand(
     case 'review':   return cmdReview(args, paths, opts, out, err, json);
     case '--help':
     case 'help':     return cmdHelp(out);
-    default:
+    default: {
       err(`Unknown memory action: ${effective}\n`);
+      const { closestAction } = await import('../util/closestAction');
+      const m = closestAction(effective, ['list','show','add','remove','edit','backup','restore','diff','namespaces','pending','approve','reject','review']);
+      if (m) err(`Did you mean: ${m}?\n\n`);
       cmdHelp(err);
       return 2;
+    }
   }
 }
 

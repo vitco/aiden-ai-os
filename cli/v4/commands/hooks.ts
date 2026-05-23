@@ -104,10 +104,14 @@ export async function runHooksSubcommand(
       case 'audit':    return await cmdAudit(ctx);
       case '--help':
       case 'help':     return cmdHelp(out);
-      default:
+      default: {
         err(`Unknown hooks action: ${effective}\n`);
+        const { closestAction } = await import('../util/closestAction');
+        const m = closestAction(effective, ['list','show','trust','revoke','rescan','test','doctor','audit']);
+        if (m) err(`Did you mean: ${m}?\n\n`);
         cmdHelp(err);
         return 2;
+      }
     }
   } finally {
     try { db.close(); } catch { /* noop */ }

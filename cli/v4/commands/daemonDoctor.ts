@@ -122,7 +122,7 @@ export function collectDoctorChecks(rootDir: string): CheckResult[] {
                  exit_reason: string | null } | undefined;
     if (!inc) {
       checks.push({ name: 'recent incarnation', status: 'warn',
-        detail: 'no daemon_incarnations rows (daemon never booted post-Slice-4)',
+        detail: 'no daemon_incarnations rows (daemon never started in this root)',
         fixable: false });
     } else {
       const closedDetail = inc.ended_at

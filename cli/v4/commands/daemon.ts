@@ -87,10 +87,14 @@ export async function runDaemonSubcommand(
         writeErr: err,
       });
     }
-    default:
+    default: {
       err(`Unknown daemon action: ${action}\n`);
+      const { closestAction } = await import('../util/closestAction');
+      const m = closestAction(action, ['install','uninstall','start','stop','restart','status','logs','doctor']);
+      if (m) err(`Did you mean: ${m}?\n\n`);
       err('Actions: install, uninstall, start, stop, restart, status, logs, doctor\n');
       return 2;
+    }
   }
 }
 
