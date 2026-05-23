@@ -1,3 +1,17 @@
+## v4.9.2 — 2026-05-23
+
+Hotfix for Windows update install + REPL confirmation UX.
+
+### Fixed
+- **Windows `/update install` spawn EINVAL** — `npm.cmd` now spawns cleanly via `cmd.exe /c` on Windows. MCP server connect (`npx`-based MCP installs) gets the same fix.
+- **REPL confirmation prompts now visible** — `(y/N)` hint, distinct `?` glyph, explicit cancellation reasons. Affects `/channel telegram remove`/`takeover`, `/cron remove`, `/plugins install`/`uninstall`.
+
+### Known follow-ups for v4.10
+- Typing-suggestion cursor misalignment in REPL input area (carried from v4.9.0 — proper save/restore refactor needs the test-harness work planned for v4.10).
+- Hooks subprocess runner + MCP install healthCheck still use the older spawn pattern (same root cause as Windows update spawn, lower exposure in practice — migration scheduled for v4.10).
+
+---
+
 ## v4.9.1 — 2026-05-23
 
 Same-day hotfix for the Windows update flow + install UX polish.
