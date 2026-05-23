@@ -39,7 +39,6 @@ import {
   makeTheme,
   type Theme,
 } from '@inquirer/core';
-import ansiEscapes from 'ansi-escapes';
 
 import { findGhost } from './ghostMatch';
 import { getSkinEngine } from './skinEngine';
@@ -345,39 +344,21 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
   let line: string;
   if (status === 'done') {
     line = `${message} ${theme.style.answer(value)}`;
-  } else if (ghost) {
-    // v4.9.2 Bug D — inline ghost confuses @inquirer/core's prompt-length
-    // math (screen-manager.js:28-32 strips rl.line.length bytes from the
-    // END of the rendered line to recover the prompt, but our ghost is
-    // there — so the cursor lands ghost.length cols past end-of-value,
-    // jumping to the next visual row on terminal-wrapped lines).
-    //
-    // Post-pending cursorBackward(ghost.length) walks the cursor back
-    // over the ghost AFTER it renders, so the visible suggestion stays
-    // inline while the cursor parks at end-of-value where the user is
-    // typing. Architecturally a hotfix; the proper save/restore refactor
-    // is deferred to v4.10 once this slice's test harness can guard it.
-    const ghostStr = dim(ghost);
-    line = `${prefix} ${message}${value}${ghostStr}${ansiEscapes.cursorBackward(ghost.length)}`;
-    // v4.9.2 Bug D diagnostic — REMOVE BEFORE LANDING.
-    // File-only log (no stdout — would corrupt the REPL prompt) confirms
-    // this branch fires when the user types in a real interactive REPL.
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const fs   = require('node:fs') as typeof import('node:fs');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const path = require('node:path') as typeof import('node:path');
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const os   = require('node:os')   as typeof import('node:os');
-      const dir = path.join(os.homedir(), '.aiden', 'logs');
-      fs.mkdirSync(dir, { recursive: true });
-      fs.appendFileSync(
-        path.join(dir, 'aidenPrompt-bugD.log'),
-        `${new Date().toISOString()} ghost-branch fired: value=${JSON.stringify(value)} ghost=${JSON.stringify(ghost)} isTTY=${process.stdout.isTTY}\n`,
-      );
-    } catch { /* never let diagnostic IO crash the prompt */ }
   } else {
-    line = `${prefix} ${message}${value}`;
+    // v4.9.2 Slice 2 (commit 0d0668f1) attempted to fix cursor
+    // misalignment by post-pending cursorBackward(ghost.length).
+    // Live-REPL diagnostic proved the fix is structurally inert:
+    // @inquirer/core's screen-manager.js:56 appends an ABSOLUTE
+    // cursorTo(this.cursorPos.cols) AFTER our content, overriding
+    // any cursor-positioning escape we emit inline. The real fix
+    // requires either rendering the ghost via a side-channel post-
+    // render write or moving it out of the inline line entirely —
+    // both need the proper save/restore refactor scheduled for v4.10
+    // once the prompt has a real screen-manager-aware test harness.
+    // Reverted here so the shipped v4.9.2 doesn't carry a "fix" that
+    // doesn't fix anything. Bug D status: known, deferred.
+    const ghostStr = ghost ? dim(ghost) : '';
+    line = `${prefix} ${message}${value}${ghostStr}`;
   }
 
   // Footer (dropdown). Returning a tuple `[line, footer]` adds the
