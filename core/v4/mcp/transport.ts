@@ -21,6 +21,7 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import { spawnCommand } from '../util/spawnCommand';
 
 export type McpNotificationHandler = (method: string, params: unknown) => void;
 
@@ -97,19 +98,18 @@ export class StdioTransport implements McpTransport {
     this.defaultTimeout = opts.defaultTimeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.log = opts.log;
 
-    const spawner = opts.spawnFn ?? spawn;
-    // Windows .cmd/.bat shims (npx.cmd) can't be spawned with shell:false
-    // (Node 18.20+ refuses with EINVAL), and shell:true mangles arguments
-    // containing path separators. Callers should resolve the underlying
-    // executable themselves — e.g., spawn `node <npx-cli.js>` instead of
-    // `npx.cmd`. Phase 11 integration tests demonstrate this pattern in
-    // tests/v4/integration/mcpClient.real.test.ts::resolveNpxLaunch.
-    this.proc = spawner(opts.command, opts.args, {
-      stdio: ['pipe', 'pipe', 'pipe'],
-      env: opts.env,
-      cwd: opts.cwd,
-      shell: false,
+    // v4.9.2 — cross-platform spawn via shared helper. Windows .cmd/.bat
+    // shims (npx.cmd is the canonical MCP server case) are wrapped
+    // through `cmd.exe /d /s /c` with escaped args; Unix and .exe paths
+    // go direct. No shell:true anywhere — argument injection against
+    // user-supplied MCP server configs is prevented at the helper layer.
+    const { child } = spawnCommand(opts.command, opts.args, {
+      stdio:     ['pipe', 'pipe', 'pipe'],
+      env:       opts.env,
+      cwd:       opts.cwd,
+      spawnImpl: opts.spawnFn ?? spawn,
     });
+    this.proc = child;
 
     this.proc.stdout?.setEncoding('utf8');
     this.proc.stderr?.setEncoding('utf8');

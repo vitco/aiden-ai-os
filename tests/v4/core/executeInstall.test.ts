@@ -79,46 +79,49 @@ describe('executeInstall — happy path', () => {
     expect(result.exitCode).toBe(0);
   });
 
-  it('passes the canonical `install -g aiden-runtime@latest` args', async () => {
-    // v4.8.1 Slice 2 — platform defaults to the host platform; on
-    // Windows the spawn target is `npm.cmd`, elsewhere `npm`. Default
-    // path here mirrors the host so we don't pin platform.
-    const expectedCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+  it('passes the canonical `install -g aiden-runtime@latest` args (POSIX path)', async () => {
+    // v4.9.2 — pin to linux so we exercise the direct-spawn shape. The
+    // Windows cmd.exe wrapping is covered by the separate test below.
     const spawnImpl = fakeSpawn({ stdout: '+ aiden-runtime@4.1.3', exitCode: 0 });
-    await executeInstall({ spawnImpl: spawnImpl as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'] });
+    await executeInstall({
+      spawnImpl: spawnImpl as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
+      platform: 'linux',
+    });
     expect(spawnImpl).toHaveBeenCalledWith(
-      expectedCmd,
+      'npm',
       ['install', '-g', 'aiden-runtime@latest'],
       expect.objectContaining({ stdio: ['ignore', 'pipe', 'pipe'] }),
     );
   });
 
   it('honors a custom packageSpec override (test seam)', async () => {
-    const expectedCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
     const spawnImpl = fakeSpawn({ stdout: '+ aiden-runtime@4.1.4', exitCode: 0 });
     await executeInstall({
       spawnImpl: spawnImpl as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
       packageSpec: 'aiden-runtime@beta',
+      platform: 'linux',
     });
     expect(spawnImpl).toHaveBeenCalledWith(
-      expectedCmd,
+      'npm',
       ['install', '-g', 'aiden-runtime@beta'],
       expect.any(Object),
     );
   });
 
-  it('spawns npm.cmd on win32, npm elsewhere, never with shell:true (v4.8.1 Slice 2)', async () => {
-    // v4.8.1 Slice 2 — `shell: true` paired with an args array
-    // triggers Node 20+ DeprecationWarning. We now spawn `npm.cmd`
-    // explicitly on Windows (no PATHEXT lookup needed) and `npm`
-    // elsewhere. Neither path sets shell:true.
+  it('routes via cmd.exe on win32, direct npm elsewhere, never with shell:true (v4.9.2)', async () => {
+    // v4.9.2 — the helper wraps Windows npm.cmd via `cmd.exe /d /s /c`
+    // (escaped args) so Node 20+ EINVAL on .cmd shims is avoided
+    // without resorting to shell:true (argument injection risk).
+    // On POSIX it's a direct `npm` spawn. Neither sets shell:true.
     const winSpawn = fakeSpawn({ stdout: '+ aiden-runtime@4.1.3', exitCode: 0 });
     await executeInstall({
       spawnImpl: winSpawn as unknown as Parameters<typeof executeInstall>[0]['spawnImpl'],
       platform: 'win32',
     });
-    expect(winSpawn.mock.calls[0]?.[0]).toBe('npm.cmd');
+    expect(winSpawn.mock.calls[0]?.[0]).toBe('cmd.exe');
+    expect((winSpawn.mock.calls[0]?.[1] as string[])[0]).toBe('/d');
     expect(winSpawn.mock.calls[0]?.[2]?.shell).toBeFalsy();
+    expect(winSpawn.mock.calls[0]?.[2]?.windowsVerbatimArguments).toBe(true);
 
     const linuxSpawn = fakeSpawn({ stdout: '+ aiden-runtime@4.1.3', exitCode: 0 });
     await executeInstall({

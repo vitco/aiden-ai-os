@@ -16,54 +16,22 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { promises as fs, existsSync } from 'node:fs';
+import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 
 import { McpClient, createMcpClient } from '../../../core/v4/mcpClient';
 import { ToolRegistry } from '../../../core/v4/toolRegistry';
+import { resolveCommand } from '../../../core/v4/util/spawnCommand';
 
-function findExecutable(name: string): string | null {
-  const candidates = process.platform === 'win32'
-    ? [`${name}.cmd`, `${name}.exe`, name]
-    : [name];
-  const pathDirs = (process.env.PATH ?? '').split(path.delimiter);
-  for (const c of candidates) {
-    for (const dir of pathDirs) {
-      if (!dir) continue;
-      const full = path.join(dir, c);
-      if (existsSync(full)) return full;
-    }
-  }
-  return null;
-}
-
-/**
- * Resolve an npx invocation to a `(command, args)` pair that spawn() can
- * run with shell:false reliably. On Windows we bypass `npx.cmd` (which
- * Node 18.20+ refuses with EINVAL under shell:false, and which mangles
- * args when run under shell:true) by invoking `node <npx-cli.js>` directly.
- *
- * Returns null if neither node + npx-cli.js nor npx itself can be found.
- */
-function resolveNpxLaunch(extraArgs: string[]): { command: string; args: string[] } | null {
-  if (process.platform === 'win32') {
-    const nodeExe = findExecutable('node') ?? process.execPath;
-    if (!nodeExe) return null;
-    // npx-cli.js sits next to node.exe in the npm bundle.
-    const nodeDir = path.dirname(nodeExe);
-    const npxCli = path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npx-cli.js');
-    if (!existsSync(npxCli)) return null;
-    return { command: nodeExe, args: [npxCli, ...extraArgs] };
-  }
-  const npx = findExecutable('npx');
-  if (!npx) return null;
-  return { command: npx, args: extraArgs };
-}
-
-const NPX_LAUNCH_PROBE = resolveNpxLaunch([]);
-const NPX_AVAILABLE = NPX_LAUNCH_PROBE !== null;
+// v4.9.2 — pre-v4.9.2 this file shipped a `resolveNpxLaunch` workaround
+// that translated `npx` → `node <npx-cli.js>` on Windows because the
+// transport spawned `.cmd` files directly and Node 18.20+/20+ refused
+// with EINVAL. core/v4/util/spawnCommand.ts now wraps `.cmd`/`.bat`
+// shims through `cmd.exe /d /s /c` at the transport layer, so the
+// workaround is dead and the test can just spawn `npx` directly.
+const NPX_AVAILABLE = resolveCommand('npx') !== null;
 
 describe.skipIf(!NPX_AVAILABLE)('McpClient with real filesystem MCP server', () => {
   it('connects, discovers tools, and calls list_directory', async () => {
@@ -76,11 +44,13 @@ describe.skipIf(!NPX_AVAILABLE)('McpClient with real filesystem MCP server', () 
 
     let server;
     try {
-      const launch = resolveNpxLaunch(['-y', '@modelcontextprotocol/server-filesystem', tmp]);
       server = await client.connect({
         name: 'fs',
         type: 'stdio',
-        stdio: { command: launch!.command, args: launch!.args },
+        stdio: {
+          command: 'npx',
+          args: ['-y', '@modelcontextprotocol/server-filesystem', tmp],
+        },
         callTimeoutMs: 60_000,
       });
     } catch (err) {
@@ -132,11 +102,13 @@ describe.skipIf(!NPX_AVAILABLE)('McpClient with real filesystem MCP server', () 
 
     let connected = false;
     try {
-      const launch = resolveNpxLaunch(['-y', '@modelcontextprotocol/server-filesystem', tmp]);
       await client.connect({
         name: 'fs2',
         type: 'stdio',
-        stdio: { command: launch!.command, args: launch!.args },
+        stdio: {
+          command: 'npx',
+          args: ['-y', '@modelcontextprotocol/server-filesystem', tmp],
+        },
         callTimeoutMs: 60_000,
       });
       connected = true;
@@ -183,11 +155,13 @@ describe.skipIf(!NPX_AVAILABLE)('AidenAgent + MCP plumbing (no LLM)', () => {
 
     let connected = false;
     try {
-      const launch = resolveNpxLaunch(['-y', '@modelcontextprotocol/server-filesystem', tmp]);
       await client.connect({
         name: 'fs3',
         type: 'stdio',
-        stdio: { command: launch!.command, args: launch!.args },
+        stdio: {
+          command: 'npx',
+          args: ['-y', '@modelcontextprotocol/server-filesystem', tmp],
+        },
         callTimeoutMs: 60_000,
       });
       connected = true;

@@ -42,11 +42,13 @@
  *     know whether an install is warranted.
  */
 
-import { spawn as defaultSpawn, type SpawnOptions } from 'node:child_process';
+import { spawn as defaultSpawn } from 'node:child_process';
 import os from 'node:os';
 import { splitStderr, logFilteredWarnings } from './depWarningFilter';
 import { permissionDeniedInstructions } from './platformInstructions';
 import { detectNpmPhase } from '../../../cli/v4/ui/progressBar';
+import { spawnCommand } from '../util/spawnCommand';
+import { writeRecoveryScript } from './recoveryScript';
 
 /** 90 s wall-clock cap. Generous on cold caches / slow networks. */
 export const INSTALL_TIMEOUT_MS = 90_000;
@@ -129,29 +131,36 @@ export async function executeInstall(
 
   return new Promise<InstallResult>((resolve) => {
     const args: string[] = ['install', '-g', packageSpec];
-    // v4.8.1 Slice 2 — drop `shell: true`. Node 20+ emits
-    // `DeprecationWarning: Passing args to a child process with shell
-    // option true can lead to security vulnerabilities` whenever
-    // shell:true is paired with an args array. We don't need the
-    // shell either — on Windows we spawn `npm.cmd` explicitly (the
-    // shim that PATHEXT would otherwise resolve to); on POSIX we
-    // spawn `npm` directly. No user input flows into argv on either
-    // path so the prior shell-resolution wasn't load-bearing.
-    const cmd = platform === 'win32' ? 'npm.cmd' : 'npm';
-    const spawnOpts: SpawnOptions = {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    };
-
+    // v4.9.2 — route through the shared spawnCommand helper. On
+    // Windows it wraps `npm.cmd` through `cmd.exe /d /s /c` with
+    // escaped args (no shell:true → no argument injection; no plain
+    // .cmd spawn → no Node 20+ EINVAL). On Unix it's a direct spawn.
     onPhase('spawning');
     let child;
     try {
-      child = spawn(cmd, args, spawnOpts);
-    } catch (err) {
-      resolve({
-        success: false,
-        error:   `Could not launch npm: ${(err as Error).message}. ` +
-                 `Run \`npm install -g aiden-runtime@latest\` manually.`,
+      const r = spawnCommand('npm', args, {
+        stdio:     ['ignore', 'pipe', 'pipe'],
+        platform,
+        spawnImpl: spawn,
       });
+      child = r.child;
+    } catch (err) {
+      // Synchronous spawn failure (helper crash, cmd.exe missing,
+      // invalid argv). Drop a recovery script the user can run by
+      // hand and report its path.
+      (async () => {
+        let recoveryPath: string | null = null;
+        try {
+          recoveryPath = await writeRecoveryScript({ platform, home, packageSpec });
+        } catch { /* best-effort */ }
+        resolve({
+          success: false,
+          error:   `Could not launch npm: ${(err as Error).message}. ` +
+                   (recoveryPath
+                     ? `A recovery script was written to ${recoveryPath} — run it to complete the install.`
+                     : `Run \`npm install -g ${packageSpec}\` manually.`),
+        });
+      })();
       return;
     }
 
