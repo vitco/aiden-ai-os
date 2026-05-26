@@ -308,6 +308,36 @@ async function telegramRemove(ctx: import('../commandRegistry').SlashCommandCont
   } else {
     display.dim('Telegram disabled. (No TELEGRAM_BOT_TOKEN entry was in .env.)');
   }
+
+  // v4.10 Slice 10.7 — honest UX disclosure. Aiden only owns the
+  // .env file + the in-process env var. If the user previously set
+  // the token via their shell (`setx TELEGRAM_BOT_TOKEN ...` on
+  // Windows or `export` in POSIX rc files), the next REPL launch
+  // would rehydrate it from the shell environment and silently
+  // re-enable Telegram. The remove command can't reach those
+  // surfaces — but it can tell the user what it can't clean.
+  display.dim('');
+  display.dim('Note: if you set the token via your shell, it may persist there.');
+  display.dim('  PowerShell user env: setx TELEGRAM_BOT_TOKEN ""');
+  display.dim('  POSIX shell:        unset TELEGRAM_BOT_TOKEN  (also edit ~/.bashrc / .zshrc)');
+
+  // v4.10 Slice 10.7 — defensive config.yaml scan. Aiden's config
+  // supports `${VAR}` interpolation; users sometimes embed the
+  // Telegram token from there too. If the file mentions
+  // ${TELEGRAM_BOT_TOKEN}, removing the env var leaves config.yaml
+  // pointing at an undefined variable — surface this so the user
+  // can prune that pointer before the next launch logs a warning.
+  try {
+    const fs = require('node:fs');
+    const path = require('node:path');
+    const configPath = path.join(ctx.paths.root, 'config.yaml');
+    const yaml = fs.readFileSync(configPath, 'utf8');
+    if (yaml.includes('${TELEGRAM_BOT_TOKEN}')) {
+      display.dim('');
+      display.warn('config.yaml references ${TELEGRAM_BOT_TOKEN}.');
+      display.dim('  Edit the file to drop that placeholder, otherwise the next REPL launch will fail to interpolate it.');
+    }
+  } catch { /* config.yaml unreadable or absent — silent skip */ }
 }
 
 // ── /channel telegram takeover ------------------------------------

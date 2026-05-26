@@ -155,6 +155,24 @@ export interface ToolHandler {
    */
   riskTier?: import('./sandboxConfig').RiskTier;
   /**
+   * v4.10 Slice 10.6 — fine-grained effects metadata. Layered on top
+   * of `category × riskTier × mutates` (the existing 3-axis taxonomy
+   * remains the source of truth for gate logic). Effects describe
+   * WHAT the tool touches; the approval-prompt renderer surfaces them
+   * as an "Effects:" line so users can see WHY a tool is gated, not
+   * just THAT it is.
+   *
+   * Tags are optional. Slice 10.6 ships the schema field + render
+   * path; tagging the 67+ existing tools is deferred to a follow-up
+   * (10.6b). Tools without `effects` show no "Effects:" line — the
+   * prompt UX degrades gracefully.
+   *
+   * Shape lives in `moat/approvalEngine.ts` as `ToolEffects`; the
+   * dispatch threads it through to `ApprovalRequest.effects` at
+   * the `checkApproval` call site below.
+   */
+  effects?: import('../../moat/approvalEngine').ToolEffects;
+  /**
    * v4.6 Phase 1 — the execution contexts in which this tool is
    * visible to the LLM. Default behaviour (when the field is
    * undefined): visible in both `repl` and `daemon` — matches every
@@ -358,6 +376,11 @@ export class ToolRegistry {
           riskTier,
           reason,
           preview,
+          // v4.10 Slice 10.6 — pass through fine-grained effects when
+          // the tool declares them. The approval-prompt renderer
+          // shows an "Effects:" line; tools without `effects` get
+          // no extra line (graceful degradation).
+          effects:  handler.effects,
         });
         if (!allowed) {
           return {

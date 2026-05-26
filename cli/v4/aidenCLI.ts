@@ -65,7 +65,12 @@ import os from 'node:os';
 import { daemonDbPath } from '../../core/v4/daemon/daemonConfig';
 import { openDaemonDb } from '../../core/v4/daemon/db/connection';
 import { createRunStore } from '../../core/v4/daemon/runStore';
+// v4.10 Slice 10.2b — shared event taxonomy. Tool name → (category, kind).
+import { categorizeEvent } from '../../core/v4/daemon/eventCategories';
 import { makeSpawnSubAgentTool } from '../../tools/v4/subagent/spawnSubAgentTool';
+// v4.10 Slice 10.2 — trace_query tool (REPL-only). Factory pattern
+// matches spawn_sub_agent: dependencies injected at registration.
+import { makeTraceQueryTool } from '../../tools/v4/trace/traceQuery';
 import type { Message as ProviderMessage } from '../../providers/v4/types';
 import { SkillCommands } from '../../core/v4/skillCommands';
 import { AidenAgent } from '../../core/v4/aidenAgent';
@@ -73,6 +78,11 @@ import { PromptBuilder } from '../../core/v4/promptBuilder';
 import { PersonalityManager } from '../../core/v4/personality';
 import { AuxiliaryClient } from '../../core/v4/auxiliaryClient';
 import { MemoryManager } from '../../core/v4/memoryManager';
+// v4.10 Slice 10.1b — boot-time project-root detection so the REPL's
+// MemoryManager can route memory_add file=project to the cwd's
+// project root. Without this wire, the tool always saw projectRoot=null
+// and threw via namespaceRegistry.resolve (bug found in smoke).
+import { findProjectRoot } from '../../core/v4/memory/projectRoot';
 
 import { ApprovalEngine } from '../../moat/approvalEngine';
 import {
@@ -241,6 +251,17 @@ export interface MainOptions {
   pathsOverride?: AidenPaths;
   /** Stub stdout writer (defaults to process.stdout.write). */
   writeOut?: (text: string) => void;
+  /**
+   * v4.9.5 Slice 1.6 — when true, `buildAgentRuntime` treats
+   * `wizardNeeded` as true regardless of detection AND passes
+   * `force: true` to the inner `runSetupWizard` call. Set by
+   * `runSetupSubcommand` so `aiden setup` re-runs the full
+   * disclaimer → loading → wizard flow even on a configured install,
+   * then drops into the REPL (via the existing handoff inside
+   * `runInteractiveChat`). Default undefined → no behaviour change
+   * for any other entry point.
+   */
+  forceSetup?: boolean;
 }
 
 /**
@@ -730,6 +751,31 @@ export async function main(argv: string[], opts: MainOptions = {}): Promise<numb
  * caller's job. It DOES read config + run the setup wizard if the install
  * is fresh, because both happen before the moat layers can be parameterised.
  */
+
+/**
+ * v4.10 Slice 10.1b — construct the REPL's MemoryManager with cwd-derived
+ * projectRoot. Single source of truth for the boot-time wiring so the
+ * integration test exercises the EXACT code path production uses (no
+ * `new MemoryManager({ paths, projectRoot })` shortcut in the test; if
+ * a future refactor severs the boot wire, the test fails).
+ *
+ * `cwd` parameter is test-only; production callers omit it and the
+ * default `process.cwd()` runs.
+ *
+ * Project root is FROZEN at REPL boot. Mid-session `git init` or cwd
+ * change is not auto-detected — matches the cache shape in
+ * projectRoot.ts (resolve once, reuse for the session). A
+ * `/memory project rescan` slash command is planned as a future
+ * power-user escape hatch (separate slice).
+ */
+export function createBootMemoryManager(
+  paths: AidenPaths,
+  cwd: string = process.cwd(),
+): MemoryManager {
+  const projectRoot = findProjectRoot(cwd);
+  return new MemoryManager({ paths, projectRoot });
+}
+
 export async function buildAgentRuntime(
   cliOpts: any,
   opts: MainOptions,
@@ -759,6 +805,11 @@ export async function buildAgentRuntime(
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(replInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), VERSION);
   const replRunStore = createRunStore({ db: replDb });
+  // v4.10 Slice 10.8 — durable Task-lite store. Shares the daemon.db
+  // handle with replRunStore so /tasks listing + /adjust mutations
+  // see the same WAL view chatSession's runAgentTurn writes through.
+  const { createTaskStore } = await import('../../core/v4/daemon/taskStore');
+  const replTaskStore = createTaskStore({ db: replDb });
 
   // v4.6 Phase 3A — operator kill-switch for sub-agent spawning.
   // Initialised as early as possible so any subsequent tool wiring
@@ -792,9 +843,24 @@ export async function buildAgentRuntime(
   // through `resolveParentRunId` / `resolveParentSessionId`
   // callbacks so any child spawned mid-turn is linked back to the
   // live REPL parent row via `runs.spawned_from_run_id`.
-  const replParentRunRef: { runId: number | null; sessionId: string | null } = {
-    runId:     null,
-    sessionId: null,
+  //
+  // v4.10 Slice 10.2c — `chatSessionId` is the LONG-LIVED REPL session
+  // id (mirror of ChatSession.sessionId, set once during run() init,
+  // never cleared between turns). `sessionId` above is the turn-scoped
+  // mirror that gets nulled on turn completion — fine for emitter
+  // sites (they're called only during a turn) but wrong for read
+  // surfaces like /trace recent and trace_query, which want "this
+  // conversation" not "this turn." Tracked separately so the
+  // existing per-turn lifecycle of `runId` / `sessionId` stays
+  // unchanged.
+  const replParentRunRef: {
+    runId:         number | null;
+    sessionId:     string | null;
+    chatSessionId: string | null;
+  } = {
+    runId:         null,
+    sessionId:     null,
+    chatSessionId: null,
   };
 
   // Phase 16c.2: load `paths.envFile` (the aiden-managed `.env` that
@@ -883,6 +949,7 @@ export async function buildAgentRuntime(
     !!detection.configProvider &&
     !detection.configuredProviderHasCredentials;
   const wizardNeeded =
+    !!opts.forceSetup ||
     !detection.hasAnyProvider ||
     configuredProviderBroken ||
     (await isFreshInstall(paths));
@@ -960,7 +1027,12 @@ export async function buildAgentRuntime(
 
     process.stdout.write('\n');
 
-    const result = await runSetupWizard({ paths });
+    // v4.9.5 Slice 1.6 — pass force when invoked via `aiden setup`
+    // subcommand so the wizard fires even when config.yaml is already
+    // populated. On true fresh installs `opts.forceSetup` is undefined
+    // (force=false) and isFreshInstall already gates inside the
+    // wizard; behavior unchanged for that path.
+    const result = await runSetupWizard({ paths, force: !!opts.forceSetup });
 
     // Phase 30.2.1: three exit states.
     if (result.status === 'exited') {
@@ -1110,7 +1182,13 @@ export async function buildAgentRuntime(
   registerAllTools(toolRegistry);
 
   // Memory + skill loader.
-  const memoryManager = new MemoryManager(paths);
+  // v4.10 Slice 10.1b — route through createBootMemoryManager so
+  // projectRoot is detected from cwd. The helper is exported below
+  // so the integration test exercises the SAME construction code path
+  // as production (Phase D: real boot wire, not a hand-assembled
+  // MemoryManager — the discipline gap that caused Slice 10.1's
+  // initial smoke failure).
+  const memoryManager = createBootMemoryManager(paths);
   // Phase 16b.2: malformed-skill warnings go to a file logger, not the
   // REPL spinner. The scan runs ONCE here and the result is cached on
   // the loader instance — every per-turn caller (chatSession banner,
@@ -1217,24 +1295,89 @@ export async function buildAgentRuntime(
     config.getValue<'manual' | 'smart' | 'off'>('agent.approval_mode', 'smart'),
   );
   if (cliOpts.yolo) approvalEngine.setMode('off');
-  // Phase 16f: hydrate persistent allowlist from disk so "Allow always"
-  // choices survive across REPL restarts.
-  try {
-    const raw = require('node:fs').readFileSync(paths.approvalsJson, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      approvalEngine.loadPersistentAllowlist(
-        parsed.filter(
-          (e: any) =>
-            e &&
-            typeof e.tool === 'string' &&
-            typeof e.signature === 'string',
-        ),
-      );
+  // Phase 16f / v4.10 Slice 10.6: hydrate persistent allowlist from
+  // BOTH sources so "Allow always" choices survive across REPL
+  // restarts AND project-specific permissions don't bleed across
+  // unrelated projects.
+  //
+  //   1. Global: <AIDEN_HOME>/approvals.json (existing Phase-16f path).
+  //   2. Project: <cwd>/.aiden/approvals.json (new Slice 10.6 path).
+  //
+  // Project entries load AFTER global, so a project-scoped grant
+  // shadows a global one for the same tool::signature (Map last-write-
+  // wins inside loadPersistentAllowlist). Each entry carries a
+  // `scope` marker so the future `aiden approvals list` surface
+  // can group by origin.
+  //
+  // Entry shape supports BOTH pre-10.6 `{tool, signature}` and the
+  // new `{tool, signature, createdAt, lastUsedAt}`. Legacy entries
+  // get Date.now() defaults at load; the next persistAllow write
+  // bakes timestamps into the file.
+  const fsForLoad = require('node:fs');
+  type LegacyOrNewEntry = {
+    tool:        string;
+    signature:   string;
+    createdAt?:  number;
+    lastUsedAt?: number;
+  };
+  function loadEntries(filePath: string, scope: 'global' | 'project'): Array<LegacyOrNewEntry & { scope: 'global' | 'project' }> {
+    try {
+      const raw = fsForLoad.readFileSync(filePath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      return parsed
+        .filter((e: any) => e && typeof e.tool === 'string' && typeof e.signature === 'string')
+        .map((e: any) => ({
+          tool:       e.tool,
+          signature:  e.signature,
+          createdAt:  typeof e.createdAt  === 'number' ? e.createdAt  : undefined,
+          lastUsedAt: typeof e.lastUsedAt === 'number' ? e.lastUsedAt : undefined,
+          scope,
+        }));
+    } catch {
+      // Missing or unreadable file is fine — no allowlist at that scope.
+      return [];
     }
-  } catch {
-    // Missing or unreadable file is fine — no permanent allowlist yet.
   }
+  const projectApprovalsJson = require('node:path').join(process.cwd(), '.aiden', 'approvals.json');
+  const allEntries = [
+    ...loadEntries(paths.approvalsJson, 'global'),
+    ...loadEntries(projectApprovalsJson, 'project'),
+  ];
+  if (allEntries.length > 0) approvalEngine.loadPersistentAllowlist(allEntries);
+
+  // v4.10 Slice 10.6 — refresh sink. When a permanent-allow entry
+  // short-circuits a prompt during a turn, the engine bumps its
+  // in-memory lastUsedAt. We persist the refreshed entry back to
+  // disk (best-effort) so the on-disk file remains an accurate
+  // audit trail of "what permissions actually got used recently."
+  // Throttling: a single hot tool could fire this many times per
+  // session; the rewrite cost is small (file is tiny) and atomic
+  // (tmp-rename pattern below).
+  approvalEngine.setRefreshSink((entry) => {
+    const targetPath = entry.scope === 'project' ? projectApprovalsJson : paths.approvalsJson;
+    try {
+      const fs = require('node:fs');
+      let cur: Array<Record<string, unknown>> = [];
+      try {
+        const raw = fs.readFileSync(targetPath, 'utf8');
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) cur = parsed;
+      } catch { /* fresh file */ }
+      let touched = false;
+      for (const e of cur) {
+        if (e.tool === entry.tool && e.signature === entry.signature) {
+          e.lastUsedAt = entry.lastUsedAt;
+          touched = true;
+          break;
+        }
+      }
+      if (!touched) return;       // entry isn't in this file — refresh is a no-op here
+      const tmp = `${targetPath}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(cur, null, 2), 'utf8');
+      fs.renameSync(tmp, targetPath);
+    } catch { /* refresh is best-effort; never crash a turn */ }
+  });
 
   // Auxiliary client (compression / risk-assessment / session-summary
   // / skill-describe). v4.8.0 Slice 11 — route through Groq's cheap
@@ -1282,13 +1425,88 @@ export async function buildAgentRuntime(
     riskAssess: callbacks.riskAssess,
     // v4.8.0 Phase 2.5 — paint the structured approval row before the
     // existing y/n prompt runs. Additive; promptApproval flow unchanged.
-    onUiEvent: (name: string, args: Record<string, unknown>) =>
-      display.renderUiEvent(name, args),
-    // Phase 16f: append-on-disk for "Allow always" choices. Single-process
-    // REPL — atomic write via tmp-then-rename.
+    // v4.10 Slice 10.2 — also tee into run_events when a parent run is
+    // in flight. Approval requests fired between turns (slash-command
+    // paths) skip persistence (no runId yet). Same try/catch shape as
+    // the chatSession site.
+    onUiEvent: (name: string, args: Record<string, unknown>) => {
+      display.renderUiEvent(name, args);
+      const rid = replParentRunRef.runId;
+      if (rid !== null) {
+        // v4.10 Slice 10.2b — rich emission with (category, kind, name)
+        // taxonomy. Source='repl' because the approvalEngine fires
+        // through the REPL surface, not the daemon dispatcher.
+        try {
+          const tags = categorizeEvent(name);
+          replRunStore.emitEventRich({
+            runId:     rid,
+            category:  tags.category,
+            kind:      tags.kind,
+            name,
+            sessionId: replParentRunRef.sessionId ?? null,
+            payload:   args,
+            visibility:'model',
+            source:    'repl',
+          });
+        } catch { /* persistence faults must never break dispatch */ }
+      }
+    },
+    // v4.10 Slice 10.6 — REPL approval-decision audit. Symmetric to
+    // the daemon path (daemonApproval.ts:onDecision, wired Slice 10.2b).
+    // Without this wire, REPL approval REQUESTS landed in run_events
+    // (via onUiEvent above) but the actual DECISIONS did not — so
+    // /trace recent could surface "permission asked" but never
+    // "permission granted/denied" for REPL turns. The audit gap was
+    // the direct mirror of the Slice 10.2d tool_call coverage gap:
+    // grep-based emit-site audits don't catch "site that should emit
+    // but doesn't." Best-effort try/catch so a persistence fault
+    // never crashes a decision in flight.
+    onDecision: (req, decision) => {
+      const rid = replParentRunRef.runId;
+      if (rid === null) return;
+      try {
+        const tags = categorizeEvent('approval_decision');
+        replRunStore.emitEventRich({
+          runId:     rid,
+          category:  tags.category,
+          kind:      tags.kind,
+          name:      'approval_decision',
+          sessionId: replParentRunRef.sessionId ?? null,
+          status:    decision === 'deny' ? 'denied' : 'allowed',
+          summary:   `${req.toolName} → ${decision} (${req.riskTier ?? 'caution'})`,
+          payload: {
+            toolName: req.toolName,
+            category: req.category,
+            riskTier: req.riskTier ?? 'caution',
+            reason:   req.reason ?? null,
+            decision,
+          },
+          visibility: 'system',
+          source:     'repl',
+        });
+      } catch { /* observability must never break a decision */ }
+    },
+    // Phase 16f / v4.10 Slice 10.6: append-on-disk for "Allow always"
+    // choices. Single-process REPL — atomic write via tmp-then-rename.
+    //
+    // Slice 10.6 — entries now carry `createdAt` + `lastUsedAt`
+    // timestamps so listing surfaces can flag stale grants and audit
+    // trails record when each permission was first granted. New
+    // entries land at the GLOBAL scope (~/.aiden/approvals.json) by
+    // default — a future slice may add a "save to project" choice in
+    // the prompt for explicit project-scoped grants.
+    //
+    // De-dupe: if the same tool::signature already exists, refresh
+    // its `lastUsedAt` so re-granting a permission updates the
+    // audit trail rather than silently no-op'ing.
     persistAllow: (tool: string, signature: string) => {
       const fs = require('node:fs');
-      let entries: Array<{ tool: string; signature: string }> = [];
+      let entries: Array<{
+        tool:        string;
+        signature:   string;
+        createdAt?:  number;
+        lastUsedAt?: number;
+      }> = [];
       try {
         const cur = fs.readFileSync(paths.approvalsJson, 'utf8');
         const parsed = JSON.parse(cur);
@@ -1296,15 +1514,18 @@ export async function buildAgentRuntime(
       } catch {
         /* fresh file */
       }
-      // De-dupe: same tool+signature shouldn't appear twice.
-      if (
-        !entries.some((e) => e.tool === tool && e.signature === signature)
-      ) {
-        entries.push({ tool, signature });
-        const tmp = `${paths.approvalsJson}.tmp`;
-        fs.writeFileSync(tmp, JSON.stringify(entries, null, 2), 'utf8');
-        fs.renameSync(tmp, paths.approvalsJson);
+      const now = Date.now();
+      const existing = entries.find((e) => e.tool === tool && e.signature === signature);
+      if (existing) {
+        // Already persisted — refresh lastUsedAt, keep original createdAt.
+        existing.lastUsedAt = now;
+        if (typeof existing.createdAt !== 'number') existing.createdAt = now;
+      } else {
+        entries.push({ tool, signature, createdAt: now, lastUsedAt: now });
       }
+      const tmp = `${paths.approvalsJson}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify(entries, null, 2), 'utf8');
+      fs.renameSync(tmp, paths.approvalsJson);
     },
   } as any;
 
@@ -1554,6 +1775,16 @@ export async function buildAgentRuntime(
   // the structured-logger wiring catches up. The registry mechanism
   // itself is exercised end-to-end by skill-teacher and skill-miner.
 
+  // v4.10 Slice 10.2d — per-tool-call startTime map for accurate
+  // duration_ms on the tool_call_completed run_event. Keyed by the
+  // model's tool_call_id so concurrent / interleaved calls don't
+  // clobber each other. Mirrors childBuilder.ts:455 (subagent path)
+  // and realAgentRunner.ts:emitToolEvent (daemon path). Lifetime
+  // matches the parent agent — one map across the whole REPL
+  // process. Entries are removed at the 'after' phase; orphans (rare,
+  // mid-call crash) are GC'd by the next-call cleanup.
+  const replToolCallStartTimes = new Map<string, number>();
+
   // ── Build agent with all moat layers attached ────────────────────────
   const agent = new AidenAgent({
     provider: adapter,
@@ -1602,6 +1833,62 @@ export async function buildAgentRuntime(
             getSuggestionEngine().recordFired(tip.slot);
           }
         } catch { /* never let a suggestion crash a tool call */ }
+      }
+      // v4.10 Slice 10.2d — runtime tool_call_* emission for REPL
+      // turns. Symmetric to realAgentRunner.emitToolEvent (daemon
+      // path) and childBuilder.ts (subagent path). Closes the
+      // /trace recent visibility gap where REPL tool activity was
+      // invisible to the trace ledger. Best-effort: a write failure
+      // (locked DB, schema drift) must NEVER crash dispatch.
+      const rid = replParentRunRef.runId;
+      if (rid !== null) {
+        try {
+          if (phase === 'before') {
+            const startedAt = Date.now();
+            replToolCallStartTimes.set(call.id, startedAt);
+            const tags = categorizeEvent('tool_call_started');
+            replRunStore.emitEventRich({
+              runId:      rid,
+              category:   tags.category,
+              kind:       tags.kind,
+              name:       'tool_call_started',
+              sessionId:  replParentRunRef.sessionId ?? null,
+              toolCallId: call.id ?? null,
+              status:     'started',
+              summary:    call.name,
+              payload: {
+                toolName: call.name,
+                ts:       startedAt,
+              },
+              visibility: 'system',
+              source:     'repl',
+            });
+          } else {
+            const startedAt = replToolCallStartTimes.get(call.id) ?? Date.now();
+            replToolCallStartTimes.delete(call.id);
+            const durationMs = Date.now() - startedAt;
+            const tags = categorizeEvent('tool_call_completed');
+            replRunStore.emitEventRich({
+              runId:      rid,
+              category:   tags.category,
+              kind:       tags.kind,
+              name:       'tool_call_completed',
+              sessionId:  replParentRunRef.sessionId ?? null,
+              toolCallId: call.id ?? null,
+              status:     result?.error ? 'failed' : 'ok',
+              durationMs,
+              summary:    `${call.name}${result?.error ? ' (failed)' : ''}`,
+              payload: {
+                toolName:  call.name,
+                error:     result?.error ?? null,
+                hasResult: result?.result !== undefined && result?.result !== null,
+                durationMs,
+              },
+              visibility: 'system',
+              source:     'repl',
+            });
+          }
+        } catch { /* observability must never break a tool call */ }
       }
       callbacks.onToolCall?.(call, phase, result);
     },
@@ -1739,21 +2026,46 @@ export async function buildAgentRuntime(
     mode:    'cli-interactive',
     logsDir: paths.logsDir,
   });
+  // v4.10 Slice 10.7 — survive-by-default process-level guards. The
+  // REPL has a human watching; an unhandled adapter rejection or
+  // uncaught error from any subsystem (channel poller, MCP transport,
+  // background task, etc.) should NOT silently kill the chat. The
+  // handlers log a single dim line + keep the REPL alive. Daemon
+  // path uses different (fail-fast, reclaim-then-exit) handlers in
+  // `core/v4/daemon/bootstrap.ts:530-531`; that asymmetry is
+  // intentional — daemon has no user to recover.
+  const { installReplCrashHandlers } = await import('../../core/v4/replCrashHandlers');
+  installReplCrashHandlers({
+    log: (level, msg, meta) => bootLogger.child('crash')[level](msg, meta),
+    notify: (line) => {
+      try { process.stderr.write(`\n${line}\n`); } catch { /* stderr torn down */ }
+    },
+  });
   // Wire the gateway singleton's logger BEFORE registering its processor
   // so register / unregister channel events are scoped correctly.
   gateway.attachLogger(bootLogger.child('gateway'));
 
   // v4.6 Phase 3A — startup probe for the spawn-pause kill-switch.
   // The state was initialised early (line ~740) before tool wiring.
-  // Now that bootLogger exists, emit a visible warning so an
-  // operator who forgot they paused in a prior session learns
-  // immediately rather than puzzling at silent rejected fanouts.
+  // Emit a visible warning so an operator who forgot they paused in
+  // a prior session learns immediately rather than puzzling at
+  // silent rejected fanouts.
+  //
+  // v4.10 Slice 10.7a — migrated from bootLogger.warn to
+  // display.warn so the user-visible message survives the StderrSink
+  // removal from cli-interactive mode. display.warn is TTY-aware
+  // and coordinates with the prompt lifecycle (the file log still
+  // captures the structured event via bootLogger.info below).
   if (spawnPauseBootStatus) {
     const s = spawnPauseBootStatus;
     const reasonSuffix = s.reason ? ` (reason: ${s.reason})` : '';
-    bootLogger.warn(
+    display.warn(
       `spawn_sub_agent / subagent_fanout are PAUSED${reasonSuffix}. ` +
       'Run /spawn-pause off to resume.',
+    );
+    // Also record to file log for postmortems (structured context).
+    bootLogger.info(
+      `spawn-pause active at boot${reasonSuffix}`,
       {
         pausedAt:   s.pausedAt   ?? null,
         pausedBy:   s.pausedBy   ?? null,
@@ -1886,8 +2198,34 @@ export async function buildAgentRuntime(
     // v4.8.0 Phase 2.5 — emit ui_task_update/ui_task_done events so
     // subagent activity surfaces as gutter-indented trail rows in the
     // parent's chat surface alongside its own tool trail.
-    onUiEvent: (name: string, args: Record<string, unknown>) =>
-      display.renderUiEvent(name, args),
+    // v4.10 Slice 10.2 — persistence: child agents render through
+    // this callback but childBuilder.ts only persists tool_call_*
+    // events, never ui_* events. Tee here keyed on the PARENT's
+    // runId (replParentRunRef.runId) so cross-agent ui_* trace is
+    // queryable in one place.
+    onUiEvent: (name: string, args: Record<string, unknown>) => {
+      display.renderUiEvent(name, args);
+      const rid = replParentRunRef.runId;
+      if (rid !== null) {
+        // v4.10 Slice 10.2b — rich emission. Source='subagent' here
+        // because the wire fires from a spawn_sub_agent child rendering
+        // through the parent's onUiEvent — the parent's run is the row
+        // owner but the originator is the child.
+        try {
+          const tags = categorizeEvent(name);
+          replRunStore.emitEventRich({
+            runId:     rid,
+            category:  tags.category,
+            kind:      tags.kind,
+            name,
+            sessionId: replParentRunRef.sessionId ?? null,
+            payload:   args,
+            visibility:'model',
+            source:    'subagent',
+          });
+        } catch { /* persistence faults must never break dispatch */ }
+      }
+    },
     runStore:            replRunStore,
     instanceId:          replInstanceId,
     // v4.6 Phase 2Q-B — REPL parent-run wiring. Reads the same
@@ -1907,6 +2245,26 @@ export async function buildAgentRuntime(
     instanceId: replInstanceId,
     dbPath:     daemonDbPath(paths.root),
   });
+
+  // ── v4.10 Slice 10.2 — trace_query (REPL only) ─────────────────────
+  //
+  // Registers the model-facing read-only trace_query tool. Wired AFTER
+  // replRunStore + replParentRunRef are in scope so the factory captures
+  // live references. Not registered in daemon agent builders — daemon
+  // turns persist their own trace via realAgentRunner's onUiEvent hook
+  // but don't expose introspection (Phase B Q2: scope locked to REPL).
+  toolRegistry.register(makeTraceQueryTool({
+    runStore:         replRunStore,
+    // v4.10 Slice 10.2c — resolve to the long-lived chatSessionId
+    // (set once at ChatSession.run() init) so scope='current_session'
+    // works between turns. The pre-10.2c version read the turn-scoped
+    // sessionId which got nulled post-turn, making the model see "no
+    // session" while the conversation was clearly alive.
+    resolveSessionId: () => replParentRunRef.chatSessionId,
+    // v4.10 Slice 10.2b — scope='current_run' resolves to the in-flight
+    // turn's runId; null when no turn is active.
+    resolveRunId:     () => replParentRunRef.runId,
+  }));
 
   // ── Phase v4.1-2.1: gateway message processor ────────────────────
   //
@@ -1989,6 +2347,236 @@ export async function buildAgentRuntime(
   // Command registry.
   const commandRegistry = new CommandRegistry();
   for (const cmd of allCommands) commandRegistry.register(cmd);
+
+  // ── v4.10 Slice 10.2 — /trace recent slash command ────────────────
+  //
+  // User-facing introspection of the current REPL session's
+  // run_events stream. Mirrors `trace_query` (model-facing) but
+  // formats for human reading. Registered inline so it can capture
+  // replRunStore + replParentRunRef in closure without threading
+  // them through the static allCommands list (same pattern skill
+  // commands use below for SkillLoader access).
+  commandRegistry.register({
+    name: 'trace',
+    description: 'Inspect recent events from this REPL session. Usage: /trace recent [N]',
+    category: 'system',
+    icon: '⊙',
+    handler: async (ctx) => {
+      const sub = (ctx.args[0] ?? 'recent').toLowerCase();
+      if (sub !== 'recent') {
+        ctx.display.printError(
+          `Unknown subcommand: ${sub}`,
+          'Try: /trace recent [N]   (N defaults to 20, max 200)',
+        );
+        return {};
+      }
+      // v4.10 Slice 10.2c — read the long-lived chatSessionId (set
+      // once at ChatSession.run() init) rather than the turn-scoped
+      // sessionId (cleared between turns). The pre-10.2c gate fired
+      // "no active REPL session" between turns even though the chat
+      // session was alive, conflating "no in-flight turn" with "no
+      // session". Defensive guard remains for the post-/quit edge
+      // when the renderer outlives the chat lifecycle.
+      const sessionId = replParentRunRef.chatSessionId;
+      if (!sessionId) {
+        ctx.display.dim('No REPL session active — start the chat first.');
+        return {};
+      }
+      const limitArg = Number(ctx.args[1]);
+      const limit = Number.isFinite(limitArg) && limitArg > 0
+        ? Math.min(Math.floor(limitArg), 200)
+        : 20;
+      // v4.10 Slice 10.2b — query the rich shape so the renderer can
+      // surface category/kind/name/status/duration without re-parsing
+      // payload JSON for every row.
+      let rows;
+      try {
+        rows = replRunStore.listEventsScoped({
+          scope:     'current_session',
+          sessionId,
+          limit,
+        });
+      } catch (e) {
+        ctx.display.printError(`trace query failed: ${(e as Error).message}`);
+        return {};
+      }
+      if (rows.length === 0) {
+        // Slice 10.2c — clearer message: the session IS active, just
+        // no events recorded yet. Common after a greeting turn where
+        // the model didn't fire any ui_* / tool_call_* events.
+        ctx.display.dim('(no events recorded yet in this conversation — events appear after the first tool call or ui_* emission)');
+        return {};
+      }
+      ctx.display.info(`Recent events (${rows.length}, newest first):`);
+      for (const r of rows) {
+        const tsIso = new Date(r.ts).toISOString().replace(/\.\d{3}Z$/, 'Z');
+        // Prefer the human summary when emitter set one; otherwise
+        // fall back to a payload preview. Status + duration appear
+        // inline so dispatcher rows surface their finish reason
+        // without a payload parse.
+        const summaryOrPreview = r.summary
+          ?? (r.payload.length > 80 ? `${r.payload.slice(0, 77)}…` : r.payload);
+        const statusBit   = r.status     ? ` [${r.status}]`       : '';
+        const durationBit = r.durationMs ? ` (${r.durationMs}ms)` : '';
+        ctx.display.write(
+          `  ${tsIso}  run=${r.runId}  ${r.category}/${r.kind}${statusBit}${durationBit}  ${summaryOrPreview}\n`,
+        );
+      }
+      return {};
+    },
+  });
+
+  // ── v4.10 Slice 10.8 — /tasks slash command ────────────────────────
+  //
+  // Read-only listing surface for the durable Task-lite kernel.
+  // Mirrors /trace recent's shape: query daemon.db via the long-
+  // lived replParentRunRef.chatSessionId (Slice 10.2c) so the
+  // command works between turns too. Auto-created per user-message
+  // turn by chatSession.runAgentTurn (Slice 10.8 B3).
+  //
+  // Subcommands:
+  //   /tasks               → all this session, newest first, default 20
+  //   /tasks active        → filter by status='active'
+  //   /tasks completed     → filter status='completed'
+  //   /tasks cancelled     → filter status='cancelled'
+  //   /tasks failed        → filter status='failed'
+  //   /tasks <N>           → numeric arg sets the limit (1..200)
+  commandRegistry.register({
+    name: 'tasks',
+    description: 'List durable tasks for this REPL session. Usage: /tasks [active|completed|cancelled|failed|<N>]',
+    category: 'system',
+    icon: '⊡',
+    handler: async (ctx) => {
+      const sessionId = replParentRunRef.chatSessionId;
+      if (!sessionId) {
+        ctx.display.dim('No REPL session active — start the chat first.');
+        return {};
+      }
+      const arg = (ctx.args[0] ?? '').toLowerCase();
+      const validStatuses = new Set(['pending', 'active', 'completed', 'failed', 'cancelled']);
+      let filterStatus: string | undefined;
+      let limit = 20;
+      if (arg && validStatuses.has(arg)) {
+        filterStatus = arg;
+      } else if (arg) {
+        const n = Number(arg);
+        if (Number.isFinite(n) && n > 0) limit = Math.min(Math.floor(n), 200);
+      }
+      let rows;
+      try {
+        rows = replTaskStore.listRecent({
+          sessionId,
+          ...(filterStatus ? { status: filterStatus as any } : {}),
+          limit,
+        });
+      } catch (e) {
+        ctx.display.printError(`/tasks query failed: ${(e as Error).message}`);
+        return {};
+      }
+      if (rows.length === 0) {
+        ctx.display.dim(filterStatus
+          ? `(no ${filterStatus} tasks in this conversation)`
+          : '(no tasks recorded yet in this conversation)');
+        return {};
+      }
+      const filterSuffix = filterStatus ? ` (${filterStatus})` : '';
+      ctx.display.info(`Tasks${filterSuffix} — ${rows.length} row${rows.length === 1 ? '' : 's'}, newest first:`);
+      for (const r of rows) {
+        const tsIso = new Date(r.createdAt).toISOString().replace(/\.\d{3}Z$/, 'Z');
+        // Title is already capped at 80 chars on insert (Slice 10.8
+        // B2 createTaskStore); render compact for the listing.
+        const trim = r.title.length > 60 ? `${r.title.slice(0, 57)}…` : r.title;
+        ctx.display.write(
+          `  ${tsIso}  ${r.id}  [${r.status.padEnd(9)}]  ${trim}\n`,
+        );
+      }
+      return {};
+    },
+  });
+
+  // ── v4.10 Slice 10.8 — /adjust slash command ───────────────────────
+  //
+  // Mutation surface for the Task-lite kernel. Two operations:
+  //
+  //   /adjust <task_id> cancel        → setStatus(task_id, 'cancelled')
+  //   /adjust <task_id> goal <text>   → setGoal(task_id, <text>)
+  //
+  // `cancel` records the intent only — does NOT abort the in-flight
+  // agent loop (no abort-signal-from-outside-the-turn plumbing
+  // exists yet; that's v4.11 territory per Phase B Q3). Future
+  // turns observe the status and can react.
+  //
+  // `goal <text>` updates the task's goal verbatim. Future tools
+  // and the session-summary pipeline can read the new goal.
+  commandRegistry.register({
+    name: 'adjust',
+    description: 'Adjust a task. Usage: /adjust <task_id> cancel  OR  /adjust <task_id> goal <new text>',
+    category: 'system',
+    icon: '⊕',
+    handler: async (ctx) => {
+      const taskId = (ctx.args[0] ?? '').trim();
+      const op     = (ctx.args[1] ?? '').toLowerCase();
+      if (!taskId || !op) {
+        ctx.display.printError(
+          'Usage: /adjust <task_id> cancel  OR  /adjust <task_id> goal <text>',
+          'Run /tasks to see ids.',
+        );
+        return {};
+      }
+      let existing;
+      try { existing = replTaskStore.get(taskId); }
+      catch (e) {
+        ctx.display.printError(`/adjust lookup failed: ${(e as Error).message}`);
+        return {};
+      }
+      if (!existing) {
+        ctx.display.printError(`Task not found: ${taskId}`, 'Run /tasks to see ids.');
+        return {};
+      }
+      if (op === 'cancel') {
+        if (existing.status === 'cancelled') {
+          ctx.display.dim(`Task ${taskId} is already cancelled.`);
+          return {};
+        }
+        if (existing.status === 'completed' || existing.status === 'failed') {
+          ctx.display.warn(`Task ${taskId} is ${existing.status}; marking cancelled anyway.`);
+        }
+        try {
+          replTaskStore.setStatus(taskId, 'cancelled');
+          ctx.display.success(`Task ${taskId} cancelled.`);
+          ctx.display.dim(
+            '  Note: this records intent. Any in-flight agent turn keeps running — mid-turn abort is a future capability.',
+          );
+        } catch (e) {
+          ctx.display.printError(`/adjust failed: ${(e as Error).message}`);
+        }
+        return {};
+      }
+      if (op === 'goal') {
+        // ctx.args[0]=task_id, args[1]='goal', args[2..]=new goal text.
+        const newGoal = ctx.args.slice(2).join(' ').trim();
+        if (!newGoal) {
+          ctx.display.printError(
+            'Goal text is required.',
+            'Usage: /adjust <task_id> goal <new text>',
+          );
+          return {};
+        }
+        try {
+          replTaskStore.setGoal(taskId, newGoal);
+          ctx.display.success(`Task ${taskId} goal updated.`);
+        } catch (e) {
+          ctx.display.printError(`/adjust failed: ${(e as Error).message}`);
+        }
+        return {};
+      }
+      ctx.display.printError(
+        `Unknown /adjust operation '${op}'.`,
+        'Try: /adjust <task_id> cancel  OR  /adjust <task_id> goal <text>',
+      );
+      return {};
+    },
+  });
 
   // Skill slash commands.
   try {
@@ -2115,6 +2703,8 @@ export async function buildAgentRuntime(
     replRunStore,
     replInstanceId,
     replParentRunRef,
+    // v4.10 Slice 10.8 — durable Task-lite store.
+    replTaskStore,
   };
 }
 
@@ -2207,7 +2797,25 @@ export interface AgentRuntime {
    */
   replRunStore:     import('../../core/v4/daemon/runStore').RunStore;
   replInstanceId:   string;
-  replParentRunRef: { runId: number | null; sessionId: string | null };
+  /**
+   * v4.10 Slice 10.8 — durable Task-lite store. Mirrors replRunStore's
+   * lifecycle; shares the daemon.db handle so /tasks listing + /adjust
+   * mutations see consistent state with chatSession's runAgentTurn
+   * writes.
+   */
+  replTaskStore:    import('../../core/v4/daemon/taskStore').TaskStore;
+  /**
+   * v4.10 Slice 10.2c — `chatSessionId` is the long-lived REPL session
+   * id (set once at ChatSession.run() init, never cleared between turns).
+   * `sessionId` is the per-turn mirror that gets nulled post-turn.
+   * Read surfaces (/trace recent, trace_query) must use `chatSessionId`;
+   * emitter sites (called during a turn) can use either.
+   */
+  replParentRunRef: {
+    runId:         number | null;
+    sessionId:     string | null;
+    chatSessionId: string | null;
+  };
 }
 
 async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void> {
@@ -2288,6 +2896,11 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     replRunStore:     runtime.replRunStore,
     replInstanceId:   runtime.replInstanceId,
     replParentRunRef: runtime.replParentRunRef,
+    // v4.10 Slice 10.8 — durable Task-lite store. ChatSession's
+    // runAgentTurn auto-creates a task per user message + transitions
+    // status on success/failure. /tasks and /adjust slash commands
+    // read/write through this same handle.
+    replTaskStore:    runtime.replTaskStore,
   };
 
   if (cliOpts.tui) {
@@ -2315,9 +2928,49 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
 
 // ─── setup ─────────────────────────────────────────────────────────────
 
+/**
+ * v4.9.5 Slice 1.6 — test injection seam. `runSetupSubcommand`
+ * delegates to `runInteractiveChat` so the subcommand boots through
+ * the exact same disclaimer → loading → wizard → REPL handoff that
+ * fresh-install boot uses. Tests swap this for a counting stub to
+ * verify the delegation is intact (regression layer for
+ * "subcommand silently skipped onboarding screens" bug class).
+ *
+ * Pass null to restore the production implementation.
+ */
+let _runInteractiveChatImpl: typeof runInteractiveChat = runInteractiveChat;
+export function setRunInteractiveChatForTest(
+  fn: typeof runInteractiveChat | null,
+): void {
+  _runInteractiveChatImpl = fn ?? runInteractiveChat;
+}
+
 async function runSetupSubcommand(opts: MainOptions): Promise<void> {
-  const paths = opts.pathsOverride ?? resolveAidenPaths();
-  await runSetupWizard({ paths, force: true });
+  // v4.9.5 Slice 1.6 — `aiden setup` now goes through the full
+  // fresh-install boot path: disclaimer → animated loading → wizard
+  // (Steps 1–4, including curated skills) → success screen → REPL
+  // handoff. Identical to typing `aiden` on a true fresh install.
+  // `forceSetup: true` bypasses the wizardNeeded detection inside
+  // buildAgentRuntime so the wizard fires even when an existing
+  // config is present.
+  //
+  // Daemon foundation bootstrap mirrors the default REPL action
+  // (L334–343) so users with AIDEN_DAEMON=1 don't lose background
+  // rails just because they entered via `aiden setup`. The gate is
+  // env-checked, so it's a no-op for the common case.
+  try {
+    if (process.env.AIDEN_DAEMON === '1') {
+      const { bootstrapDaemonFoundation } = await import('../../core/v4/daemon/bootstrap');
+      bootstrapDaemonFoundation();
+    }
+  } catch (e) {
+    console.error('[daemon] foundation bootstrap failed: ' + (e instanceof Error ? e.message : String(e)));
+  }
+
+  // cliOpts={} — `aiden setup` accepts no command-level flags today.
+  // runInteractiveChat reads cliOpts.yolo / .skin with default-undefined
+  // semantics, so an empty bag is safe.
+  await _runInteractiveChatImpl({}, { ...opts, forceSetup: true });
 }
 
 // ─── model ─────────────────────────────────────────────────────────────

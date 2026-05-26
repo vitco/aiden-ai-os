@@ -27,6 +27,11 @@ import type { AidenAgent } from '../../core/v4/aidenAgent';
 import { LoopTracer } from '../../core/v4/loopTrace';
 import type { Display } from './display';
 import { summarizeChannelState, verbForActivity } from './display';
+// v4.10 Slice 10.7a — REPL-sacred defense-in-depth flag. Wired here so
+// any future stdout/stderr sink that wants to honor the
+// "user-is-typing" invariant can check isReplActive(). Pairs with the
+// StderrSink removal from cli-interactive in core/v4/logger/factory.ts.
+import { markReplActive, markReplInactive } from '../../core/v4/logger/factory';
 // v4.1.4 Part 1.6 — per-turn token progress bar. Fed by `onProgress`
 // events from the streaming adapter; hidden when the adapter doesn't
 // emit progress (honest degradation).
@@ -98,6 +103,75 @@ import { installPasteInterceptor, expandPasteLabels } from './pasteIntercept';
 import { startThemeWatcher, stopThemeWatcher } from '../../core/v4/theme/themeWatcher';
 import { expand, hasInterpolation, countSpans } from './shellInterpolation';
 import { installResizeGuard } from './resizeGuard';
+// v4.10 Slice 10.2b — shared event taxonomy. UI tool name → (category, kind).
+import { categorizeEvent } from '../../core/v4/daemon/eventCategories';
+
+/**
+ * v4.10 Slice 10.2 / 10.2b — extracted onUiEvent factory. Builds the
+ * per-turn closure that chatSession.runAgentTurn passes to the agent's
+ * runConversation. Production calls this from inline at the dispatch
+ * site (no shortcut); the integration test in
+ * tests/v4/cli/chatSessionUiPersist.test.ts drives THIS helper with
+ * controlled stubs to assert the persistence wire fires. Same
+ * mock-blindness fix shape as Slice 10.1b's createBootMemoryManager:
+ * test the real construction code path, not a hand-rolled equivalent.
+ *
+ * Three side effects (in order):
+ *   1. stopIndicator() — kill the "provider calling" spinner so the
+ *      painted ui row lands cleanly below it.
+ *   2. display.renderUiEvent(name, args) — TTY-gated render.
+ *   3. runStore.emitEventRich(...) — durable persistence with the
+ *      Slice-10.2b (category, kind, name) taxonomy. Gated on runStore
+ *      + runId being present. try/catch so a DB fault never breaks
+ *      dispatch.
+ *
+ * Non-TTY note: renderUiEvent early-returns when !out.isTTY but the
+ * persistence step still runs. Matches v4.9.3 Slice 1b discipline
+ * (render off, persistence on).
+ */
+export interface OnUiEventDeps {
+  display:            { renderUiEvent(name: string, args: Record<string, unknown>): void };
+  /**
+   * Slice 10.2b — the handler now writes the rich-shape row via
+   * emitEventRich so trace_query can filter on category/kind/name.
+   * Legacy emitEvent stays on the RunStore interface for non-UI
+   * callers; this helper opts into the new path.
+   */
+  runStore:           { emitEventRich(opts: import('../../core/v4/daemon/runStore').EmitEventOptions): number } | undefined;
+  runId:              number | null;
+  /** Slice 10.2b — REPL session id, threaded through so the rich row
+   *  gets session_id populated without the writer having to JOIN
+   *  back to runs on every call. */
+  sessionId?:         string | null;
+  stopIndicatorOnce:  () => void;
+}
+export function createOnUiEventHandler(
+  deps: OnUiEventDeps,
+): (name: string, args: Record<string, unknown>) => void {
+  return (name, args) => {
+    deps.stopIndicatorOnce();
+    deps.display.renderUiEvent(name, args);
+    if (deps.runStore && deps.runId !== null) {
+      try {
+        // Slice 10.2b — map the UI tool name through the shared
+        // categoriser so daemon and REPL emitters share one taxonomy
+        // source. `source='repl'` distinguishes this from daemon-fired
+        // emissions of the same kind.
+        const tags = categorizeEvent(name);
+        deps.runStore.emitEventRich({
+          runId:     deps.runId,
+          category:  tags.category,
+          kind:      tags.kind,
+          name,
+          sessionId: deps.sessionId ?? null,
+          payload:   args,
+          visibility:'model',
+          source:    'repl',
+        });
+      } catch { /* persistence faults must never break dispatch */ }
+    }
+  };
+}
 
 /**
  * Phase v4.1.2 session-summary-followup: parse the auxiliary client's
@@ -307,7 +381,26 @@ export interface ChatSessionOptions {
    */
   replRunStore?:    import('../../core/v4/daemon/runStore').RunStore;
   replInstanceId?:  string;
-  replParentRunRef?: { runId: number | null; sessionId: string | null };
+  /**
+   * v4.10 Slice 10.8 — durable Task-lite store. Optional for tests +
+   * for any caller that opts out of the task substrate (daemon-only
+   * runtimes, headless harnesses). When wired, `runAgentTurn` auto-
+   * creates a task per user message, transitions status on
+   * success/failure, and appends emitted run_event ids to traceIds.
+   */
+  replTaskStore?:   import('../../core/v4/daemon/taskStore').TaskStore;
+  /**
+   * v4.10 Slice 10.2c — `chatSessionId` is the long-lived REPL session
+   * id, written ONCE during run() init (after resumeSessionId resolves)
+   * and never cleared between turns. Read surfaces like /trace recent
+   * and trace_query need this — the turn-scoped `sessionId` field
+   * above gets nulled on turn completion and breaks between-turn reads.
+   */
+  replParentRunRef?: {
+    runId:         number | null;
+    sessionId:     string | null;
+    chatSessionId: string | null;
+  };
 }
 
 const STATUS_BAR_WIDTH = 10;
@@ -424,6 +517,17 @@ export class ChatSession implements ChatSessionLike {
   private summarized = false;
 
   /**
+   * v4.10 Slice 10.9 — one-shot guard for the streaming-disabled
+   * disclosure. Flipped to true the first time runAgentTurn observes
+   * `display.streaming: false` in config; subsequent turns within
+   * the same session skip the warning so the user sees it exactly
+   * once per launch. Matches the Slice 10.7 `/channel telegram
+   * remove` shell-env-hint pattern: surface state Aiden can't
+   * silently fix for the user.
+   */
+  private streamingDisabledWarned = false;
+
+  /**
    * Phase v4.1.2-memory-D:
    * Last successful distillation, cached so the promotion-prompt flow
    * (`/quit` path only — SIGINT/SIGTERM skip) can extract candidates
@@ -507,6 +611,17 @@ export class ChatSession implements ChatSessionLike {
       this.sessionId = newSession.id;
     }
 
+    // v4.10 Slice 10.2c — publish the long-lived session id to the
+    // shared ref so read surfaces (the `/trace recent` slash + the
+    // model-facing `trace_query` tool) can resolve "this conversation"
+    // between turns. Distinct from the turn-scoped `sessionId` field
+    // on the same ref, which is set+cleared per turn. Set once here
+    // and never cleared — the REPL process exits before this becomes
+    // stale.
+    if (this.opts.replParentRunRef) {
+      this.opts.replParentRunRef.chatSessionId = this.sessionId;
+    }
+
     // 2. Boxed startup card.
     await this.renderStartupCard();
 
@@ -525,6 +640,19 @@ export class ChatSession implements ChatSessionLike {
       const makeHandler = (sig: SessionExitPath) => async () => {
         this.opts.display.write('\n');
         this.opts.display.dim(`Got ${sig.toUpperCase()} — saving session before exit…`);
+        // v4.10 Slice 10.7 — stop channel adapters BEFORE the
+        // summary-write so their pollers don't keep the event loop
+        // alive past process.exit and leave their local locks stale.
+        // The /quit path already invokes channelManager.stopAll()
+        // (aidenCLI.ts buildAgentRuntime teardown); this is the
+        // symmetric SIGINT/SIGTERM cleanup. Hard 1s cap so a hung
+        // adapter doesn't delay the user's Ctrl+C exit (YAGNI on a
+        // configurable timeout per Phase B Q3).
+        if (this.opts.channelManager) {
+          const stopPromise = this.opts.channelManager.stopAll().catch(() => undefined);
+          const timeout = new Promise<void>((res) => setTimeout(res, 1000).unref?.());
+          await Promise.race([stopPromise, timeout]);
+        }
         try {
           await this.maybeAutoSummarizeWithTimeout(sig);
         } catch (err) {
@@ -634,6 +762,11 @@ export class ChatSession implements ChatSessionLike {
             } catch { /* defensive — never break the resize listener */ }
           },
         });
+    // v4.10 Slice 10.7a — mark the REPL active for the entire chat
+    // loop lifetime. The flag is read by any sink / writer that wants
+    // to defer TTY writes while the prompt is up (defense-in-depth
+    // on top of the StderrSink removal from cli-interactive mode).
+    markReplActive();
     try {
       while (iter < max) {
         iter += 1;
@@ -736,6 +869,11 @@ export class ChatSession implements ChatSessionLike {
         await this.runAgentTurn(input);
       }
     } finally {
+      // v4.10 Slice 10.7a — REPL no longer active; any subsequent
+      // logger writes (e.g. SIGINT cleanup paths) can use stderr
+      // freely. Paired with markReplActive above; idempotent if the
+      // REPL exited before reaching the loop.
+      markReplInactive();
       if (sigintHandler)  process.off('SIGINT',  sigintHandler);
       if (sigtermHandler) process.off('SIGTERM', sigtermHandler);
       if (exitHandler)    process.off('exit',    exitHandler);
@@ -1241,6 +1379,33 @@ export class ChatSession implements ChatSessionLike {
       }
     }
 
+    // v4.10 Slice 10.8 — durable Task-lite creation, alongside the
+    // per-turn run row. Auto-create per user-message turn (Phase B
+    // Q2/Q5 — one Task per turn keeps the model adherence concern
+    // out of the trigger path). Title = first 80 chars of user input
+    // (taskStore caps it); goal = the full user input verbatim so
+    // future tools (/adjust, future Memory promotion) can read the
+    // original intent without parsing UI display rows. Best-effort —
+    // any write failure logs once and the turn proceeds.
+    let replTaskId: string | null = null;
+    const replTaskStore = this.opts.replTaskStore;
+    if (replTaskStore && this.sessionId) {
+      try {
+        replTaskId = replTaskStore.create({
+          title:     userInput,
+          goal:      userInput,
+          sessionId: this.sessionId,
+          channelId: 'repl',
+          status:    'active',
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[tasks] failed to write REPL task row:',
+          err instanceof Error ? err.message : String(err));
+        replTaskId = null;
+      }
+    }
+
     // Phase 16c: streaming gated on display.streaming config.
     // v4.1.4 Part 1.6: PRODUCTION DEFAULT FLIPPED FROM FALSE TO TRUE.
     // Streaming delivers the activity indicator, tool-row live tick,
@@ -1259,6 +1424,23 @@ export class ChatSession implements ChatSessionLike {
       typeof this.opts.config?.getValue === 'function'
         ? this.opts.config.getValue<boolean>('display.streaming', true) === true
         : false;
+
+    // v4.10 Slice 10.9 — perception-first disclosure when the user
+    // has streaming disabled. Slice 10.9 Phase A audit caught that
+    // pre-10.9 wizard installs baked `streaming: false` into
+    // config.yaml; the resulting "Aiden feels slow" complaint last
+    // sprint traced back to this. The DEFAULT_CONFIG flip ships in
+    // Slice 10.9 too, but existing users with explicit `false` keep
+    // their setting (Phase B Q1 — respect user config). This warning
+    // is the consent surface: tell them once per session what's
+    // happening + how to flip it. Same disclosure pattern as Slice
+    // 10.7's /channel telegram remove shell-env hint.
+    if (!streamingEnabled && !this.streamingDisabledWarned && this.opts.config) {
+      this.streamingDisabledWarned = true;
+      this.opts.display.dim(
+        '(streaming is disabled; responses will appear only when complete — set display.streaming: true in config.yaml for live chunks)',
+      );
+    }
 
     // v4.1.4 reply-quality polish — Part 1.6. Activity indicator
     // replaces the prior single-shot spinner. Pause/resume hooks make
@@ -1481,10 +1663,21 @@ export class ChatSession implements ChatSessionLike {
         // mirroring how a first regular tool call stops it. Phase 2.3
         // handles ui_task_update + ui_task_done; the other 5 event
         // names land in Phase 2.4 (renderer silent-ignores them).
-        onUiEvent: (name, args) => {
-          stopIndicatorOnce();
-          this.opts.display.renderUiEvent(name, args);
-        },
+        //
+        // v4.10 Slice 10.2 — persistence: tee every ui_* emission into
+        // run_events keyed on the current REPL turn's runId. Routed
+        // through createOnUiEventHandler so the integration test
+        // exercises the EXACT same code path production uses
+        // (mock-blindness fix; see Slice 10.1b retrospective).
+        onUiEvent: createOnUiEventHandler({
+          display:           this.opts.display,
+          runStore:          replRunStore,
+          runId:             replRunId,
+          // v4.10 Slice 10.2b — pass the REPL session id so the rich
+          // emit row gets session_id without the writer JOIN-ing to runs.
+          sessionId:         this.sessionId ?? null,
+          stopIndicatorOnce,
+        }),
         onProgress: streamingEnabled
           ? (outputTokens: number, maxTokens?: number) => {
               if (indicatorStopped === false) return;
@@ -1536,6 +1729,22 @@ export class ChatSession implements ChatSessionLike {
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn('[runs] failed to finalize REPL parent-run row:',
+            err instanceof Error ? err.message : String(err));
+        }
+      }
+      // v4.10 Slice 10.8 — task-lite terminal transition (success
+      // path). `stop` is the canonical clean finish; everything else
+      // routes to 'failed' so /tasks listing distinguishes user-
+      // visible failures from clean turns. 'cancelled' stays
+      // reserved for explicit /adjust <id> cancel and is never set
+      // by the terminal hook.
+      if (replTaskStore && replTaskId !== null) {
+        try {
+          const taskStatus = result.finishReason === 'stop' ? 'completed' : 'failed';
+          replTaskStore.setStatus(replTaskId, taskStatus);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn('[tasks] failed to finalize REPL task row:',
             err instanceof Error ? err.message : String(err));
         }
       }
@@ -1686,6 +1895,19 @@ export class ChatSession implements ChatSessionLike {
           // eslint-disable-next-line no-console
           console.warn('[runs] failed to mark REPL parent-run failed:',
             e2 instanceof Error ? e2.message : String(e2));
+        }
+      }
+      // v4.10 Slice 10.8 — symmetric task-lite failure transition.
+      // Thrown errors out of runConversation → task status='failed'.
+      // /tasks listing surfaces this so the user can re-issue the
+      // prompt with a fresh task or /adjust the goal.
+      if (replTaskStore && replTaskId !== null) {
+        try {
+          replTaskStore.setStatus(replTaskId, 'failed');
+        } catch (e3) {
+          // eslint-disable-next-line no-console
+          console.warn('[tasks] failed to mark REPL task failed:',
+            e3 instanceof Error ? e3.message : String(e3));
         }
       }
       if (replParentRunRef) {
@@ -2087,6 +2309,11 @@ export class ChatSession implements ChatSessionLike {
     // v4.8.0 Slice 7 hotfix — predictable 1-blank-line rhythm: one
     // blank above the footer (visual breath after the reply), one
     // blank below (before the next prompt).
+    //
+    // v4.10 Slice 10.3 — the footer's full-density tier was extended
+    // with brand prefix (`Aiden v<X.Y>`), session uptime (sessionMs
+    // re-enabled), and spelled-out `last <elapsed>` for the per-turn
+    // timer. Mid (≥100) and narrow (<100) tiers unchanged.
     display.write(
       '\n' + display.statusFooter({
         provider,

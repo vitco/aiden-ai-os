@@ -45,6 +45,36 @@ export type ToolCategory =
   | 'network'
   | 'browser';
 
+/**
+ * v4.10 Slice 10.6 — fine-grained effects declaration. Layered ON
+ * TOP of the existing 3-axis taxonomy (`category × riskTier × mutates`);
+ * effects describe WHAT the tool touches, while category/riskTier
+ * describe HOW DANGEROUS the action is. The renderer surfaces these
+ * in the approval box so the user knows WHY a tool is gated, not
+ * just THAT it is.
+ *
+ * Slice 10.6 ships the schema field and the render path. Tagging the
+ * 67+ existing tools is deferred to Slice 10.6b (a per-tool refinement
+ * pass). Tools that don't declare effects show no "Effects:" line —
+ * the prompt UX degrades gracefully.
+ */
+export interface ToolEffects {
+  /** Reads files from disk. file_read, file_list, read_pdf. */
+  readsFiles?:    boolean;
+  /** Writes/mutates files on disk. file_write, mkdir, file_delete. */
+  writesFiles?:   boolean;
+  /** Hits external networks (HTTP, websockets, MCP). */
+  network?:       boolean;
+  /** May incur billable cost on a third-party service. */
+  externalSpend?: boolean;
+  /**
+   * Action cannot be cheaply undone: `rm -rf`, force-pushes,
+   * irrevocable API calls, file overwrites without backup.
+   * Hint for the renderer to escalate visual weight.
+   */
+  irreversible?:  boolean;
+}
+
 export interface ApprovalRequest {
   toolName: string;
   category: ToolCategory;
@@ -53,6 +83,14 @@ export interface ApprovalRequest {
   riskTier?: RiskTier;
   /** Why was this flagged? (description from the matching pattern) */
   reason?: string;
+  /**
+   * v4.10 Slice 10.6 — fine-grained effects metadata for the
+   * specific tool being gated. Comes from the ToolHandler.effects
+   * field threaded through the dispatch checkApproval call.
+   * Undefined when the tool's author didn't declare effects yet;
+   * renderer hides the "Effects:" line in that case.
+   */
+  effects?: ToolEffects;
   /**
    * v4.4 Phase 4 — dangerous-tier auto-preview. When the executor
    * computed a `buildPreview` for this call (only for dangerous-tier
@@ -63,6 +101,28 @@ export interface ApprovalRequest {
    * imported `WouldExecute` type when they need to read it.
    */
   preview?: unknown;
+}
+
+/**
+ * v4.10 Slice 10.6 — persisted allowlist entry shape with audit
+ * metadata. The pre-10.6 shape was just `{ tool, signature }` with
+ * no timestamps. New shape preserves backward-compat: missing
+ * `createdAt` / `lastUsedAt` defaults to `Date.now()` on load
+ * (one-time migration); next save rewrites the file with full
+ * timestamps. `scope` distinguishes global (~/.aiden) from project
+ * (<cwd>/.aiden) entries so listing surfaces can group by origin.
+ */
+export interface AllowlistEntry {
+  tool:        string;
+  signature:   string;
+  /** Epoch ms — when the user first granted this permission. */
+  createdAt:   number;
+  /** Epoch ms — last time this entry short-circuited a prompt.
+   *  Updates on every match so stale entries surface in listings. */
+  lastUsedAt:  number;
+  /** Which file this entry was loaded from. Drives the listing
+   *  display and dictates the write path for refresh updates. */
+  scope:       'global' | 'project';
 }
 
 export interface ApprovalCallbacks {
@@ -191,6 +251,21 @@ export interface BatchApprovalGate {
 export class ApprovalEngine {
   private sessionAllow = new Set<string>();
   private permanentAllow = new Set<string>();
+  /**
+   * v4.10 Slice 10.6 — parallel metadata map keyed by `tool::signature`.
+   * Lookups + matching still go through the cheap Set above; this
+   * map only carries audit data (createdAt/lastUsedAt/scope) for
+   * listing surfaces and refresh-on-reuse semantics.
+   */
+  private permanentAllowMeta = new Map<string, AllowlistEntry>();
+  /**
+   * v4.10 Slice 10.6 — refresh callback. When a permanent-allow
+   * entry short-circuits a prompt, we bump its lastUsedAt and let
+   * the host (aidenCLI) persist the refreshed entry back to disk.
+   * Optional; tests can leave it undefined and rely on the in-memory
+   * map.
+   */
+  private refreshSink?: (entry: AllowlistEntry) => void;
   private batchGate?: BatchApprovalGate;
 
   constructor(
@@ -229,6 +304,24 @@ export class ApprovalEngine {
     const key = `${toolName}::${signature}`;
     this.permanentAllow.add(key);
     this.sessionAllow.add(key); // permanent ⊂ session
+    // v4.10 Slice 10.6 — seed audit metadata for the new entry. The
+    // host (aidenCLI persistAllow callback) writes the timestamped
+    // shape to disk; we mirror it in-memory so subsequent
+    // listAllowlistEntries() sees a consistent view without a re-read.
+    const now = Date.now();
+    if (!this.permanentAllowMeta.has(key)) {
+      this.permanentAllowMeta.set(key, {
+        tool:       toolName,
+        signature,
+        createdAt:  now,
+        lastUsedAt: now,
+        scope:      'global',
+      });
+    } else {
+      // Already-known entry got re-granted (rare). Refresh lastUsedAt.
+      const existing = this.permanentAllowMeta.get(key)!;
+      existing.lastUsedAt = now;
+    }
     this.callbacks.persistAllow?.(toolName, signature);
   }
 
@@ -237,19 +330,66 @@ export class ApprovalEngine {
   }
 
   /**
-   * Phase 16f: pre-load permanent allowlist entries from a persisted file.
-   * `aidenCLI` calls this once at boot with the contents of
-   * `~/.aiden/approvals.json`. The format is `[{tool, signature}]`. Each
-   * entry feeds both `permanentAllow` and `sessionAllow`. Idempotent.
+   * Phase 16f / v4.10 Slice 10.6: pre-load permanent allowlist
+   * entries from a persisted file.
+   *
+   * Accepts BOTH the pre-10.6 shape `{tool, signature}` and the
+   * richer `AllowlistEntry` shape with `createdAt` / `lastUsedAt` /
+   * `scope`. Legacy entries lacking timestamps get `Date.now()` as a
+   * default — the next persistAllow write will bake the timestamp in.
+   * Backward-compat by construction: aidenCLI calls this once at
+   * boot with the disk contents; no data migration step required.
    */
   loadPersistentAllowlist(
-    entries: ReadonlyArray<{ tool: string; signature: string }>,
+    entries: ReadonlyArray<{
+      tool:        string;
+      signature:   string;
+      createdAt?:  number;
+      lastUsedAt?: number;
+      scope?:      'global' | 'project';
+    }>,
   ): void {
+    const now = Date.now();
     for (const e of entries) {
       const key = `${e.tool}::${e.signature}`;
       this.permanentAllow.add(key);
       this.sessionAllow.add(key);
+      // Project entries win on re-load (last-write-wins by load
+      // order); aidenCLI loads global FIRST, then project, so the
+      // project entry overrides if the same signature exists in both.
+      this.permanentAllowMeta.set(key, {
+        tool:       e.tool,
+        signature:  e.signature,
+        createdAt:  e.createdAt  ?? now,
+        lastUsedAt: e.lastUsedAt ?? now,
+        scope:      e.scope      ?? 'global',
+      });
     }
+  }
+
+  /**
+   * v4.10 Slice 10.6 — install a callback that fires whenever a
+   * permanent-allow entry short-circuits a prompt. The host
+   * (aidenCLI) wires this to write the refreshed `lastUsedAt` back
+   * to disk so the on-disk file stays an accurate audit trail of
+   * "what permissions actually got used."
+   *
+   * Optional. Tests + headless callers leave it unset and only
+   * exercise the in-memory map.
+   */
+  setRefreshSink(sink: (entry: AllowlistEntry) => void): void {
+    this.refreshSink = sink;
+  }
+
+  /**
+   * v4.10 Slice 10.6 — listing surface for the (future) `aiden
+   * approvals list` CLI. Returns a snapshot of the in-memory
+   * metadata; ordering is the Map's insertion order, which roughly
+   * mirrors load order (global, then project). Returned entries are
+   * COPIES — mutating them does not affect the engine.
+   */
+  listAllowlistEntries(): AllowlistEntry[] {
+    return [...this.permanentAllowMeta.values()].map((e) => ({ ...e }));
   }
 
   /**
@@ -292,6 +432,20 @@ export class ApprovalEngine {
     const sig = argSignature(req.toolName, req.args);
     const key = `${req.toolName}::${sig}`;
     if (this.sessionAllow.has(key)) {
+      // v4.10 Slice 10.6 — refresh the audit timestamp for any
+      // PERMANENT-tier match (session-only matches stay in memory
+      // and are gone on /quit, so no disk refresh is meaningful).
+      // The `permanentAllow` Set is the true source for "is this
+      // backed by a persisted entry"; sessionAllow ⊇ permanentAllow
+      // by construction (every allow_always entry also lands in
+      // sessionAllow).
+      if (this.permanentAllow.has(key)) {
+        const meta = this.permanentAllowMeta.get(key);
+        if (meta) {
+          meta.lastUsedAt = Date.now();
+          this.refreshSink?.(meta);
+        }
+      }
       this.callbacks.onDecision?.(req, 'allow_session');
       return true;
     }
@@ -321,13 +475,24 @@ export class ApprovalEngine {
         tier = assessed.tier;
         rationale = assessed.rationale;
       }
+      // v4.10 Slice 10.6c — reassign req.riskTier to the
+      // gate's actual decided tier BEFORE firing onDecision on the
+      // safe/dangerous auto-paths. Pre-10.6c, req.riskTier was only
+      // mutated on the caution fallthrough (line just below), so the
+      // approval.decided audit row in run_events reported the
+      // pre-classification value (typically the 'caution' default
+      // because file_write doesn't pre-classify). That made
+      // /trace recent understate the gate's actual reasoning —
+      // "decision=allow, riskTier=caution" looked like a user picked
+      // Once on a caution prompt, when in fact the aux LLM had
+      // rated it safe and auto-allowed.
       if (tier === 'safe') {
-        this.callbacks.onDecision?.(req, 'allow');
+        this.callbacks.onDecision?.({ ...req, riskTier: tier, reason: rationale ?? req.reason }, 'allow');
         return true;
       }
       if (tier === 'dangerous') {
         this.callbacks.onDecision?.(
-          { ...req, reason: rationale ?? req.reason },
+          { ...req, riskTier: tier, reason: rationale ?? req.reason },
           'deny',
         );
         return false;

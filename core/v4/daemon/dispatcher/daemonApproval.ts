@@ -38,6 +38,8 @@ import type {
   RiskTier,
 } from '../../../../moat/approvalEngine';
 import type { RunStore } from '../runStore';
+// v4.10 Slice 10.2b — shared event taxonomy.
+import { categorizeEvent } from '../eventCategories';
 
 export type DaemonApprovalPolicy = 'safe-only' | 'caution-ok' | 'dangerous-ok';
 
@@ -84,13 +86,27 @@ export function buildDaemonApprovalCallbacks(
      */
     onDecision: (req: ApprovalRequest, decision: ApprovalDecision): void => {
       try {
-        input.runStore.emitEvent(input.runId, 'approval_decision', {
-          toolName: req.toolName,
-          category: req.category,
-          riskTier: req.riskTier ?? 'caution',
-          reason:   req.reason ?? null,
-          policy,
-          decision,
+        // v4.10 Slice 10.2b — rich emission. The approval audit row
+        // lands in the 'approval' category; status mirrors the
+        // decision so trace_query can filter to denials directly.
+        const tags = categorizeEvent('approval_decision');
+        input.runStore.emitEventRich({
+          runId:     input.runId,
+          category:  tags.category,
+          kind:      tags.kind,
+          name:      'approval_decision',
+          status:    decision === 'deny' ? 'denied' : 'allowed',
+          summary:   `${req.toolName} → ${decision} (${req.riskTier ?? 'caution'}/${policy})`,
+          payload: {
+            toolName: req.toolName,
+            category: req.category,
+            riskTier: req.riskTier ?? 'caution',
+            reason:   req.reason ?? null,
+            policy,
+            decision,
+          },
+          visibility:'system',
+          source:    'daemon',
         });
         if (decision === 'deny') {
           log('warn', `[daemon-approval] denied ${req.toolName} (tier=${req.riskTier ?? 'caution'} policy=${policy})`);

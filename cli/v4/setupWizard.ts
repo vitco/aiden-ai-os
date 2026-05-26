@@ -51,6 +51,12 @@ import { boxBottom, boxLine, boxTopTitled } from './box';
 // the cost of broken unit tests under the test runtime.
 import { renderSuccessScreen } from './onboarding/successScreen';
 import { pickProvider } from './onboarding/providerPicker';
+// v4.9.5 Slice 1 — curated skills Step 4.
+import { runConfirm } from './confirmPrompt';
+import { runCuratedSetupFlow } from './skills/curatedSetupFlow';
+import { SkillsHub } from '../../core/v4/skillsHub';
+import { SkillSecurityScanner } from '../../core/v4/skillSecurityScanner';
+import { BundledManifest } from '../../core/v4/skillBundledManifest';
 // v4.8.0 Slice 10b — bar + chrome tokens for step headers.
 import { glyphs } from './design/tokens';
 import { fetchModels } from '../../core/v4/providers/modelFetch';
@@ -313,6 +319,26 @@ export interface SetupOptions {
   skipValidation?: boolean;
   /** Injectable validator for tests. Defaults to the real `validateProviderKey`. */
   validator?: typeof validateProviderKey;
+  /**
+   * v4.9.5 Slice 1 — skip the optional curated-skills Step 4. Tests
+   * that exercise the rest of the wizard but don't want a network
+   * call set this. Default undefined → step runs normally on real
+   * TTY boots (also auto-skipped when `prompts` is injected — see
+   * Step 4 site).
+   */
+  skipCuratedStep?: boolean;
+  /**
+   * v4.9.5 Slice 1.5 — short-circuit the OAuth roundtrip in tests so
+   * the parameterized provider-coverage test can drive the OAuth
+   * branch to its tail without spinning up a real loopback server.
+   * Production callers always omit this; if present, both
+   * `loadOAuthProvider` AND `runtime.login` are bypassed and the
+   * provider/tokens here are used directly.
+   */
+  oauthStub?: {
+    provider: OAuthProvider;
+    tokens: { expiresAtMs: number; account?: string };
+  };
 }
 
 /**
@@ -341,6 +367,80 @@ export interface SetupResult {
   skipReason?: string;
   config?: AidenConfig;
   envFile?: string;
+}
+
+// ─── v4.9.5 Slice 1.5: finalizeWithCuratedStep ─────────────────────
+// Shared helper called from BOTH the OAuth branch (claude-pro,
+// chatgpt-plus) and the API-key/custom branch (groq, anthropic,
+// openai, gemini, together, custom, ollama) so the curated-skills
+// Step 4 fires regardless of which provider path the user took.
+// Slice 1 wired this only into the API-key branch — OAuth users
+// silently bypassed Step 4 (the bug this slice fixes).
+//
+// Module-level injection seam (`setFinalizeForTest`) is the smallest
+// possible test hook: the parameterized provider-coverage test swaps
+// in a counting stub to verify EVERY branch invokes the helper. This
+// is the regression layer for the bug class — if any future provider
+// branch forgets to call this, the test fails.
+
+interface FinalizeCuratedDeps {
+  paths:      AidenPaths;
+  display:    Display;
+  prompts:    PromptIO;
+  opts:       SetupOptions;
+  stepHeader: (n: number) => string;
+}
+
+export async function finalizeWithCuratedStep(deps: FinalizeCuratedDeps): Promise<void> {
+  // Three early-exit conditions — no panel rendered, no hub touched:
+  //   1. opts.prompts injected → unit-test PromptIO shim, no real TTY
+  //   2. opts.skipCuratedStep  → explicit caller opt-out (CI, --no-curated)
+  //   3. !process.stdout.isTTY → CI / pipe-to-file / redirected stdout
+  // Matches the same gating Slice 1's inlined Step 4 used.
+  if (deps.opts.prompts)           return;
+  if (deps.opts.skipCuratedStep)   return;
+  if (!process.stdout.isTTY)       return;
+
+  try {
+    deps.display.write(deps.stepHeader(4));
+    deps.display.write('  Optional: install curated skills?\n');
+    deps.display.write(
+      `  ${kleur.dim('(Hand-picked from the open-source ecosystem with full author attribution.)')}\n\n`,
+    );
+
+    // Stage 1: opt-in confirm — v4.9.2 Slice 3 confirm primitive.
+    const proceedStage1 = await runConfirm(
+      'Install curated skills?',
+      { readLine: (msg) => deps.prompts.input(msg) },
+      deps.display,
+    );
+    if (!proceedStage1) return;
+
+    // Stage 2: fetch + preview + three-tier picker via shared flow.
+    const hub = new SkillsHub(
+      deps.paths,
+      new SkillSecurityScanner(),
+      new BundledManifest(deps.paths),
+    );
+    await runCuratedSetupFlow({
+      hub,
+      display: deps.display,
+      prompts: deps.prompts,
+    });
+  } catch (err) {
+    // Curated install NEVER crashes the wizard — surface as warn and
+    // continue to renderSuccessScreen.
+    deps.display.warn(`Curated install skipped due to error: ${(err as Error).message}`);
+  }
+}
+
+/** Test-only injection: swap finalizeWithCuratedStep for a stub.
+ *  Pass null to restore the production implementation. */
+let _finalizeImpl: typeof finalizeWithCuratedStep = finalizeWithCuratedStep;
+export function setFinalizeForTest(
+  fn: typeof finalizeWithCuratedStep | null,
+): void {
+  _finalizeImpl = fn ?? finalizeWithCuratedStep;
 }
 
 /** Lazy-load @inquirer/prompts so unit tests don't need a TTY. */
@@ -778,32 +878,40 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     }
 
     let oauthProvider: OAuthProvider;
-    try {
-      oauthProvider = await loadOAuthProvider(provider.id);
-    } catch (err) {
-      display.write(
-        display.error(
-          `Could not load OAuth plugin for ${provider.shortLabel}: ${(err as Error).message}`,
-        ),
-      );
-      // Plugin missing — let the user pick another provider.
-      continue outer;
+    if (opts.oauthStub) {
+      oauthProvider = opts.oauthStub.provider;
+    } else {
+      try {
+        oauthProvider = await loadOAuthProvider(provider.id);
+      } catch (err) {
+        display.write(
+          display.error(
+            `Could not load OAuth plugin for ${provider.shortLabel}: ${(err as Error).message}`,
+          ),
+        );
+        // Plugin missing — let the user pick another provider.
+        continue outer;
+      }
     }
 
     const ua = wizardUserAgent(prompts, display);
     const runtime = new OAuthProviderRuntime(oauthProvider, paths);
     let tokens;
-    try {
-      tokens = await runtime.login(ua);
-    } catch (err) {
-      display.write(
-        display.error(
-          `${provider.shortLabel} sign-in failed: ${(err as Error).message}`,
-        ),
-      );
-      // OAuth failures are recoverable — loop back so the user can
-      // pick an API-key provider as a fallback.
-      continue outer;
+    if (opts.oauthStub) {
+      tokens = opts.oauthStub.tokens;
+    } else {
+      try {
+        tokens = await runtime.login(ua);
+      } catch (err) {
+        display.write(
+          display.error(
+            `${provider.shortLabel} sign-in failed: ${(err as Error).message}`,
+          ),
+        );
+        // OAuth failures are recoverable — loop back so the user can
+        // pick an API-key provider as a fallback.
+        continue outer;
+      }
     }
 
     // Pick a default model from the registry's known list; user can /model later.
@@ -862,6 +970,11 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     display.write(
       `${kleur.dim('  Tokens encrypted at rest · run `aiden doctor` for details')}\n`,
     );
+    // v4.9.5 Slice 1.5: curated-skills Step 4 — MUST fire on OAuth
+    // path too. Slice 1 only wired this into the API-key branch
+    // below; subscription users (claude-pro, chatgpt-plus) silently
+    // bypassed the offer. Helper handles its own TTY / opts gates.
+    await _finalizeImpl({ paths, display, prompts, opts, stepHeader });
     // ONB1 slice 8: success screen replaces the prior "Try: aiden" tail.
     // The wizard already returns to the boot path, which then drops into
     // the REPL — no process restart needed.
@@ -1231,12 +1344,16 @@ export async function runSetupWizard(opts: SetupOptions = {}): Promise<SetupResu
     await upsertEnvVar(paths.envFile, 'CUSTOM_BASE_URL', baseUrl);
   }
 
-  // Step 6: success — wizard drops straight into the REPL via the
+  // Step 5: success — wizard drops straight into the REPL via the
   // outer boot path. No "Try: aiden" advice needed; the user is
   // already on their way to chat.
   display.write(
     `\n${kleur.green(`✓ ${provider.shortLabel}`)} configured with model ${kleur.cyan(modelId)}.\n`,
   );
+  // v4.9.5 Slice 1.5: curated-skills Step 4 — shared with the OAuth
+  // branch via finalizeWithCuratedStep. Slice 1 inlined this here;
+  // Slice 1.5 extracted it so subscription providers fire it too.
+  await _finalizeImpl({ paths, display, prompts, opts, stepHeader });
   // ONB1 slice 8: success screen + REPL handoff.
   renderSuccessScreen({ out: process.stdout });
 

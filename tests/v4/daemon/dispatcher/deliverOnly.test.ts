@@ -56,9 +56,11 @@ describe('dispatcher — deliver_only stub', () => {
     expect(row?.status).toBe('done');
     // A run row was still created (forensic trail).
     expect(row?.runId).not.toBeNull();
-    const events = db.prepare(`SELECT kind, payload FROM run_events WHERE run_id = ? ORDER BY id`)
-      .all(row!.runId) as Array<{ kind: string; payload: string }>;
-    expect(events.find((e) => e.kind === 'delivered')).toBeTruthy();
+    // v4.10 Slice 10.2b — select `name` (stable emitter id). `kind`
+    // is now the dotted taxonomy form (`dispatcher.delivered`).
+    const events = db.prepare(`SELECT kind, name, payload FROM run_events WHERE run_id = ? ORDER BY id`)
+      .all(row!.runId) as Array<{ kind: string; name: string | null; payload: string }>;
+    expect(events.find((e) => e.name === 'delivered')).toBeTruthy();
   });
 
   it('rendered message length lands in the delivered event payload', async () => {
@@ -75,7 +77,7 @@ describe('dispatcher — deliver_only stub', () => {
       runnerFactory: () => makeRunner(async () => ({ runId: 0, finishReason: 'stop' })),
     });
     await dispatcher._pumpOnce();
-    const ev = db.prepare(`SELECT payload FROM run_events WHERE kind='delivered'`).get() as { payload: string };
+    const ev = db.prepare(`SELECT payload FROM run_events WHERE name='delivered'`).get() as { payload: string };
     const parsed = JSON.parse(ev.payload);
     expect(parsed.deliverOnly).toBe(true);
     expect(parsed.messageBytes).toBeGreaterThan(0);

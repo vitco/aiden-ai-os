@@ -134,16 +134,19 @@ describe('createRealAgentRunner — event emission', () => {
       db, runStore, agentBuilder: builder, persistedDefault: PERSISTED,
     });
     const result = await runner.invoke(mkInput());
+    // v4.10 Slice 10.2b — assert on `name` (the original emission
+    // identifier, preserved unchanged) rather than `kind` (now the
+    // dotted taxonomy form, e.g. 'dispatcher.invoked').
     const events = runStore.listEvents(result.runId);
-    const kinds = events.map((e) => e.kind);
-    expect(kinds).toContain('dispatcher:invoked');
-    expect(kinds).toContain('dispatcher:completed');
-    const invoked = JSON.parse(events.find((e) => e.kind === 'dispatcher:invoked')!.payload);
+    const names = events.map((e) => e.name);
+    expect(names).toContain('dispatcher:invoked');
+    expect(names).toContain('dispatcher:completed');
+    const invoked = JSON.parse(events.find((e) => e.name === 'dispatcher:invoked')!.payload);
     expect(invoked.model).toBe('llama3.2');
     expect(invoked.modelSource).toBe('persisted');
     expect(invoked.approvalPolicy).toBe('safe-only');
     expect(invoked.source).toBe('file');
-    const completed = JSON.parse(events.find((e) => e.kind === 'dispatcher:completed')!.payload);
+    const completed = JSON.parse(events.find((e) => e.name === 'dispatcher:completed')!.payload);
     expect(completed.finishReason).toBe('stop');
   });
 
@@ -168,10 +171,11 @@ describe('createRealAgentRunner — event emission', () => {
       'after',
       { id: 't', name: 'file_read', result: { ok: true } },
     );
+    // v4.10 Slice 10.2b — assert on `name` (stable emitter id).
     const events = runStore.listEvents(result.runId);
-    const kinds = events.map((e) => e.kind);
-    expect(kinds).toContain('tool_call_started');
-    expect(kinds).toContain('tool_call_completed');
+    const names = events.map((e) => e.name);
+    expect(names).toContain('tool_call_started');
+    expect(names).toContain('tool_call_completed');
   });
 });
 
@@ -195,7 +199,7 @@ describe('createRealAgentRunner — failure paths', () => {
     expect(result.finishReason).toBe('error');
     expect(result.error).toMatch(/trigger_quota/);
     const events = runStore.listEvents(result.runId);
-    expect(events.some((e) => e.kind === 'dispatcher:rejected')).toBe(true);
+    expect(events.some((e) => e.name === 'dispatcher:rejected')).toBe(true);
   });
 
   it('captures invocation error → finishReason: error', async () => {
@@ -207,7 +211,7 @@ describe('createRealAgentRunner — failure paths', () => {
     expect(result.finishReason).toBe('error');
     expect(result.error).toMatch(/boom/);
     const events = runStore.listEvents(result.runId);
-    const completed = events.find((e) => e.kind === 'dispatcher:completed');
+    const completed = events.find((e) => e.name === 'dispatcher:completed');
     expect(completed).toBeTruthy();
     const c = JSON.parse(completed!.payload);
     expect(c.finishReason).toBe('error');
@@ -223,6 +227,6 @@ describe('createRealAgentRunner — failure paths', () => {
     expect(result.finishReason).toBe('error');
     expect(result.error).toMatch(/cannot construct agent/);
     const events = runStore.listEvents(result.runId);
-    expect(events.some((e) => e.kind === 'dispatcher:builder_failed')).toBe(true);
+    expect(events.some((e) => e.name === 'dispatcher:builder_failed')).toBe(true);
   });
 });

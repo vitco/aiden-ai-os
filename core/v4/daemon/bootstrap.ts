@@ -49,6 +49,8 @@ import { createIdempotencyStore } from './idempotencyStore';
 import type { IdempotencyStore } from './idempotencyStore';
 import { createRunStore } from './runStore';
 import type { RunStore } from './runStore';
+// v4.10 Slice 10.2b — shared event taxonomy.
+import { categorizeEvent } from './eventCategories';
 import { createRestartFailureCounter } from './restartFailureCounter';
 import type { RestartFailureCounter } from './restartFailureCounter';
 import { getResourceRegistry } from './resourceRegistry';
@@ -951,12 +953,27 @@ export function bootstrapDaemon(opts: BootstrapOptions = {}): DaemonBootstrapHan
             triggerEventId: input.triggerEventId,
             status:         'running',
           });
-          runStore.emitEvent(runId, 'dispatcher:invoked', {
-            source:    input.triggerContext.source,
-            triggerId: input.triggerContext.triggerId,
-            eventId:   input.triggerEventId,
-            templated: input.triggerContext.promptTemplate !== null,
-            messageLen: input.initialMessage.length,
+          // v4.10 Slice 10.2b — rich emission via the shared taxonomy.
+          // Placeholder runner path; still wants a categorised row so
+          // trace_query produces consistent shape regardless of which
+          // runner was wired.
+          const tags = categorizeEvent('dispatcher:invoked');
+          runStore.emitEventRich({
+            runId,
+            category:  tags.category,
+            kind:      tags.kind,
+            name:      'dispatcher:invoked',
+            sessionId: input.sessionId,
+            summary:   `placeholder/${input.triggerContext.source}`,
+            payload: {
+              source:    input.triggerContext.source,
+              triggerId: input.triggerContext.triggerId,
+              eventId:   input.triggerEventId,
+              templated: input.triggerContext.promptTemplate !== null,
+              messageLen: input.initialMessage.length,
+            },
+            visibility:'system',
+            source:    'daemon',
           });
           runStore.setStatus(runId, 'completed', { finishReason: 'stop' });
           const result: DaemonAgentResult = { runId, finishReason: 'stop' };
