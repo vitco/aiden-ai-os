@@ -345,26 +345,59 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
   if (status === 'done') {
     line = `${message} ${theme.style.answer(value)}`;
   } else {
-    // v4.9.2 Slice 2 (commit 0d0668f1) attempted to fix cursor
-    // misalignment by post-pending cursorBackward(ghost.length).
-    // Live-REPL diagnostic proved the fix is structurally inert:
-    // @inquirer/core's screen-manager.js:56 appends an ABSOLUTE
-    // cursorTo(this.cursorPos.cols) AFTER our content, overriding
-    // any cursor-positioning escape we emit inline. The real fix
-    // requires either rendering the ghost via a side-channel post-
-    // render write or moving it out of the inline line entirely —
-    // both need the proper save/restore refactor scheduled for v4.10
-    // once the prompt has a real screen-manager-aware test harness.
-    // Reverted here so the shipped v4.9.2 doesn't carry a "fix" that
-    // doesn't fix anything. Bug D status: known, deferred.
-    const ghostStr = ghost ? dim(ghost) : '';
-    line = `${prefix} ${message}${value}${ghostStr}`;
+    // v4.10 Slice 10.5 — Bug D fix, Path A (footer rendering).
+    //
+    // History of prior attempts (both reverted as inert):
+    //   - v4.9.2 Slice 2 (commit 0d0668f1) post-pended a
+    //     cursorBackward(ghost.length) escape inside this string.
+    //   - v4.9.6 reframed the same idea with save/restore escapes.
+    // Both failed for the same structural reason: @inquirer/core's
+    // screen-manager.js (L24) strips VT control sequences from the
+    // measured prompt width, and screen-manager.js (L56) emits an
+    // absolute cursorTo() AFTER our content, overriding any inline
+    // cursor escape. The library OWNS final cursor position on the
+    // line it renders.
+    //
+    // Path A — pattern from prior architectural consultation: do not
+    // insert terminal control side-effects into strings owned by
+    // another renderer. Use the library's intended extension point.
+    // @inquirer/core's documented render contract accepts a tuple
+    // `[content, bottomContent]` (see create-prompt.js:115,
+    // screen-manager.js:21/53-54): screen-manager paints
+    // bottomContent below the input line and then walks the cursor
+    // back up to the input line. With NO embedded ghost, the cursor
+    // naturally lands right after `value` — correct by construction.
+    //
+    // UX trade-off accepted with this slice: ghost no longer appears
+    // inline (visually mid-line). Instead it renders as a dim line
+    // directly below the prompt. Caret positioning becomes trivially
+    // correct AND independent of @inquirer/core internals. Tab /
+    // Right-arrow acceptance behaviour is unchanged — that path
+    // mutates `value`, not the ghost-render branch.
+    //
+    // Regression layer: the PTY harness test added with this slice
+    // (tests/v4/cli/aidenPromptFooterGhost.test.ts) drives a real
+    // Aiden under node-pty and asserts the line containing `▲ ` does
+    // NOT include the ghost suggestion text. v4.9.2/v4.9.6 lacked a
+    // PTY-level regression layer, which is why both shipped inert.
+    line = `${prefix} ${message}${value}`;
   }
 
-  // Footer (dropdown). Returning a tuple `[line, footer]` adds the
-  // footer below the input line; inquirer takes care of cursor
-  // positioning so the cursor stays on `line`.
-  let footer: string | undefined;
+  // ── Footer assembly (bottomContent tuple slot) ───────────────────
+  // Two independent sources contribute to bottomContent:
+  //   1. Ghost suggestion — a single dim line, indented 2 cols to
+  //      visually anchor under the prompt's `▲ ` glyph + space.
+  //   2. Slash-command dropdown — multi-row picker.
+  // When both fire (typing `/d` with a slash-ghost AND open dropdown),
+  // the ghost line goes first (immediately below input) and the
+  // dropdown rows follow. This stacking is intentional: the ghost
+  // previews what Tab would complete TO, the dropdown shows the
+  // full match list — same vertical column, increasing specificity.
+  const ghostLine = ghost && status === 'idle'
+    ? `  ${dim(ghost)}`
+    : '';
+
+  let dropdownLines: string | undefined;
   if (dropdownOpen && status === 'idle') {
     const matches = filterFn(value);
     if (matches.length > 0) {
@@ -378,9 +411,12 @@ export default createPrompt<string, AidenPromptConfig>((config, done) => {
         matches.length > window.length
           ? `  ${dim(`… ${matches.length - window.length} more`)}`
           : '';
-      footer = [...rows, more].filter((r) => r.length > 0).join('\n');
+      dropdownLines = [...rows, more].filter((r) => r.length > 0).join('\n');
     }
   }
+
+  const footerParts = [ghostLine, dropdownLines].filter((s): s is string => typeof s === 'string' && s.length > 0);
+  const footer = footerParts.length > 0 ? footerParts.join('\n') : undefined;
 
   return footer ? [line, footer] : line;
 });

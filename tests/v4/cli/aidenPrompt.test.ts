@@ -156,27 +156,49 @@ beforeEach(async () => {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
-describe('aidenPrompt — cursor positioning (Bug D — deferred to v4.10)', () => {
-  it('ghost-bearing render currently has NO cursor fix wired (Bug D documented + deferred)', () => {
+describe('aidenPrompt — Bug D fix via footer rendering (v4.10 Slice 10.5)', () => {
+  it('ghost text renders in the footer slot, NOT inline in the prompt line', () => {
     const runner = renderPrompt({
       commands: [{ name: 'daemon', description: 'Manage the Aiden daemon.' }],
       history:  [],
     });
     runner.type('/d');
-    const { line } = runner.lastRender();
-    // v4.9.2 STATE: Bug D (cursor lands ghost.length cols past
-    // end-of-value when a ghost is present) is documented but NOT
-    // fixed in this release. The Slice 2 attempt at a cursorBackward
-    // post-pend (commit 0d0668f1) was reverted because
-    // @inquirer/core's screen-manager.js:56 appends an absolute
-    // cursorTo() AFTER our content, overriding any inline cursor-
-    // positioning escape. The real fix requires the save/restore
-    // refactor scheduled for v4.10. This test pins the current
-    // (broken) shape so a future accidental "fix" that doesn't
-    // actually work shows up as a changed test rather than silent
-    // regression.
-    expect(line).toContain('aemon');           // ghost text is rendered
-    expect(line).not.toMatch(/\[\d+D/);        // …but NO cursor-back fix
+    const { line, footer } = runner.lastRender();
+    // v4.10 Slice 10.5 — Path A. The ghost suggestion ("aemon" — the
+    // tail of "/daemon" minus the typed "/d") MUST NOT appear inline
+    // in the prompt line. Inquirer's screen-manager owns cursor
+    // positioning on `line`; with no embedded ghost it naturally
+    // lands right after the typed value. The ghost text renders in
+    // the footer slot below.
+    expect(line).not.toContain('aemon');
+    expect(line).not.toMatch(/\[\d+D/);    // no inline cursor escape either
+    // And footer carries the ghost (in addition to dropdown rows).
+    expect(footer).toBeDefined();
+    expect(footer).toContain('aemon');
+  });
+
+  it('no ghost AND no dropdown → string return (no tuple)', () => {
+    const runner = renderPrompt({
+      commands: [{ name: 'daemon', description: 'Manage the Aiden daemon.' }],
+      history:  [],
+    });
+    runner.type('xy');     // free-text, no history match → no ghost
+    const { footer } = runner.lastRender();
+    expect(footer).toBeUndefined();
+  });
+
+  it('ghost without dropdown (free-text history match) still lands in footer', () => {
+    const runner = renderPrompt({
+      commands: [{ name: 'daemon', description: 'Manage the Aiden daemon.' }],
+      history:  ['how do I quit'],
+    });
+    runner.type('how');
+    const { line, footer } = runner.lastRender();
+    // free-text ghost (rest of "how do I quit") must be in footer,
+    // not embedded in the prompt line.
+    expect(line).not.toContain('do I quit');
+    expect(footer).toBeDefined();
+    expect(footer).toContain('do I quit');
   });
 });
 
@@ -209,15 +231,19 @@ describe('aidenPrompt — extra render-snapshot coverage', () => {
     expect(footer).toContain('/doctor');
   });
 
-  it('produces no footer for non-slash input (free-text mode)', () => {
+  it('free-text input with NO history match returns string (no footer)', () => {
     const runner = renderPrompt({
       commands: [{ name: 'daemon', description: 'Manage the Aiden daemon.' }],
-      history:  ['how do I quit'],
+      history:  ['unrelated'],
     });
-    runner.type('how');
+    runner.type('zzz');     // no history match → no ghost → no footer
     const { footer } = runner.lastRender();
-    // Dropdown is gated on value.startsWith('/'); free-text history
-    // suggestion lives inline as a ghost, not in the footer.
     expect(footer).toBeUndefined();
   });
+
+  // v4.10 Slice 10.5 — Bug D fix (Path A) moved ghost out of the
+  // line into the footer. This used to assert `footer === undefined`
+  // for free-text + history match; the new contract is the opposite —
+  // ghost goes to the footer slot. The "ghost without dropdown lands
+  // in footer" test above covers the new positive case.
 });
