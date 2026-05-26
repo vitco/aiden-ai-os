@@ -39,6 +39,8 @@
 import type { Message } from '../../../../providers/v4/types';
 import type { TriggerSource } from '../types';
 import type { RunStore } from '../runStore';
+// v4.10 Slice 10.2b — shared event taxonomy.
+import { categorizeEvent } from '../eventCategories';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -130,13 +132,28 @@ export function deliverOnlyStub(
     triggerEventId: input.triggerEventId,
     status:         'running',
   });
-  runStore.emitEvent(runId, 'delivered', {
-    source:        input.triggerContext.source,
-    triggerId:     input.triggerContext.triggerId,
-    eventId:       input.triggerEventId,
-    messageBytes:  input.initialMessage.length,
-    deliverOnly:   true,
-    /* future: target channel, adapter, response */
+  // v4.10 Slice 10.2b — rich emission. 'delivered' maps to dispatcher
+  // category via the shared categoriser; status='ok' since this stub
+  // always succeeds.
+  const tags = categorizeEvent('delivered');
+  runStore.emitEventRich({
+    runId,
+    category:  tags.category,
+    kind:      tags.kind,
+    name:      'delivered',
+    sessionId: input.sessionId,
+    status:    'ok',
+    summary:   `delivered ${input.triggerContext.source}/${input.triggerContext.triggerId}`,
+    payload: {
+      source:        input.triggerContext.source,
+      triggerId:     input.triggerContext.triggerId,
+      eventId:       input.triggerEventId,
+      messageBytes:  input.initialMessage.length,
+      deliverOnly:   true,
+      /* future: target channel, adapter, response */
+    },
+    visibility:'system',
+    source:    'daemon',
   });
   runStore.setStatus(runId, 'completed', { finishReason: 'delivered' });
   return { runId, finishReason: 'delivered' };

@@ -19,6 +19,7 @@
 import type { Db } from './db/connection';
 import type { RunRow, RunStatus } from './types';
 import type { RunRowSql, RunEventRowSql } from './db/schema/v1.spec';
+import type { EventVisibility, EventSource } from './eventCategories';
 
 function rowToTs(r: RunRowSql): RunRow {
   return {
@@ -56,7 +57,23 @@ export interface RunStore {
     completedAt?:  number;
   }): void;
   markResumePending(runId: number, reason: string): void;
+  /**
+   * Legacy emit — preserved for callers that don't yet pass rich tags.
+   * Delegates to emitEventRich with category='legacy' so legacy and
+   * new emissions share the same write path (truncation flag,
+   * payload_bytes, seq computation are all uniform).
+   */
   emitEvent(runId: number, kind: string, payload: Record<string, unknown>): void;
+  /**
+   * v4.10 Slice 10.2b — richer emission. Writes all fields the
+   * trace_query consumer can filter on (category/kind/name,
+   * tool_call_id, parent_event_id, status, duration_ms, summary).
+   * Returns the generated row id so callers can chain parent_event_id
+   * for follow-up rows. Payload over the inline cap (4096 bytes) is
+   * sliced + payload_truncated flag set + original size recorded
+   * in payload_bytes.
+   */
+  emitEventRich(opts: EmitEventOptions): number;
   listActive(): RunRow[];
   get(runId: number): RunRow | null;
   /** Diagnostic — event count for a run. */
@@ -93,8 +110,23 @@ export interface RunStore {
    * case.
    */
   countChildren(parentRunId: number): { total: number; completed: number };
-  /** List events for a run, ordered by ts ascending. */
-  listEvents(runId: number, limit?: number): Array<{ ts: number; kind: string; payload: string }>;
+  /**
+   * List events for a run, ordered by ts ascending. Returns the legacy
+   * shape (ts/kind/payload) plus `name` so callers that previously
+   * asserted on emitter-original identifiers (e.g. `dispatcher:invoked`)
+   * still have a stable column once the kind taxonomy shifted to
+   * dotted form (`dispatcher.invoked`) in v4.10 Slice 10.2b.
+   */
+  listEvents(runId: number, limit?: number): Array<{ ts: number; kind: string; name: string | null; payload: string }>;
+  /**
+   * v4.10 Slice 10.2b — scope-aware event query. Backs the expanded
+   * trace_query tool + /trace recent slash. Returns rich rows
+   * including category/kind/name/tool_call_id/payload_truncated.
+   *
+   * Filters compose with AND. The `scope` discriminator gates which
+   * additional fields are required (run_id / session_id / hours).
+   */
+  listEventsScoped(opts: ListEventsScopedOptions): RunEventRich[];
   /**
    * v4.10 Slice 10.2 — list events for an entire REPL session, optionally
    * filtered by event kind. Backs `trace_query` + `/trace recent`.
@@ -117,12 +149,204 @@ export interface RunStore {
   }): Array<{ runId: number; ts: number; kind: string; payload: string }>;
 }
 
+/** v4.10 Slice 10.2b — rich emission options. */
+export interface EmitEventOptions {
+  runId:          number;
+  category:       string;
+  kind:           string;
+  /** The original emission name (e.g. `ui_task_update`). Useful for
+   *  exact-match queries that don't want to compute the kind. */
+  name?:          string | null;
+  /** Session id of the parent run. When omitted, the writer reads
+   *  it from the runs table — passing it explicitly saves the JOIN
+   *  on the hot path. */
+  sessionId?:     string | null;
+  /** Per-turn correlation id. NULL for events fired outside a turn
+   *  (boot, dispatcher rejections). */
+  turnId?:        string | null;
+  /** Links this event to a specific tool_call (matches the
+   *  `id` from the model's tool_call frame). */
+  toolCallId?:    string | null;
+  /** Link to a parent event (e.g. tool_call_completed → tool_call_started). */
+  parentEventId?: number | null;
+  /** Outcome marker — `ok`, `failed`, `blocked`, etc. Renderer-only. */
+  status?:        string | null;
+  /** Wall-clock duration of the action this event represents. */
+  durationMs?:    number | null;
+  /** One-line human summary. Surfaces in /trace recent without
+   *  forcing the consumer to parse payload. */
+  summary?:       string | null;
+  /** Event-specific data. Inline-sliced at 4096 bytes; original
+   *  byte count preserved via payload_bytes when truncated. */
+  payload?:       Record<string, unknown> | null;
+  /** Default 'model'. 'system' hides from model-facing trace_query
+   *  but still surfaces to /trace recent. 'user' is reserved for
+   *  future user-typed annotations. */
+  visibility?:    EventVisibility;
+  /** Free-form source label — 'repl' / 'daemon' / 'subagent' / 'mcp'. */
+  source?:        EventSource | string | null;
+}
+
+/** v4.10 Slice 10.2b — rich row shape returned by listEventsScoped. */
+export interface RunEventRich {
+  id:               number;
+  runId:            number;
+  sessionId:        string | null;
+  turnId:           string | null;
+  seq:              number;
+  ts:               number;
+  category:         string;
+  kind:             string;
+  name:             string | null;
+  toolCallId:       string | null;
+  parentEventId:    number | null;
+  status:           string | null;
+  durationMs:       number | null;
+  summary:          string | null;
+  payload:          string;        // raw JSON string
+  payloadTruncated: boolean;
+  payloadBytes:     number | null;
+  payloadRef:       string | null;
+  visibility:       string;
+  source:           string | null;
+}
+
+/** v4.10 Slice 10.2b — scoped query options. */
+export type ListEventsScopedOptions =
+  | {
+      scope:        'current_run';
+      runId:        number;
+      category?:    string;
+      kind?:        string;
+      name?:        string;
+      toolCallId?:  string;
+      limit?:       number;
+    }
+  | {
+      scope:        'current_session';
+      sessionId:    string;
+      category?:    string;
+      kind?:        string;
+      name?:        string;
+      toolCallId?:  string;
+      limit?:       number;
+    }
+  | {
+      scope:        'run_id';
+      runId:        number;
+      category?:    string;
+      kind?:        string;
+      name?:        string;
+      toolCallId?:  string;
+      limit?:       number;
+    }
+  | {
+      scope:        'session_id';
+      sessionId:    string;
+      category?:    string;
+      kind?:        string;
+      name?:        string;
+      toolCallId?:  string;
+      limit?:       number;
+    }
+  | {
+      scope:        'last_hours';
+      hours:        number;
+      category?:    string;
+      kind?:        string;
+      name?:        string;
+      toolCallId?:  string;
+      limit?:       number;
+    }
+  | {
+      scope:        'all';
+      category?:    string;
+      kind?:        string;
+      name?:        string;
+      toolCallId?:  string;
+      limit?:       number;
+    };
+
 export interface CreateRunStoreOptions {
   db: Db;
 }
 
 export function createRunStore(opts: CreateRunStoreOptions): RunStore {
   const db = opts.db;
+
+  // Shared write path for both legacy `emitEvent` and rich
+  // `emitEventRich`. Extracted as a closure so destructured callers
+  // (`const { emitEvent } = store; emitEvent(...)`) still hit the
+  // same implementation — `this`-bound dispatch wouldn't survive
+  // that pattern.
+  const emitEventRichImpl = (eo: EmitEventOptions): number => {
+    const now = Date.now();
+
+    // session_id: prefer caller-supplied (saves a JOIN); fall back
+    // to a lookup against runs. Null only if the run row vanished —
+    // shouldn't happen for live runs, but we tolerate it for
+    // legacy/orphan rows.
+    let sessionId: string | null = eo.sessionId ?? null;
+    if (sessionId === null) {
+      const r = db.prepare(
+        'SELECT session_id FROM runs WHERE id = ?',
+      ).get(eo.runId) as { session_id: string | null } | undefined;
+      sessionId = r?.session_id ?? null;
+    }
+
+    // seq: per-run monotonic counter. COALESCE handles the first
+    // event for a run (no rows → MAX returns NULL → COALESCE to 0
+    // → +1 = 1). Indexed by (run_id, seq) so this scales.
+    const seqRow = db.prepare(
+      'SELECT COALESCE(MAX(seq), 0) AS m FROM run_events WHERE run_id = ?',
+    ).get(eo.runId) as { m: number };
+    const seq = seqRow.m + 1;
+
+    // payload: serialise once, measure full size, then slice for
+    // inline storage. The truncation flag + original size let
+    // consumers know to fetch the full blob (future: payload_ref
+    // → external store) when they need it. Null payload is
+    // serialised as the literal "null" so the column stays NOT
+    // NULL (the column constraint dates to v1 and can't be relaxed
+    // via SQLite ALTER).
+    const fullJson  = JSON.stringify(eo.payload ?? null);
+    const fullBytes = Buffer.byteLength(fullJson, 'utf8');
+    const truncated = fullBytes > 4096;
+    const inline    = truncated ? fullJson.slice(0, 4096) : fullJson;
+
+    const r = db.prepare(
+      `INSERT INTO run_events (
+         run_id, session_id, turn_id, seq, ts,
+         category, kind, name,
+         tool_call_id, parent_event_id,
+         status, duration_ms, summary,
+         payload, payload_truncated, payload_bytes, payload_ref,
+         visibility, source
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      eo.runId,
+      sessionId,
+      eo.turnId          ?? null,
+      seq,
+      now,
+      eo.category,
+      eo.kind,
+      eo.name            ?? null,
+      eo.toolCallId      ?? null,
+      eo.parentEventId   ?? null,
+      eo.status          ?? null,
+      eo.durationMs      ?? null,
+      eo.summary         ?? null,
+      inline,
+      truncated ? 1 : 0,
+      truncated ? fullBytes : null,
+      null,                                 // payload_ref — reserved for v4.11 external store
+      eo.visibility      ?? 'model',
+      (eo.source as string | null | undefined) ?? null,
+    );
+    return Number(r.lastInsertRowid);
+  };
+
   return {
     create({ sessionId, instanceId, triggerEventId, status, startedAt, spawnedFromRunId, spawnedFromSessionId }) {
       const now = startedAt ?? Date.now();
@@ -166,10 +390,20 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
       ).run(reason, runId);
     },
     emitEvent(runId, kind, payload) {
-      const json = JSON.stringify(payload).slice(0, 4096);
-      db.prepare(
-        `INSERT INTO run_events (run_id, ts, kind, payload) VALUES (?, ?, ?, ?)`,
-      ).run(runId, Date.now(), kind, json);
+      // Legacy path — preserve the pre-Slice-10.2b call shape by
+      // routing through emitEventRich with category='legacy'. The
+      // category tells trace consumers "this emission predates the
+      // taxonomy"; a follow-up slice can migrate specific kinds into
+      // proper categories once their emitters opt in.
+      emitEventRichImpl({
+        runId,
+        category: 'legacy',
+        kind,
+        payload: payload ?? null,
+      });
+    },
+    emitEventRich(eo) {
+      return emitEventRichImpl(eo);
     },
     listActive(): RunRow[] {
       const rows = db
@@ -244,10 +478,148 @@ export function createRunStore(opts: CreateRunStoreOptions): RunStore {
       };
     },
     listEvents(runId, limit = 200) {
+      // v4.10 Slice 10.2b — selects `name` alongside legacy columns
+      // so callers asserting on the emitter-original event identifier
+      // (e.g. 'dispatcher:invoked', 'tool_call_started') get a stable
+      // column even though `kind` shifted to dotted form. Legacy rows
+      // (pre-migration) have `name` IS NULL.
       const rows = db.prepare(
-        `SELECT ts, kind, payload FROM run_events WHERE run_id = ? ORDER BY ts ASC LIMIT ?`,
-      ).all(runId, Math.max(1, Math.min(limit, 5000))) as Array<{ ts: number; kind: string; payload: string }>;
+        `SELECT ts, kind, name, payload FROM run_events WHERE run_id = ? ORDER BY ts ASC LIMIT ?`,
+      ).all(runId, Math.max(1, Math.min(limit, 5000))) as Array<{ ts: number; kind: string; name: string | null; payload: string }>;
       return rows;
+    },
+    listEventsScoped(qOpts) {
+      // v4.10 Slice 10.2b — scope-aware rich event query. Builds the
+      // WHERE clause from the discriminated scope + optional filters,
+      // then maps the snake_case sqlite row into the camelCase
+      // RunEventRich shape. All 6 scopes share the same SELECT list —
+      // only the WHERE composition differs.
+      const limit = Math.max(1, Math.min(qOpts.limit ?? 200, 5000));
+
+      const where:  string[]                    = [];
+      const params: Array<string | number>      = [];
+
+      // Scope predicate — first because it's the most selective and
+      // matches the index leading column (run_id, session_id, ts).
+      switch (qOpts.scope) {
+        case 'current_run':
+        case 'run_id': {
+          where.push('e.run_id = ?');
+          params.push(qOpts.runId);
+          break;
+        }
+        case 'current_session':
+        case 'session_id': {
+          where.push('e.session_id = ?');
+          params.push(qOpts.sessionId);
+          break;
+        }
+        case 'last_hours': {
+          const cutoff = Date.now() - Math.max(0, qOpts.hours) * 3_600_000;
+          where.push('e.ts >= ?');
+          params.push(cutoff);
+          break;
+        }
+        case 'all': {
+          // No scope predicate — caller assumes the cost. The limit
+          // still caps the result; combined with at least one of
+          // category/kind/name it stays fast.
+          break;
+        }
+      }
+
+      // Optional shared filters.
+      if (qOpts.category) {
+        where.push('e.category = ?');
+        params.push(qOpts.category);
+      }
+      if (qOpts.kind) {
+        where.push('e.kind = ?');
+        params.push(qOpts.kind);
+      }
+      if (qOpts.name) {
+        where.push('e.name = ?');
+        params.push(qOpts.name);
+      }
+      if (qOpts.toolCallId) {
+        where.push('e.tool_call_id = ?');
+        params.push(qOpts.toolCallId);
+      }
+
+      const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+      params.push(limit);
+
+      const rows = db.prepare(
+        `SELECT
+            e.id                AS id,
+            e.run_id             AS run_id,
+            e.session_id         AS session_id,
+            e.turn_id            AS turn_id,
+            e.seq                AS seq,
+            e.ts                 AS ts,
+            e.category           AS category,
+            e.kind               AS kind,
+            e.name               AS name,
+            e.tool_call_id       AS tool_call_id,
+            e.parent_event_id    AS parent_event_id,
+            e.status             AS status,
+            e.duration_ms        AS duration_ms,
+            e.summary            AS summary,
+            e.payload            AS payload,
+            e.payload_truncated  AS payload_truncated,
+            e.payload_bytes      AS payload_bytes,
+            e.payload_ref        AS payload_ref,
+            e.visibility         AS visibility,
+            e.source             AS source
+           FROM run_events e
+           ${whereSql}
+           ORDER BY e.ts DESC, e.id DESC
+           LIMIT ?`,
+      ).all(...params) as Array<{
+        id:                number;
+        run_id:            number;
+        session_id:        string | null;
+        turn_id:           string | null;
+        seq:               number;
+        ts:                number;
+        category:          string;
+        kind:              string;
+        name:              string | null;
+        tool_call_id:      string | null;
+        parent_event_id:   number | null;
+        status:            string | null;
+        duration_ms:       number | null;
+        summary:           string | null;
+        payload:           string;
+        payload_truncated: number;
+        payload_bytes:     number | null;
+        payload_ref:       string | null;
+        visibility:        string;
+        source:            string | null;
+      }>;
+
+      return rows.map((r) => ({
+        id:               r.id,
+        runId:            r.run_id,
+        sessionId:        r.session_id,
+        turnId:           r.turn_id,
+        seq:              r.seq,
+        ts:               r.ts,
+        category:         r.category,
+        kind:             r.kind,
+        name:             r.name,
+        toolCallId:       r.tool_call_id,
+        parentEventId:    r.parent_event_id,
+        status:           r.status,
+        durationMs:       r.duration_ms,
+        summary:          r.summary,
+        payload:          r.payload,
+        payloadTruncated: r.payload_truncated === 1,
+        payloadBytes:     r.payload_bytes,
+        payloadRef:       r.payload_ref,
+        visibility:       r.visibility,
+        source:           r.source,
+      }));
     },
     listEventsForSession(opts) {
       // v4.10 Slice 10.2 — session-scoped event query for trace_query +

@@ -487,15 +487,16 @@ describe('spawnSubAgent — v4.6 Phase 1 contract', () => {
       {},
     );
     expect(result.ok).toBe(true);
-    // Read run_events from the child's runs row.
+    // v4.10 Slice 10.2b — select `name` (the stable emitter id) since
+    // `kind` is now the dotted taxonomy form ('tool.call.started').
     const events = db
-      .prepare(`SELECT kind, payload FROM run_events WHERE run_id = ? ORDER BY id ASC`)
-      .all(Number(result.childRunId)) as Array<{ kind: string; payload: string }>;
-    const kinds = events.map((e) => e.kind);
-    expect(kinds).toContain('tool_call_started');
-    expect(kinds).toContain('tool_call_completed');
+      .prepare(`SELECT kind, name, payload FROM run_events WHERE run_id = ? ORDER BY id ASC`)
+      .all(Number(result.childRunId)) as Array<{ kind: string; name: string | null; payload: string }>;
+    const names = events.map((e) => e.name);
+    expect(names).toContain('tool_call_started');
+    expect(names).toContain('tool_call_completed');
     // Payload includes the tool name.
-    const started = events.find((e) => e.kind === 'tool_call_started')!;
+    const started = events.find((e) => e.name === 'tool_call_started')!;
     const parsedStarted = JSON.parse(started.payload) as { toolName: string };
     expect(parsedStarted.toolName).toBe('file_read');
   });

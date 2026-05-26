@@ -103,10 +103,12 @@ import { installPasteInterceptor, expandPasteLabels } from './pasteIntercept';
 import { startThemeWatcher, stopThemeWatcher } from '../../core/v4/theme/themeWatcher';
 import { expand, hasInterpolation, countSpans } from './shellInterpolation';
 import { installResizeGuard } from './resizeGuard';
+// v4.10 Slice 10.2b — shared event taxonomy. UI tool name → (category, kind).
+import { categorizeEvent } from '../../core/v4/daemon/eventCategories';
 
 /**
- * v4.10 Slice 10.2 — extracted onUiEvent factory. Builds the per-turn
- * closure that chatSession.runAgentTurn passes to the agent's
+ * v4.10 Slice 10.2 / 10.2b — extracted onUiEvent factory. Builds the
+ * per-turn closure that chatSession.runAgentTurn passes to the agent's
  * runConversation. Production calls this from inline at the dispatch
  * site (no shortcut); the integration test in
  * tests/v4/cli/chatSessionUiPersist.test.ts drives THIS helper with
@@ -118,9 +120,10 @@ import { installResizeGuard } from './resizeGuard';
  *   1. stopIndicator() — kill the "provider calling" spinner so the
  *      painted ui row lands cleanly below it.
  *   2. display.renderUiEvent(name, args) — TTY-gated render.
- *   3. runStore.emitEvent(runId, name, args) — durable persistence,
- *      gated on runStore + runId being present. try/catch so a DB
- *      fault never breaks dispatch.
+ *   3. runStore.emitEventRich(...) — durable persistence with the
+ *      Slice-10.2b (category, kind, name) taxonomy. Gated on runStore
+ *      + runId being present. try/catch so a DB fault never breaks
+ *      dispatch.
  *
  * Non-TTY note: renderUiEvent early-returns when !out.isTTY but the
  * persistence step still runs. Matches v4.9.3 Slice 1b discipline
@@ -128,8 +131,18 @@ import { installResizeGuard } from './resizeGuard';
  */
 export interface OnUiEventDeps {
   display:            { renderUiEvent(name: string, args: Record<string, unknown>): void };
-  runStore:           { emitEvent(runId: number, kind: string, payload: Record<string, unknown>): void } | undefined;
+  /**
+   * Slice 10.2b — the handler now writes the rich-shape row via
+   * emitEventRich so trace_query can filter on category/kind/name.
+   * Legacy emitEvent stays on the RunStore interface for non-UI
+   * callers; this helper opts into the new path.
+   */
+  runStore:           { emitEventRich(opts: import('../../core/v4/daemon/runStore').EmitEventOptions): number } | undefined;
   runId:              number | null;
+  /** Slice 10.2b — REPL session id, threaded through so the rich row
+   *  gets session_id populated without the writer having to JOIN
+   *  back to runs on every call. */
+  sessionId?:         string | null;
   stopIndicatorOnce:  () => void;
 }
 export function createOnUiEventHandler(
@@ -139,8 +152,23 @@ export function createOnUiEventHandler(
     deps.stopIndicatorOnce();
     deps.display.renderUiEvent(name, args);
     if (deps.runStore && deps.runId !== null) {
-      try { deps.runStore.emitEvent(deps.runId, name, args); }
-      catch { /* persistence faults must never break dispatch */ }
+      try {
+        // Slice 10.2b — map the UI tool name through the shared
+        // categoriser so daemon and REPL emitters share one taxonomy
+        // source. `source='repl'` distinguishes this from daemon-fired
+        // emissions of the same kind.
+        const tags = categorizeEvent(name);
+        deps.runStore.emitEventRich({
+          runId:     deps.runId,
+          category:  tags.category,
+          kind:      tags.kind,
+          name,
+          sessionId: deps.sessionId ?? null,
+          payload:   args,
+          visibility:'model',
+          source:    'repl',
+        });
+      } catch { /* persistence faults must never break dispatch */ }
     }
   };
 }
@@ -1547,6 +1575,9 @@ export class ChatSession implements ChatSessionLike {
           display:           this.opts.display,
           runStore:          replRunStore,
           runId:             replRunId,
+          // v4.10 Slice 10.2b — pass the REPL session id so the rich
+          // emit row gets session_id without the writer JOIN-ing to runs.
+          sessionId:         this.sessionId ?? null,
           stopIndicatorOnce,
         }),
         onProgress: streamingEnabled

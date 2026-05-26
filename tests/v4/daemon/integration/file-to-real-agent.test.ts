@@ -104,22 +104,25 @@ describe('integration — file trigger → real agent → run_events chain', () 
     expect(evRow?.status).toBe('done');
     expect(evRow?.runId).not.toBeNull();
 
+    // v4.10 Slice 10.2b — assert on `name` (the stable emitter
+    // identifier). `kind` is now the dotted taxonomy form
+    // ('dispatcher.invoked', 'tool.call.started').
     const runId = evRow!.runId!;
     const events = runStore.listEvents(runId);
-    const kinds = events.map((e) => e.kind);
-    expect(kinds).toContain('dispatcher:invoked');
-    expect(kinds).toContain('tool_call_started');
-    expect(kinds).toContain('tool_call_completed');
-    expect(kinds).toContain('dispatcher:completed');
+    const names = events.map((e) => e.name);
+    expect(names).toContain('dispatcher:invoked');
+    expect(names).toContain('tool_call_started');
+    expect(names).toContain('tool_call_completed');
+    expect(names).toContain('dispatcher:completed');
 
     // dispatcher:invoked payload reflects builder context.
-    const invokedPayload = JSON.parse(events.find((e) => e.kind === 'dispatcher:invoked')!.payload);
+    const invokedPayload = JSON.parse(events.find((e) => e.name === 'dispatcher:invoked')!.payload);
     expect(invokedPayload.source).toBe('file');
     expect(invokedPayload.triggerId).toBe('wat-1');
     expect(invokedPayload.model).toBe('llama3.2');
 
     // tool_call_started carries the tool name.
-    const toolStarted = JSON.parse(events.find((e) => e.kind === 'tool_call_started')!.payload);
+    const toolStarted = JSON.parse(events.find((e) => e.name === 'tool_call_started')!.payload);
     expect(toolStarted.toolName).toBe('file_read');
   });
 
@@ -187,8 +190,8 @@ describe('integration — file trigger → real agent → run_events chain', () 
     const recent = runStore.listRecent({ limit: 5 });
     expect(recent.length).toBeGreaterThan(0);
     const events = runStore.listEvents(recent[0].id);
-    const kinds = events.map((e) => e.kind);
-    expect(kinds).toContain('dispatcher:builder_failed');
+    const names = events.map((e) => e.name);
+    expect(names).toContain('dispatcher:builder_failed');
   });
 
   it('two concurrent daemon claims use different sessionIds (state isolation)', async () => {

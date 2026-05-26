@@ -38,6 +38,8 @@ import type { ToolRegistry, ToolContext } from '../toolRegistry';
 import type { ProviderAdapter, Message, ToolSchema, ToolCallRequest, ToolCallResult } from '../../../providers/v4/types';
 import { FallbackAdapter } from '../providerFallback';
 import type { RunStore } from '../daemon/runStore';
+// v4.10 Slice 10.2b — shared event taxonomy.
+import { categorizeEvent } from '../daemon/eventCategories';
 import type { Logger } from '../logger/logger';
 
 // ── Hard-coded blocklist (Q5 from design doc §2) ────────────────────────────
@@ -461,10 +463,25 @@ function buildOnToolCall(deps: ChildBuilderDeps):
         callStarts.set(call.id, startedAt);
         const argsSummary = safeShortJson(call.arguments, 200);
         if (runStore && childRunId !== undefined) {
-          runStore.emitEvent(childRunId, 'tool_call_started', {
-            toolName: call.name,
-            args:     argsSummary,
-            ts:       startedAt,
+          // v4.10 Slice 10.2b — rich emission. Source='subagent' so
+          // trace_query can filter to child-only events; toolCallId
+          // links the started/completed pair.
+          const tags = categorizeEvent('tool_call_started');
+          runStore.emitEventRich({
+            runId:      childRunId,
+            category:   tags.category,
+            kind:       tags.kind,
+            name:       'tool_call_started',
+            toolCallId: call.id ?? null,
+            status:     'started',
+            summary:    call.name,
+            payload: {
+              toolName: call.name,
+              args:     argsSummary,
+              ts:       startedAt,
+            },
+            visibility: 'system',
+            source:     'subagent',
           });
         }
         if (logger) {
@@ -481,11 +498,24 @@ function buildOnToolCall(deps: ChildBuilderDeps):
       callStarts.delete(call.id);
       const durationMs = Date.now() - startedAt;
       if (runStore && childRunId !== undefined) {
-        runStore.emitEvent(childRunId, 'tool_call_completed', {
-          toolName:  call.name,
-          error:     result?.error ?? null,
-          hasResult: result?.result !== undefined && result?.result !== null,
+        const tags = categorizeEvent('tool_call_completed');
+        runStore.emitEventRich({
+          runId:      childRunId,
+          category:   tags.category,
+          kind:       tags.kind,
+          name:       'tool_call_completed',
+          toolCallId: call.id ?? null,
+          status:     result?.error ? 'failed' : 'ok',
           durationMs,
+          summary:    `${call.name}${result?.error ? ' (failed)' : ''}`,
+          payload: {
+            toolName:  call.name,
+            error:     result?.error ?? null,
+            hasResult: result?.result !== undefined && result?.result !== null,
+            durationMs,
+          },
+          visibility: 'system',
+          source:     'subagent',
         });
       }
       if (logger) {

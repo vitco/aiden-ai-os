@@ -61,6 +61,8 @@ import type {
 import type { Message, ToolCallRequest, ToolCallResult } from '../../../../providers/v4/types';
 import type { Db } from '../db/connection';
 import type { RunStore } from '../runStore';
+// v4.10 Slice 10.2b — shared (category, kind) taxonomy.
+import { categorizeEvent } from '../eventCategories';
 import type { ResourceRegistry } from '../resourceRegistry';
 import type { TriggerRowSql } from '../db/schema/v1.spec';
 import type {
@@ -167,9 +169,21 @@ export function createRealAgentRunner(
           triggerEventId: input.triggerEventId,
           status:         'running',
         });
-        opts.runStore.emitEvent(runId, 'dispatcher:rejected', {
-          reason:        verdict.reason ?? 'trigger_quota',
-          dailySnapshot: verdict.daily,
+        // v4.10 Slice 10.2b — rich emission with the daemon taxonomy.
+        opts.runStore.emitEventRich({
+          runId,
+          category:  'dispatcher',
+          kind:      'dispatcher.rejected',
+          name:      'dispatcher:rejected',
+          sessionId: input.sessionId,
+          status:    'blocked',
+          summary:   `rejected: ${verdict.reason ?? 'trigger_quota'}`,
+          payload: {
+            reason:        verdict.reason ?? 'trigger_quota',
+            dailySnapshot: verdict.daily,
+          },
+          visibility: 'system',
+          source:     'daemon',
         });
         opts.runStore.setStatus(runId, 'failed', { finishReason: 'budget_exhausted' });
         log('warn', `[real-runner] rejected eventId=${input.triggerEventId}: ${verdict.reason}`);
@@ -209,21 +223,31 @@ export function createRealAgentRunner(
         triggerEventId: input.triggerEventId,
         status:         'running',
       });
-      opts.runStore.emitEvent(runId, 'dispatcher:invoked', {
-        source:        input.triggerContext.source,
-        triggerId:     input.triggerContext.triggerId,
-        eventId:       input.triggerEventId,
-        sessionId:     input.sessionId,
-        templated:     input.triggerContext.promptTemplate !== null,
-        messageLen:    input.initialMessage.length,
-        attempt:       input.triggerContext.attempt,
-        maxAttempts:   input.triggerContext.maxAttempts,
-        model:         resolved.model,
-        provider:      resolved.provider,
-        modelSource:   resolved.source,
-        approvalPolicy,
-        dailySnapshot: verdict.daily,
-        maxTokensPerFire: triggerSpec?.maxTokensPerFire ?? null,
+      opts.runStore.emitEventRich({
+        runId,
+        category:  'dispatcher',
+        kind:      'dispatcher.invoked',
+        name:      'dispatcher:invoked',
+        sessionId: input.sessionId,
+        summary:   `${input.triggerContext.source}/${input.triggerContext.triggerId}`,
+        payload: {
+          source:        input.triggerContext.source,
+          triggerId:     input.triggerContext.triggerId,
+          eventId:       input.triggerEventId,
+          sessionId:     input.sessionId,
+          templated:     input.triggerContext.promptTemplate !== null,
+          messageLen:    input.initialMessage.length,
+          attempt:       input.triggerContext.attempt,
+          maxAttempts:   input.triggerContext.maxAttempts,
+          model:         resolved.model,
+          provider:      resolved.provider,
+          modelSource:   resolved.source,
+          approvalPolicy,
+          dailySnapshot: verdict.daily,
+          maxTokensPerFire: triggerSpec?.maxTokensPerFire ?? null,
+        },
+        visibility: 'system',
+        source:     'daemon',
       });
 
       const approvalCallbacks = buildDaemonApprovalCallbacks({
@@ -246,9 +270,20 @@ export function createRealAgentRunner(
           approvalPolicy,
           approvalCallbacks,
           hooks: {
-            onToolCall: (call, phase, result) => emitToolEvent(opts.runStore, runId, call, phase, result, startedAt, now),
+            onToolCall: (call, phase, result) => emitToolEvent(opts.runStore, runId, input.sessionId, call, phase, result, startedAt, now),
             onBudgetWarning: (level, turn, max) => {
-              opts.runStore.emitEvent(runId, 'budget_warning', { level, turn, max });
+              opts.runStore.emitEventRich({
+                runId,
+                category:  'dispatcher',
+                kind:      'dispatcher.budget_warning',
+                name:      'budget_warning',
+                sessionId: input.sessionId,
+                status:    'warn',
+                summary:   `budget ${level}: turn=${turn} max=${max}`,
+                payload:   { level, turn, max },
+                visibility:'system',
+                source:    'daemon',
+              });
             },
           },
           abortSignal: perTurnWatcher.signal,
@@ -256,7 +291,18 @@ export function createRealAgentRunner(
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         log('error', `[real-runner] agentBuilder threw eventId=${input.triggerEventId}: ${msg}`);
-        opts.runStore.emitEvent(runId, 'dispatcher:builder_failed', { error: msg });
+        opts.runStore.emitEventRich({
+          runId,
+          category:  'dispatcher',
+          kind:      'dispatcher.builder_failed',
+          name:      'dispatcher:builder_failed',
+          sessionId: input.sessionId,
+          status:    'failed',
+          summary:   `agentBuilder threw: ${msg.slice(0, 120)}`,
+          payload:   { error: msg },
+          visibility:'system',
+          source:    'daemon',
+        });
         opts.runStore.setStatus(runId, 'failed', { finishReason: 'error' });
         return { runId, finishReason: 'error', error: msg };
       }
@@ -283,8 +329,22 @@ export function createRealAgentRunner(
           // try/catch matches the chatSession + aidenCLI sites — a
           // locked DB or schema drift must not crash dispatch.
           onUiEvent: (name: string, args: Record<string, unknown>) => {
-            try { opts.runStore.emitEvent(runId, name, args); }
-            catch { /* persistence faults must never break dispatch */ }
+            // v4.10 Slice 10.2b — rich emission via the shared
+            // categoriser so daemon-fired UI events line up with
+            // REPL-fired ones in trace_query results.
+            try {
+              const tags = categorizeEvent(name);
+              opts.runStore.emitEventRich({
+                runId,
+                category:  tags.category,
+                kind:      tags.kind,
+                name,
+                sessionId: input.sessionId,
+                payload:   args,
+                visibility:'model',
+                source:    'daemon',
+              });
+            } catch { /* persistence faults must never break dispatch */ }
           },
         });
         // Stamp the actual token usage onto the watcher for the
@@ -305,14 +365,29 @@ export function createRealAgentRunner(
       });
 
       const finishReason = pickFinishReason(result, invocationError, perTurnWatcher.hit());
-      opts.runStore.emitEvent(runId, 'dispatcher:completed', {
-        finishReason,
-        totalTokens:   perTurnWatcher.used(),
-        durationMs:    now() - startedAt,
-        dailySnapshot: finalSnapshot,
-        perTurnBudgetHit: perTurnWatcher.hit(),
-        perTurnReason: perTurnWatcher.reason(),
-        invocationError: invocationError ? invocationError.slice(0, 200) : null,
+      opts.runStore.emitEventRich({
+        runId,
+        category:  'dispatcher',
+        kind:      'dispatcher.completed',
+        name:      'dispatcher:completed',
+        sessionId: input.sessionId,
+        // 'delivered' / 'stop' are the agent's successful finish reasons;
+        // map them to 'ok' for consumers. Everything else (error,
+        // budget_exhausted, tool_loop) surfaces verbatim as the status.
+        status:    (finishReason === 'delivered' || finishReason === 'stop') ? 'ok' : finishReason,
+        durationMs: now() - startedAt,
+        summary:   `finish=${finishReason} tokens=${perTurnWatcher.used()}`,
+        payload: {
+          finishReason,
+          totalTokens:   perTurnWatcher.used(),
+          durationMs:    now() - startedAt,
+          dailySnapshot: finalSnapshot,
+          perTurnBudgetHit: perTurnWatcher.hit(),
+          perTurnReason: perTurnWatcher.reason(),
+          invocationError: invocationError ? invocationError.slice(0, 200) : null,
+        },
+        visibility: 'system',
+        source:     'daemon',
       });
 
       // ── 10: map result → DaemonAgentResult ────────────────────────────
@@ -367,29 +442,60 @@ function readDailyBudgetFromEnv(): number | null {
 
 /** Major-events run_event emitter for tool calls. Truncated payload. */
 function emitToolEvent(
-  runStore: RunStore,
-  runId:    number,
-  call:     ToolCallRequest,
-  phase:    'before' | 'after',
-  result:   ToolCallResult | undefined,
+  runStore:  RunStore,
+  runId:     number,
+  sessionId: string,
+  call:      ToolCallRequest,
+  phase:     'before' | 'after',
+  result:    ToolCallResult | undefined,
   startedAt: number,
-  now:      () => number,
+  now:       () => number,
 ): void {
   try {
+    // v4.10 Slice 10.2b — emit through emitEventRich with the shared
+    // categoriser. tool_call_started and tool_call_completed share
+    // toolCallId so consumers can pair them.
     if (phase === 'before') {
       const argsSummary = safeShortJson(call.arguments, 200);
-      runStore.emitEvent(runId, 'tool_call_started', {
-        toolName: call.name,
-        args:     argsSummary,
-        ts:       now(),
+      const tags = categorizeEvent('tool_call_started');
+      runStore.emitEventRich({
+        runId,
+        category:  tags.category,
+        kind:      tags.kind,
+        name:      'tool_call_started',
+        sessionId,
+        toolCallId: call.id ?? null,
+        status:    'started',
+        summary:   call.name,
+        payload: {
+          toolName: call.name,
+          args:     argsSummary,
+          ts:       now(),
+        },
+        visibility: 'system',
+        source:     'daemon',
       });
       return;
     }
-    runStore.emitEvent(runId, 'tool_call_completed', {
-      toolName:  call.name,
-      error:     result?.error ?? null,
-      hasResult: result?.result !== undefined && result?.result !== null,
+    const tags = categorizeEvent('tool_call_completed');
+    runStore.emitEventRich({
+      runId,
+      category:  tags.category,
+      kind:      tags.kind,
+      name:      'tool_call_completed',
+      sessionId,
+      toolCallId: call.id ?? null,
+      status:    result?.error ? 'failed' : 'ok',
       durationMs: now() - startedAt,
+      summary:   `${call.name}${result?.error ? ' (failed)' : ''}`,
+      payload: {
+        toolName:  call.name,
+        error:     result?.error ?? null,
+        hasResult: result?.result !== undefined && result?.result !== null,
+        durationMs: now() - startedAt,
+      },
+      visibility: 'system',
+      source:     'daemon',
     });
   } catch { /* never let observability crash the agent loop */ }
 }

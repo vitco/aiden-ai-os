@@ -497,6 +497,69 @@ const V12_SQL = `
 ALTER TABLE hooks ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0;
 `;
 
+// v4.10 Slice 10.2b — run_events richer schema. The original 5-field
+// shape (id, run_id, ts, kind, payload) was too thin for the queries
+// v4.10's trace_query + /trace recent need: filter-by-category,
+// filter-by-name, filter-by-tool_call_id, scope-by-session, and
+// parent-child event linking. Adds 16 columns + 7 new indexes
+// (existing idx_run_events_run on (run_id, ts) already covers one
+// of the target query paths and stays as-is).
+//
+// Backfill strategy:
+//   - seq           : copy from id (legacy rows get a monotonic per-
+//                     process counter; new rows write a true per-run
+//                     counter via emitEventRich)
+//   - category      : 'legacy' (the rich-emission code path tags
+//                     new rows via core/v4/daemon/eventCategories.ts)
+//   - session_id    : JOIN backfill from parent runs row
+//   - other columns : NULL — caller fills via emitEventRich; legacy
+//                     emitEvent path provides only the legacy subset
+//
+// Payload semantics change: existing emitEvent hard-sliced to 4096
+// bytes without a flag; the rich path now writes original byte count
+// to payload_bytes and sets payload_truncated=1 when clipped. Legacy
+// callers continue working unchanged.
+//
+// Drops payload's NOT NULL constraint (payload becomes optional in
+// the new shape so summary-only events can omit it). SQLite does
+// not support DROP NOT NULL via ALTER, so we leave the existing
+// constraint — new emissions always pass at least `{}` JSON or
+// fail validation upstream.
+const V13_SQL = `
+ALTER TABLE run_events ADD COLUMN session_id        TEXT;
+ALTER TABLE run_events ADD COLUMN turn_id           TEXT;
+ALTER TABLE run_events ADD COLUMN seq               INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE run_events ADD COLUMN category          TEXT NOT NULL DEFAULT 'legacy';
+ALTER TABLE run_events ADD COLUMN name              TEXT;
+ALTER TABLE run_events ADD COLUMN tool_call_id      TEXT;
+ALTER TABLE run_events ADD COLUMN parent_event_id   INTEGER REFERENCES run_events(id);
+ALTER TABLE run_events ADD COLUMN status            TEXT;
+ALTER TABLE run_events ADD COLUMN duration_ms       INTEGER;
+ALTER TABLE run_events ADD COLUMN summary           TEXT;
+ALTER TABLE run_events ADD COLUMN payload_truncated INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE run_events ADD COLUMN payload_bytes     INTEGER;
+ALTER TABLE run_events ADD COLUMN payload_ref       TEXT;
+ALTER TABLE run_events ADD COLUMN visibility        TEXT NOT NULL DEFAULT 'model';
+ALTER TABLE run_events ADD COLUMN source            TEXT;
+ALTER TABLE run_events ADD COLUMN schema_version    INTEGER NOT NULL DEFAULT 1;
+
+UPDATE run_events SET seq = id WHERE seq = 0;
+
+UPDATE run_events
+   SET session_id = (
+     SELECT session_id FROM runs WHERE runs.id = run_events.run_id
+   )
+ WHERE session_id IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_run_events_run_seq        ON run_events(run_id, seq);
+CREATE INDEX IF NOT EXISTS idx_run_events_run_kind_seq   ON run_events(run_id, kind, seq);
+CREATE INDEX IF NOT EXISTS idx_run_events_kind_ts        ON run_events(kind, ts);
+CREATE INDEX IF NOT EXISTS idx_run_events_category_ts    ON run_events(category, ts);
+CREATE INDEX IF NOT EXISTS idx_run_events_tool_call      ON run_events(tool_call_id);
+CREATE INDEX IF NOT EXISTS idx_run_events_parent         ON run_events(parent_event_id);
+CREATE INDEX IF NOT EXISTS idx_run_events_session_ts     ON run_events(session_id, ts);
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -510,9 +573,18 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 10, name: 'v4.9 slice 7 — external trace adoption',       sql: V10_SQL },
   { version: 11, name: 'v4.9 slice 12a — hook system',                  sql: V11_SQL },
   { version: 12, name: 'v4.9 slice 12b — hook auto-disable counter',    sql: V12_SQL },
+  { version: 13, name: 'v4.10 slice 10.2b — run_events richer schema',  sql: V13_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
+
+/**
+ * v4.10 Slice 10.2b — exposed for the v13 migration smoke test, which
+ * needs to apply migrations up to a target version (not all the way
+ * to LATEST). Production callers should use `runMigrations(db)` —
+ * this constant is for diagnostic + test surfaces only.
+ */
+export const MIGRATIONS_FOR_TESTS = MIGRATIONS;
 
 function getCurrentVersion(db: Database.Database): number {
   // The schema_version table may not exist yet on first boot. Detect

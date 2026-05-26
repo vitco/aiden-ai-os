@@ -65,6 +65,8 @@ import os from 'node:os';
 import { daemonDbPath } from '../../core/v4/daemon/daemonConfig';
 import { openDaemonDb } from '../../core/v4/daemon/db/connection';
 import { createRunStore } from '../../core/v4/daemon/runStore';
+// v4.10 Slice 10.2b — shared event taxonomy. Tool name → (category, kind).
+import { categorizeEvent } from '../../core/v4/daemon/eventCategories';
 import { makeSpawnSubAgentTool } from '../../tools/v4/subagent/spawnSubAgentTool';
 // v4.10 Slice 10.2 — trace_query tool (REPL-only). Factory pattern
 // matches spawn_sub_agent: dependencies injected at registration.
@@ -1345,8 +1347,22 @@ export async function buildAgentRuntime(
       display.renderUiEvent(name, args);
       const rid = replParentRunRef.runId;
       if (rid !== null) {
-        try { replRunStore.emitEvent(rid, name, args); }
-        catch { /* persistence faults must never break dispatch */ }
+        // v4.10 Slice 10.2b — rich emission with (category, kind, name)
+        // taxonomy. Source='repl' because the approvalEngine fires
+        // through the REPL surface, not the daemon dispatcher.
+        try {
+          const tags = categorizeEvent(name);
+          replRunStore.emitEventRich({
+            runId:     rid,
+            category:  tags.category,
+            kind:      tags.kind,
+            name,
+            sessionId: replParentRunRef.sessionId ?? null,
+            payload:   args,
+            visibility:'model',
+            source:    'repl',
+          });
+        } catch { /* persistence faults must never break dispatch */ }
       }
     },
     // Phase 16f: append-on-disk for "Allow always" choices. Single-process
@@ -1970,8 +1986,23 @@ export async function buildAgentRuntime(
       display.renderUiEvent(name, args);
       const rid = replParentRunRef.runId;
       if (rid !== null) {
-        try { replRunStore.emitEvent(rid, name, args); }
-        catch { /* persistence faults must never break dispatch */ }
+        // v4.10 Slice 10.2b — rich emission. Source='subagent' here
+        // because the wire fires from a spawn_sub_agent child rendering
+        // through the parent's onUiEvent — the parent's run is the row
+        // owner but the originator is the child.
+        try {
+          const tags = categorizeEvent(name);
+          replRunStore.emitEventRich({
+            runId:     rid,
+            category:  tags.category,
+            kind:      tags.kind,
+            name,
+            sessionId: replParentRunRef.sessionId ?? null,
+            payload:   args,
+            visibility:'model',
+            source:    'subagent',
+          });
+        } catch { /* persistence faults must never break dispatch */ }
       }
     },
     runStore:            replRunStore,
@@ -2004,6 +2035,9 @@ export async function buildAgentRuntime(
   toolRegistry.register(makeTraceQueryTool({
     runStore:         replRunStore,
     resolveSessionId: () => replParentRunRef.sessionId,
+    // v4.10 Slice 10.2b — scope='current_run' resolves to the in-flight
+    // turn's runId; null when no turn is active.
+    resolveRunId:     () => replParentRunRef.runId,
   }));
 
   // ── Phase v4.1-2.1: gateway message processor ────────────────────
@@ -2119,9 +2153,16 @@ export async function buildAgentRuntime(
       const limit = Number.isFinite(limitArg) && limitArg > 0
         ? Math.min(Math.floor(limitArg), 200)
         : 20;
+      // v4.10 Slice 10.2b — query the rich shape so the renderer can
+      // surface category/kind/name/status/duration without re-parsing
+      // payload JSON for every row.
       let rows;
       try {
-        rows = replRunStore.listEventsForSession({ sessionId, limit });
+        rows = replRunStore.listEventsScoped({
+          scope:     'current_session',
+          sessionId,
+          limit,
+        });
       } catch (e) {
         ctx.display.printError(`trace query failed: ${(e as Error).message}`);
         return {};
@@ -2133,10 +2174,17 @@ export async function buildAgentRuntime(
       ctx.display.info(`Recent events (${rows.length}, newest first):`);
       for (const r of rows) {
         const tsIso = new Date(r.ts).toISOString().replace(/\.\d{3}Z$/, 'Z');
-        const preview = r.payload.length > 80
-          ? `${r.payload.slice(0, 77)}…`
-          : r.payload;
-        ctx.display.write(`  ${tsIso}  run=${r.runId}  ${r.kind}  ${preview}\n`);
+        // Prefer the human summary when emitter set one; otherwise
+        // fall back to a payload preview. Status + duration appear
+        // inline so dispatcher rows surface their finish reason
+        // without a payload parse.
+        const summaryOrPreview = r.summary
+          ?? (r.payload.length > 80 ? `${r.payload.slice(0, 77)}…` : r.payload);
+        const statusBit   = r.status     ? ` [${r.status}]`       : '';
+        const durationBit = r.durationMs ? ` (${r.durationMs}ms)` : '';
+        ctx.display.write(
+          `  ${tsIso}  run=${r.runId}  ${r.category}/${r.kind}${statusBit}${durationBit}  ${summaryOrPreview}\n`,
+        );
       }
       return {};
     },

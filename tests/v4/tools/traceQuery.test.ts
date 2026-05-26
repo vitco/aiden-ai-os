@@ -118,23 +118,23 @@ describe('RunStore.listEventsForSession', () => {
 describe('trace_query tool', () => {
   it('returns events for the current REPL session, newest first', async () => {
     const r = store.create({ sessionId: 'sess-tool', instanceId: 'test-inst', status: 'running' });
-    store.emitEvent(r, 'ui_task_update', { task_id: 'a', label: 'first', status: 'running' });
-    store.emitEvent(r, 'ui_task_done',   { task_id: 'a', status: 'success' });
+    store.emitEventRich({ runId: r, category: 'task', kind: 'task.update', name: 'ui_task_update', sessionId: 'sess-tool', payload: { task_id: 'a' } });
+    store.emitEventRich({ runId: r, category: 'task', kind: 'task.done',   name: 'ui_task_done',   sessionId: 'sess-tool', payload: { task_id: 'a' } });
 
     const tool = makeTraceQueryTool({
       runStore:         store,
       resolveSessionId: () => 'sess-tool',
     });
     const result = (await tool.execute!({}, { cwd: tmp, paths: {} as never })) as {
-      success: boolean; count: number; events: Array<{ kind: string }>;
+      success: boolean; count: number; events: Array<{ kind: string; name: string | null }>;
     };
     expect(result.success).toBe(true);
     expect(result.count).toBe(2);
-    expect(result.events[0].kind).toBe('ui_task_done');
-    expect(result.events[1].kind).toBe('ui_task_update');
+    expect(result.events[0].kind).toBe('task.done');
+    expect(result.events[1].kind).toBe('task.update');
   });
 
-  it('returns synthetic failure when no session is active', async () => {
+  it('returns synthetic failure when no session is active (default scope)', async () => {
     const tool = makeTraceQueryTool({
       runStore:         store,
       resolveSessionId: () => null,
@@ -146,55 +146,77 @@ describe('trace_query tool', () => {
     expect(result.error).toMatch(/no active repl session/i);
   });
 
-  it('parses since arg: "5min" returns events within last 5 minutes', async () => {
-    const r = store.create({ sessionId: 'sess-since', instanceId: 'test-inst', status: 'running' });
-    store.emitEvent(r, 'event-now', {});
+  it('scope="current_run" filters to a specific in-flight runId', async () => {
+    const r1 = store.create({ sessionId: 'sess-scope', instanceId: 'test-inst', status: 'running' });
+    const r2 = store.create({ sessionId: 'sess-scope', instanceId: 'test-inst', status: 'running' });
+    store.emitEventRich({ runId: r1, category: 'task', kind: 'task.update', name: 'ui_task_update', payload: { v: 1 } });
+    store.emitEventRich({ runId: r2, category: 'task', kind: 'task.update', name: 'ui_task_update', payload: { v: 2 } });
+
     const tool = makeTraceQueryTool({
       runStore:         store,
-      resolveSessionId: () => 'sess-since',
+      resolveSessionId: () => 'sess-scope',
+      resolveRunId:     () => r1,
     });
-    const result = (await tool.execute!({ since: '5min' }, { cwd: tmp, paths: {} as never })) as {
-      success: boolean; count: number; filters: { since_ms: number | null };
+    const result = (await tool.execute!({ scope: 'current_run' }, { cwd: tmp, paths: {} as never })) as {
+      success: boolean; count: number; events: Array<{ run_id: number }>;
     };
     expect(result.success).toBe(true);
     expect(result.count).toBe(1);
-    expect(result.filters.since_ms).not.toBeNull();
+    expect(result.events[0].run_id).toBe(r1);
   });
 
-  it('parses since arg: garbage input becomes null (no filter)', async () => {
-    const r = store.create({ sessionId: 'sess-junk', instanceId: 'test-inst', status: 'running' });
-    store.emitEvent(r, 'e', {});
+  it('category + kind filters compose (AND)', async () => {
+    const r = store.create({ sessionId: 'sess-filt', instanceId: 'test-inst', status: 'running' });
+    store.emitEventRich({ runId: r, category: 'task',    kind: 'task.update',         name: 'ui_task_update',    payload: {} });
+    store.emitEventRich({ runId: r, category: 'task',    kind: 'task.done',           name: 'ui_task_done',      payload: {} });
+    store.emitEventRich({ runId: r, category: 'tool',    kind: 'tool.call.started',   name: 'tool_call_started', payload: {} });
     const tool = makeTraceQueryTool({
       runStore:         store,
-      resolveSessionId: () => 'sess-junk',
+      resolveSessionId: () => 'sess-filt',
     });
-    const result = (await tool.execute!({ since: 'tomorrow afternoon maybe' }, { cwd: tmp, paths: {} as never })) as {
-      success: boolean; count: number; filters: { since_ms: number | null };
-    };
-    expect(result.success).toBe(true);
-    expect(result.count).toBe(1);
-    expect(result.filters.since_ms).toBeNull();
+    const onlyTask = (await tool.execute!({ category: 'task' }, { cwd: tmp, paths: {} as never })) as { count: number };
+    expect(onlyTask.count).toBe(2);
+    const taskDone = (await tool.execute!({ category: 'task', kind: 'task.done' }, { cwd: tmp, paths: {} as never })) as { count: number };
+    expect(taskDone.count).toBe(1);
   });
 
-  it('truncated flag fires when payload hits the runStore 4096-char cap', async () => {
+  it('scope="last_hours" requires positive hours', async () => {
+    const tool = makeTraceQueryTool({
+      runStore:         store,
+      resolveSessionId: () => null,
+    });
+    const bad = (await tool.execute!({ scope: 'last_hours' }, { cwd: tmp, paths: {} as never })) as { success: boolean; error?: string };
+    expect(bad.success).toBe(false);
+    expect(bad.error).toMatch(/last_hours/);
+  });
+
+  it('payload_truncated flag fires when payload exceeds 4096 bytes', async () => {
     const r = store.create({ sessionId: 'sess-trunc', instanceId: 'test-inst', status: 'running' });
-    // Build a payload whose JSON exceeds 4096 chars. runStore.emitEvent
-    // slices to 4096; trace_query reads it back and the .length >= cap
-    // marks `truncated: true`.
+    // Payload whose serialised JSON exceeds 4096 bytes. emitEventRich
+    // slices to 4096 inline + marks payload_truncated + records the
+    // original byte size in payload_bytes.
     const huge = 'x'.repeat(5000);
-    store.emitEvent(r, 'ui_artifact_created', { path: '/tmp/x', kind: 'file', preview: huge });
+    store.emitEventRich({
+      runId:    r,
+      category: 'artifact',
+      kind:     'artifact.created',
+      name:     'ui_artifact_created',
+      sessionId:'sess-trunc',
+      payload:  { path: '/tmp/x', kind: 'file', preview: huge },
+    });
 
     const tool = makeTraceQueryTool({
       runStore:         store,
       resolveSessionId: () => 'sess-trunc',
     });
     const result = (await tool.execute!({}, { cwd: tmp, paths: {} as never })) as {
-      events: Array<{ truncated: boolean }>;
+      events: Array<{ payload_truncated: boolean; payload_bytes: number | null }>;
     };
-    expect(result.events[0].truncated).toBe(true);
+    expect(result.events[0].payload_truncated).toBe(true);
+    expect(result.events[0].payload_bytes).toBeGreaterThan(4096);
   });
 
-  it('schema enumerates the three optional args', () => {
+  it('schema exposes the v4.10 Slice 10.2b filter set', () => {
     const tool = makeTraceQueryTool({
       runStore:         store,
       resolveSessionId: () => null,
@@ -203,6 +225,8 @@ describe('trace_query tool', () => {
     expect(tool.toolset).toBe('trace');
     expect(tool.mutates).toBe(false);
     const props = tool.schema.inputSchema.properties as Record<string, unknown>;
-    expect(Object.keys(props).sort()).toEqual(['kind_prefix', 'limit', 'since']);
+    expect(Object.keys(props).sort()).toEqual([
+      'category', 'hours', 'kind', 'limit', 'name', 'run_id', 'scope', 'session_id', 'tool_call_id',
+    ]);
   });
 });
