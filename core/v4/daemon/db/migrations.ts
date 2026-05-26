@@ -560,6 +560,42 @@ CREATE INDEX IF NOT EXISTS idx_run_events_parent         ON run_events(parent_ev
 CREATE INDEX IF NOT EXISTS idx_run_events_session_ts     ON run_events(session_id, ts);
 `;
 
+// v4.10 Slice 10.8 — durable Task-lite kernel. Sits ABOVE the existing
+// `runs` table conceptually: one Task may span many turn-runs via the
+// `trace_ids` JSON array (which back-references `run_events.id` from
+// Slice 10.2b). Auto-created by `chatSession.runAgentTurn` per user
+// message; status lifecycle covers active → completed/failed/cancelled.
+// Lightweight by design — `claim_lock`, `worker_pid`, `last_heartbeat_at`
+// from the heavier full-Task-kernel ledger pattern (deferred to a
+// v4.11 daemon-path slice) are deliberately absent here. REPL is
+// single-process, doesn't need worker-coordination state.
+//
+// Forward-compat fields land NOW so v4.11 doesn't need a second
+// table-add migration:
+//   - parent_task_id  : sub-task linkage (no UI this slice)
+//   - artifact_ids    : back-reference into a future artifact registry
+//   - channel_id      : 'repl' hard-coded today; Telegram/etc later
+const V14_SQL = `
+CREATE TABLE IF NOT EXISTS tasks (
+  id              TEXT PRIMARY KEY,
+  title           TEXT NOT NULL,
+  goal            TEXT NOT NULL,
+  status          TEXT NOT NULL,
+  created_at      INTEGER NOT NULL,
+  updated_at      INTEGER NOT NULL,
+  channel_id      TEXT,
+  session_id      TEXT NOT NULL,
+  parent_task_id  TEXT,
+  trace_ids       TEXT NOT NULL DEFAULT '[]',
+  artifact_ids    TEXT NOT NULL DEFAULT '[]'
+);
+
+CREATE INDEX IF NOT EXISTS idx_tasks_session_created
+  ON tasks(session_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_status
+  ON tasks(status, created_at DESC);
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -574,6 +610,7 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 11, name: 'v4.9 slice 12a — hook system',                  sql: V11_SQL },
   { version: 12, name: 'v4.9 slice 12b — hook auto-disable counter',    sql: V12_SQL },
   { version: 13, name: 'v4.10 slice 10.2b — run_events richer schema',  sql: V13_SQL },
+  { version: 14, name: 'v4.10 slice 10.8 — durable Task-lite kernel',   sql: V14_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;

@@ -804,6 +804,11 @@ export async function buildAgentRuntime(
      VALUES (?, ?, ?, ?, ?, ?)`,
   ).run(replInstanceId, process.pid, os.hostname(), Date.now(), Date.now(), VERSION);
   const replRunStore = createRunStore({ db: replDb });
+  // v4.10 Slice 10.8 — durable Task-lite store. Shares the daemon.db
+  // handle with replRunStore so /tasks listing + /adjust mutations
+  // see the same WAL view chatSession's runAgentTurn writes through.
+  const { createTaskStore } = await import('../../core/v4/daemon/taskStore');
+  const replTaskStore = createTaskStore({ db: replDb });
 
   // v4.6 Phase 3A — operator kill-switch for sub-agent spawning.
   // Initialised as early as possible so any subsequent tool wiring
@@ -2420,6 +2425,158 @@ export async function buildAgentRuntime(
     },
   });
 
+  // ── v4.10 Slice 10.8 — /tasks slash command ────────────────────────
+  //
+  // Read-only listing surface for the durable Task-lite kernel.
+  // Mirrors /trace recent's shape: query daemon.db via the long-
+  // lived replParentRunRef.chatSessionId (Slice 10.2c) so the
+  // command works between turns too. Auto-created per user-message
+  // turn by chatSession.runAgentTurn (Slice 10.8 B3).
+  //
+  // Subcommands:
+  //   /tasks               → all this session, newest first, default 20
+  //   /tasks active        → filter by status='active'
+  //   /tasks completed     → filter status='completed'
+  //   /tasks cancelled     → filter status='cancelled'
+  //   /tasks failed        → filter status='failed'
+  //   /tasks <N>           → numeric arg sets the limit (1..200)
+  commandRegistry.register({
+    name: 'tasks',
+    description: 'List durable tasks for this REPL session. Usage: /tasks [active|completed|cancelled|failed|<N>]',
+    category: 'system',
+    icon: '⊡',
+    handler: async (ctx) => {
+      const sessionId = replParentRunRef.chatSessionId;
+      if (!sessionId) {
+        ctx.display.dim('No REPL session active — start the chat first.');
+        return {};
+      }
+      const arg = (ctx.args[0] ?? '').toLowerCase();
+      const validStatuses = new Set(['pending', 'active', 'completed', 'failed', 'cancelled']);
+      let filterStatus: string | undefined;
+      let limit = 20;
+      if (arg && validStatuses.has(arg)) {
+        filterStatus = arg;
+      } else if (arg) {
+        const n = Number(arg);
+        if (Number.isFinite(n) && n > 0) limit = Math.min(Math.floor(n), 200);
+      }
+      let rows;
+      try {
+        rows = replTaskStore.listRecent({
+          sessionId,
+          ...(filterStatus ? { status: filterStatus as any } : {}),
+          limit,
+        });
+      } catch (e) {
+        ctx.display.printError(`/tasks query failed: ${(e as Error).message}`);
+        return {};
+      }
+      if (rows.length === 0) {
+        ctx.display.dim(filterStatus
+          ? `(no ${filterStatus} tasks in this conversation)`
+          : '(no tasks recorded yet in this conversation)');
+        return {};
+      }
+      const filterSuffix = filterStatus ? ` (${filterStatus})` : '';
+      ctx.display.info(`Tasks${filterSuffix} — ${rows.length} row${rows.length === 1 ? '' : 's'}, newest first:`);
+      for (const r of rows) {
+        const tsIso = new Date(r.createdAt).toISOString().replace(/\.\d{3}Z$/, 'Z');
+        // Title is already capped at 80 chars on insert (Slice 10.8
+        // B2 createTaskStore); render compact for the listing.
+        const trim = r.title.length > 60 ? `${r.title.slice(0, 57)}…` : r.title;
+        ctx.display.write(
+          `  ${tsIso}  ${r.id}  [${r.status.padEnd(9)}]  ${trim}\n`,
+        );
+      }
+      return {};
+    },
+  });
+
+  // ── v4.10 Slice 10.8 — /adjust slash command ───────────────────────
+  //
+  // Mutation surface for the Task-lite kernel. Two operations:
+  //
+  //   /adjust <task_id> cancel        → setStatus(task_id, 'cancelled')
+  //   /adjust <task_id> goal <text>   → setGoal(task_id, <text>)
+  //
+  // `cancel` records the intent only — does NOT abort the in-flight
+  // agent loop (no abort-signal-from-outside-the-turn plumbing
+  // exists yet; that's v4.11 territory per Phase B Q3). Future
+  // turns observe the status and can react.
+  //
+  // `goal <text>` updates the task's goal verbatim. Future tools
+  // and the session-summary pipeline can read the new goal.
+  commandRegistry.register({
+    name: 'adjust',
+    description: 'Adjust a task. Usage: /adjust <task_id> cancel  OR  /adjust <task_id> goal <new text>',
+    category: 'system',
+    icon: '⊕',
+    handler: async (ctx) => {
+      const taskId = (ctx.args[0] ?? '').trim();
+      const op     = (ctx.args[1] ?? '').toLowerCase();
+      if (!taskId || !op) {
+        ctx.display.printError(
+          'Usage: /adjust <task_id> cancel  OR  /adjust <task_id> goal <text>',
+          'Run /tasks to see ids.',
+        );
+        return {};
+      }
+      let existing;
+      try { existing = replTaskStore.get(taskId); }
+      catch (e) {
+        ctx.display.printError(`/adjust lookup failed: ${(e as Error).message}`);
+        return {};
+      }
+      if (!existing) {
+        ctx.display.printError(`Task not found: ${taskId}`, 'Run /tasks to see ids.');
+        return {};
+      }
+      if (op === 'cancel') {
+        if (existing.status === 'cancelled') {
+          ctx.display.dim(`Task ${taskId} is already cancelled.`);
+          return {};
+        }
+        if (existing.status === 'completed' || existing.status === 'failed') {
+          ctx.display.warn(`Task ${taskId} is ${existing.status}; marking cancelled anyway.`);
+        }
+        try {
+          replTaskStore.setStatus(taskId, 'cancelled');
+          ctx.display.success(`Task ${taskId} cancelled.`);
+          ctx.display.dim(
+            '  Note: this records intent. Any in-flight agent turn keeps running — mid-turn abort is a future capability.',
+          );
+        } catch (e) {
+          ctx.display.printError(`/adjust failed: ${(e as Error).message}`);
+        }
+        return {};
+      }
+      if (op === 'goal') {
+        // ctx.args[0]=task_id, args[1]='goal', args[2..]=new goal text.
+        const newGoal = ctx.args.slice(2).join(' ').trim();
+        if (!newGoal) {
+          ctx.display.printError(
+            'Goal text is required.',
+            'Usage: /adjust <task_id> goal <new text>',
+          );
+          return {};
+        }
+        try {
+          replTaskStore.setGoal(taskId, newGoal);
+          ctx.display.success(`Task ${taskId} goal updated.`);
+        } catch (e) {
+          ctx.display.printError(`/adjust failed: ${(e as Error).message}`);
+        }
+        return {};
+      }
+      ctx.display.printError(
+        `Unknown /adjust operation '${op}'.`,
+        'Try: /adjust <task_id> cancel  OR  /adjust <task_id> goal <text>',
+      );
+      return {};
+    },
+  });
+
   // Skill slash commands.
   try {
     const skillCmds = new SkillCommands(skillLoader);
@@ -2545,6 +2702,8 @@ export async function buildAgentRuntime(
     replRunStore,
     replInstanceId,
     replParentRunRef,
+    // v4.10 Slice 10.8 — durable Task-lite store.
+    replTaskStore,
   };
 }
 
@@ -2638,6 +2797,13 @@ export interface AgentRuntime {
   replRunStore:     import('../../core/v4/daemon/runStore').RunStore;
   replInstanceId:   string;
   /**
+   * v4.10 Slice 10.8 — durable Task-lite store. Mirrors replRunStore's
+   * lifecycle; shares the daemon.db handle so /tasks listing + /adjust
+   * mutations see consistent state with chatSession's runAgentTurn
+   * writes.
+   */
+  replTaskStore:    import('../../core/v4/daemon/taskStore').TaskStore;
+  /**
    * v4.10 Slice 10.2c — `chatSessionId` is the long-lived REPL session
    * id (set once at ChatSession.run() init, never cleared between turns).
    * `sessionId` is the per-turn mirror that gets nulled post-turn.
@@ -2729,6 +2895,11 @@ async function runInteractiveChat(cliOpts: any, opts: MainOptions): Promise<void
     replRunStore:     runtime.replRunStore,
     replInstanceId:   runtime.replInstanceId,
     replParentRunRef: runtime.replParentRunRef,
+    // v4.10 Slice 10.8 — durable Task-lite store. ChatSession's
+    // runAgentTurn auto-creates a task per user message + transitions
+    // status on success/failure. /tasks and /adjust slash commands
+    // read/write through this same handle.
+    replTaskStore:    runtime.replTaskStore,
   };
 
   if (cliOpts.tui) {

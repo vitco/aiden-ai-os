@@ -53,6 +53,15 @@ export function categorizeEvent(name: string): EventTags {
     // ── REPL ui_* tools (model-facing emission surface) ────────────
     case 'ui_task_update':       return { category: 'task',       kind: 'task.update'       };
     case 'ui_task_done':         return { category: 'task',       kind: 'task.done'         };
+
+    // ── Slice 10.8 Task-lite lifecycle (runtime-emitted, NOT model) ──
+    // Distinct kinds from ui_task_* so trace consumers can tell apart
+    // "model wants to surface progress" (task.update / task.done) from
+    // "runtime durable Task row changed state" (task.created /
+    // task.cancelled). Both share category='task' so /trace recent
+    // filtering by category surfaces the full conversation arc.
+    case 'task_created':         return { category: 'task',       kind: 'task.created'      };
+    case 'task_cancelled':       return { category: 'task',       kind: 'task.cancelled'    };
     case 'ui_command_result':    return { category: 'command',    kind: 'command.completed' };
     case 'ui_test_result':       return { category: 'command',    kind: 'command.test'      };
     case 'ui_approval_request':  return { category: 'approval',   kind: 'approval.requested'};

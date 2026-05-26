@@ -372,6 +372,90 @@ describe('chatSession onUiEvent — production routes through createOnUiEventHan
     expect(JSON.parse(r2End.payload).error).toBe('EACCES');
   });
 
+  it('Slice 10.8 — ChatSession.runAgentTurn wires through replTaskStore (source-contract guard)', async () => {
+    // The taskStore wire is best-effort + invisible to the user;
+    // the unit tests in tests/v4/daemon/taskStore.test.ts cover the
+    // store surface, but the integration site at chatSession.ts
+    // could regress silently (someone deletes the create() call or
+    // moves it inside a feature flag). This source-level assertion
+    // pins the contract: chatSession's runAgentTurn MUST call
+    // replTaskStore.create + replTaskStore.setStatus on terminal
+    // transitions. v4.9.1 mock-blindness mirror.
+    const src = await fs.readFile(
+      path.resolve(__dirname, '../../../cli/v4/chatSession.ts'),
+      'utf8',
+    );
+
+    // Per-turn create call — title + goal from userInput, sessionId
+    // from chatSession state.
+    expect(src).toMatch(/replTaskStore\.create\(\s*\{[\s\S]*?title:\s*userInput/);
+    expect(src).toMatch(/sessionId:\s*this\.sessionId,/);
+
+    // Both terminal status transitions wired: success path → completed
+    // (or failed if non-stop finish reason), and the throw path → failed.
+    expect(src).toMatch(/replTaskStore\.setStatus\(\s*replTaskId\s*,\s*['"]failed['"]\s*\)/);
+    expect(src).toMatch(/result\.finishReason\s*===\s*['"]stop['"]\s*\?\s*['"]completed['"]/);
+
+    // aidenCLI.ts must construct the store + plumb it through
+    // runtime + sessionOpts. If a future refactor drops the wire,
+    // the chatSession integration falls silently — this assertion
+    // catches it.
+    const cliSrc = await fs.readFile(
+      path.resolve(__dirname, '../../../cli/v4/aidenCLI.ts'),
+      'utf8',
+    );
+    expect(cliSrc).toMatch(/createTaskStore\(\s*\{\s*db:\s*replDb\s*\}\s*\)/);
+    expect(cliSrc).toMatch(/replTaskStore:\s*runtime\.replTaskStore/);
+  });
+
+  it('Slice 10.8 — ChatSession.runAgentTurn integration: turn creates task, transitions to completed, traceIds populated', async () => {
+    // Drive the production task-creation flow in isolation against a
+    // real TaskStore + real DB. We can't fully boot ChatSession in a
+    // unit test (it needs an agent, display, prompt module, etc.) so
+    // we replay the production call sequence directly with the same
+    // factory ChatSession would use. If a future refactor changes
+    // the call shape, the source-contract guard above catches the
+    // regression at the location level; this test covers the row
+    // shape + trace linkage.
+    const { createTaskStore } = await import('../../../core/v4/daemon/taskStore');
+    const taskStore = createTaskStore({ db });
+
+    // Step 1: turn begins — task created (chatSession.ts B3 wire).
+    const userInput = 'list files and tell me about the largest one';
+    const taskId = taskStore.create({
+      title:     userInput,
+      goal:      userInput,
+      sessionId: 'sess-integration',
+      channelId: 'repl',
+      status:    'active',
+    });
+    expect(taskStore.get(taskId)?.status).toBe('active');
+
+    // Step 2: turn emits some ui_* events. Each emission returns a
+    // run_event.id which gets appended to the task's traceIds.
+    const runId = runStore.create({ sessionId: 'sess-integration', instanceId: 'test-inst', status: 'running' });
+    const e1 = runStore.emitEventRich({
+      runId, category: 'task', kind: 'task.update', name: 'ui_task_update',
+      sessionId: 'sess-integration', payload: { task_id: 'm1', label: 'scanning', status: 'running' }, source: 'repl',
+    });
+    const e2 = runStore.emitEventRich({
+      runId, category: 'task', kind: 'task.done', name: 'ui_task_done',
+      sessionId: 'sess-integration', payload: { task_id: 'm1', status: 'success' }, source: 'repl',
+    });
+    taskStore.appendTraceId(taskId, e1);
+    taskStore.appendTraceId(taskId, e2);
+
+    // Step 3: turn completes — task transitions to 'completed' per
+    // chatSession.ts terminal-status block (result.finishReason === 'stop').
+    taskStore.setStatus(taskId, 'completed');
+
+    const finalTask = taskStore.get(taskId)!;
+    expect(finalTask.status).toBe('completed');
+    expect(finalTask.traceIds).toEqual([e1, e2]);
+    expect(finalTask.sessionId).toBe('sess-integration');
+    expect(finalTask.channelId).toBe('repl');
+  });
+
   it('Slice 10.6 — REPL + daemon onDecision wires SYMMETRICALLY emit approval.decided', async () => {
     // Source-contract symmetric-coverage guard for approval decisions.
     // The pre-Slice-10.6 gap: daemon path emitted approval.decided to

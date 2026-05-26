@@ -1,0 +1,246 @@
+/**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
+ * core/v4/daemon/taskStore.ts — v4.10 Slice 10.8.
+ *
+ * Durable Task-lite kernel. Sits ABOVE the per-turn `runs` table:
+ * one Task can span many turns via the `traceIds` array, which
+ * back-references `run_events.id` from Slice 10.2b. Designed to be
+ * lighter than the full-Task-kernel pattern (claim_lock, worker_pid,
+ * heartbeat fields, separate task_runs ledger) that a multi-worker
+ * daemon path would need — REPL is single-process so those
+ * coordination fields are deliberately absent. v4.11 daemon-path
+ * slice can add them if/when worker isolation becomes a real need.
+ *
+ * Factory pattern matches `createRunStore` (same daemon.db handle,
+ * same idiom). Migration v14 owns the table; this module owns the
+ * read/write surface.
+ *
+ * Status lifecycle:
+ *
+ *   pending  →  active  →  completed
+ *                       →  failed
+ *                       →  cancelled
+ *
+ * `pending` is in the enum for v4.11 forward-compat (daemon may
+ * legitimately queue tasks); REPL skips it and starts at `active`.
+ *
+ * Persistence policy: every write is best-effort. The caller wraps
+ * in try/catch so a locked DB / schema drift never crashes the
+ * REPL — same discipline as runStore.emitEventRich. Observability
+ * must not break dispatch.
+ */
+
+import type { Db } from './db/connection';
+
+export type TaskStatus = 'pending' | 'active' | 'completed' | 'failed' | 'cancelled';
+
+export interface Task {
+  id:           string;
+  title:        string;
+  goal:         string;
+  status:       TaskStatus;
+  createdAt:    number;
+  updatedAt:    number;
+  channelId:    string | null;
+  sessionId:    string;
+  parentTaskId: string | null;
+  traceIds:     number[];
+  artifactIds:  string[];
+}
+
+/** Raw column shape from sqlite. JSON arrays come back as strings. */
+interface TaskRowSql {
+  id:              string;
+  title:           string;
+  goal:            string;
+  status:          string;
+  created_at:      number;
+  updated_at:      number;
+  channel_id:      string | null;
+  session_id:      string;
+  parent_task_id:  string | null;
+  trace_ids:       string;
+  artifact_ids:    string;
+}
+
+function rowToTask(r: TaskRowSql): Task {
+  // Defensive JSON parses — corruption fall-through to empty arrays
+  // rather than crashing the listing surface.
+  let traceIds: number[] = [];
+  let artifactIds: string[] = [];
+  try {
+    const parsed = JSON.parse(r.trace_ids);
+    if (Array.isArray(parsed)) traceIds = parsed.filter((n): n is number => typeof n === 'number');
+  } catch { /* malformed JSON in this row — surface as empty */ }
+  try {
+    const parsed = JSON.parse(r.artifact_ids);
+    if (Array.isArray(parsed)) artifactIds = parsed.filter((s): s is string => typeof s === 'string');
+  } catch { /* same */ }
+  return {
+    id:           r.id,
+    title:        r.title,
+    goal:         r.goal,
+    status:       r.status as TaskStatus,
+    createdAt:    r.created_at,
+    updatedAt:    r.updated_at,
+    channelId:    r.channel_id,
+    sessionId:    r.session_id,
+    parentTaskId: r.parent_task_id,
+    traceIds,
+    artifactIds,
+  };
+}
+
+export interface CreateTaskOptions {
+  title:         string;
+  goal:          string;
+  sessionId:     string;
+  channelId?:    string | null;
+  parentTaskId?: string | null;
+  /** Default 'active'. v4.10 REPL never starts at 'pending'; the
+   *  enum value is reserved for v4.11 daemon queueing. */
+  status?:       TaskStatus;
+}
+
+export interface ListRecentTasksOptions {
+  sessionId?:    string;
+  status?:       TaskStatus;
+  /** Cap at 5000 (hard) or 50 (default). */
+  limit?:        number;
+}
+
+export interface TaskStore {
+  /** Create a new Task. Returns the generated id. */
+  create(opts: CreateTaskOptions): string;
+  /** Read one task by id. Returns null when missing. */
+  get(id: string): Task | null;
+  /**
+   * Transition status. updates updated_at in the same statement.
+   * Best-effort; missing task is a silent no-op (caller's already
+   * lost track and we don't want to escalate a missing-FK class
+   * into a runtime error).
+   */
+  setStatus(id: string, status: TaskStatus): void;
+  /**
+   * Replace the `goal` field (used by /adjust). Also bumps
+   * updated_at. Title is not touched — title is the at-creation
+   * label, goal is the live intent.
+   */
+  setGoal(id: string, goal: string): void;
+  /**
+   * Append a run_event.id to the task's traceIds array. Cheap atomic
+   * JSON-array-merge inside a single UPDATE. Duplicate ids are
+   * filtered out so noisy emitters can't blow the row size.
+   */
+  appendTraceId(id: string, eventId: number): void;
+  /**
+   * Listing surface for /tasks. Newest-first by created_at. Optional
+   * session + status filters compose with AND.
+   */
+  listRecent(opts?: ListRecentTasksOptions): Task[];
+}
+
+export interface CreateTaskStoreOptions {
+  db: Db;
+}
+
+/**
+ * Generate a task id with the `task_` prefix for grep-ability +
+ * crypto-strong randomness. Length tuned to ~16 hex chars after the
+ * prefix — short enough to type into `/adjust task_abc... cancel`,
+ * long enough for collision safety within a session.
+ */
+function newTaskId(): string {
+  // Avoid pulling in node:crypto module-eagerly to keep this module
+  // import-cheap; lazy require keeps consumers that only need the
+  // type interfaces fast.
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { randomBytes } = require('node:crypto');
+  return `task_${(randomBytes(8) as Buffer).toString('hex')}`;
+}
+
+export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
+  const db = opts.db;
+  return {
+    create({ title, goal, sessionId, channelId, parentTaskId, status }) {
+      const now = Date.now();
+      const id = newTaskId();
+      db.prepare(
+        `INSERT INTO tasks (
+           id, title, goal, status, created_at, updated_at,
+           channel_id, session_id, parent_task_id,
+           trace_ids, artifact_ids
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        id,
+        // Title cap matches the ui_task_update schema's ≤80-char hint.
+        title.slice(0, 80),
+        goal,
+        status ?? 'active',
+        now,
+        now,
+        channelId      ?? null,
+        sessionId,
+        parentTaskId   ?? null,
+        '[]',
+        '[]',
+      );
+      return id;
+    },
+    get(id) {
+      const r = db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as TaskRowSql | undefined;
+      return r ? rowToTask(r) : null;
+    },
+    setStatus(id, status) {
+      db.prepare(
+        `UPDATE tasks SET status = ?, updated_at = ? WHERE id = ?`,
+      ).run(status, Date.now(), id);
+    },
+    setGoal(id, goal) {
+      db.prepare(
+        `UPDATE tasks SET goal = ?, updated_at = ? WHERE id = ?`,
+      ).run(goal, Date.now(), id);
+    },
+    appendTraceId(id, eventId) {
+      // Read-modify-write. SQLite's WAL serialises writers so the
+      // race window is small but theoretically present; we de-dupe
+      // on write to keep the array bounded under repeat emits.
+      const row = db.prepare('SELECT trace_ids FROM tasks WHERE id = ?').get(id) as { trace_ids: string } | undefined;
+      if (!row) return;
+      let arr: number[] = [];
+      try {
+        const parsed = JSON.parse(row.trace_ids);
+        if (Array.isArray(parsed)) arr = parsed.filter((n): n is number => typeof n === 'number');
+      } catch { /* malformed — start fresh */ }
+      if (arr.includes(eventId)) return;
+      arr.push(eventId);
+      db.prepare(
+        `UPDATE tasks SET trace_ids = ?, updated_at = ? WHERE id = ?`,
+      ).run(JSON.stringify(arr), Date.now(), id);
+    },
+    listRecent(qOpts = {}) {
+      const limit = Math.max(1, Math.min(qOpts.limit ?? 50, 5000));
+      const where: string[]                 = [];
+      const params: Array<string | number>  = [];
+      if (qOpts.sessionId) {
+        where.push('session_id = ?');
+        params.push(qOpts.sessionId);
+      }
+      if (qOpts.status) {
+        where.push('status = ?');
+        params.push(qOpts.status);
+      }
+      const whereSql = where.length > 0 ? `WHERE ${where.join(' AND ')}` : '';
+      params.push(limit);
+      const rows = db.prepare(
+        `SELECT * FROM tasks ${whereSql} ORDER BY created_at DESC LIMIT ?`,
+      ).all(...params) as TaskRowSql[];
+      return rows.map(rowToTask);
+    },
+  };
+}

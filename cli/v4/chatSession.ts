@@ -382,6 +382,14 @@ export interface ChatSessionOptions {
   replRunStore?:    import('../../core/v4/daemon/runStore').RunStore;
   replInstanceId?:  string;
   /**
+   * v4.10 Slice 10.8 — durable Task-lite store. Optional for tests +
+   * for any caller that opts out of the task substrate (daemon-only
+   * runtimes, headless harnesses). When wired, `runAgentTurn` auto-
+   * creates a task per user message, transitions status on
+   * success/failure, and appends emitted run_event ids to traceIds.
+   */
+  replTaskStore?:   import('../../core/v4/daemon/taskStore').TaskStore;
+  /**
    * v4.10 Slice 10.2c — `chatSessionId` is the long-lived REPL session
    * id, written ONCE during run() init (after resumeSessionId resolves)
    * and never cleared between turns. Read surfaces like /trace recent
@@ -1360,6 +1368,33 @@ export class ChatSession implements ChatSessionLike {
       }
     }
 
+    // v4.10 Slice 10.8 — durable Task-lite creation, alongside the
+    // per-turn run row. Auto-create per user-message turn (Phase B
+    // Q2/Q5 — one Task per turn keeps the model adherence concern
+    // out of the trigger path). Title = first 80 chars of user input
+    // (taskStore caps it); goal = the full user input verbatim so
+    // future tools (/adjust, future Memory promotion) can read the
+    // original intent without parsing UI display rows. Best-effort —
+    // any write failure logs once and the turn proceeds.
+    let replTaskId: string | null = null;
+    const replTaskStore = this.opts.replTaskStore;
+    if (replTaskStore && this.sessionId) {
+      try {
+        replTaskId = replTaskStore.create({
+          title:     userInput,
+          goal:      userInput,
+          sessionId: this.sessionId,
+          channelId: 'repl',
+          status:    'active',
+        });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.warn('[tasks] failed to write REPL task row:',
+          err instanceof Error ? err.message : String(err));
+        replTaskId = null;
+      }
+    }
+
     // Phase 16c: streaming gated on display.streaming config.
     // v4.1.4 Part 1.6: PRODUCTION DEFAULT FLIPPED FROM FALSE TO TRUE.
     // Streaming delivers the activity indicator, tool-row live tick,
@@ -1669,6 +1704,22 @@ export class ChatSession implements ChatSessionLike {
             err instanceof Error ? err.message : String(err));
         }
       }
+      // v4.10 Slice 10.8 — task-lite terminal transition (success
+      // path). `stop` is the canonical clean finish; everything else
+      // routes to 'failed' so /tasks listing distinguishes user-
+      // visible failures from clean turns. 'cancelled' stays
+      // reserved for explicit /adjust <id> cancel and is never set
+      // by the terminal hook.
+      if (replTaskStore && replTaskId !== null) {
+        try {
+          const taskStatus = result.finishReason === 'stop' ? 'completed' : 'failed';
+          replTaskStore.setStatus(replTaskId, taskStatus);
+        } catch (err) {
+          // eslint-disable-next-line no-console
+          console.warn('[tasks] failed to finalize REPL task row:',
+            err instanceof Error ? err.message : String(err));
+        }
+      }
       // Clear the shared ref so a subsequent turn (or stray
       // spawn/fanout dispatched between turns from a slash command
       // handler) doesn't see a stale parent id.
@@ -1816,6 +1867,19 @@ export class ChatSession implements ChatSessionLike {
           // eslint-disable-next-line no-console
           console.warn('[runs] failed to mark REPL parent-run failed:',
             e2 instanceof Error ? e2.message : String(e2));
+        }
+      }
+      // v4.10 Slice 10.8 — symmetric task-lite failure transition.
+      // Thrown errors out of runConversation → task status='failed'.
+      // /tasks listing surfaces this so the user can re-issue the
+      // prompt with a fresh task or /adjust the goal.
+      if (replTaskStore && replTaskId !== null) {
+        try {
+          replTaskStore.setStatus(replTaskId, 'failed');
+        } catch (e3) {
+          // eslint-disable-next-line no-console
+          console.warn('[tasks] failed to mark REPL task failed:',
+            e3 instanceof Error ? e3.message : String(e3));
         }
       }
       if (replParentRunRef) {
