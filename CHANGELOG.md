@@ -1,3 +1,41 @@
+## v4.10.0 — 2026-05-26
+
+Aiden becomes inspectable, durable, and finally streams properly.
+
+Spanning v4.9.1 → v4.10.0. The v4.9.2 / v4.9.3 / v4.9.4 hotfix series shipped to npm but never got dedicated GitHub releases; this entry covers everything since v4.9.1 plus the eleven v4.10 sprint slices.
+
+### Critical fix
+- **Streaming default restored at the wizard layer.** `DEFAULT_CONFIG.display.streaming` now defaults to `true` — restoring what v4.1.4 attempted but couldn't operationally land. The pre-10.9 architecture had `chatSession.ts` runtime fallback at `true` (since v4.1.4) but the setup wizard wrote `...DEFAULT_CONFIG.display` into `config.yaml` with `streaming: false`, so the runtime fallback never fired for any wizard-installed user. Every install since v4.0 silently received non-streaming. Users reported "Aiden feels slow" because they waited for full responses with no visible feedback. v4.10 fixes the wizard layer to match the runtime intent. Existing users with explicit `streaming: false` in their config keep their setting AND see a one-time per-session disclosure suggesting the flip. (Slice 10.9)
+
+### New features
+- **Durable Task object.** Every user prompt now creates a persistent `Task` row with status / goal / traceIds back-reference. `/tasks [active|completed|cancelled|failed|<N>]` lists them; `/adjust <task_id> cancel` or `/adjust <task_id> goal <new text>` controls them. Lifecycle states: pending / active / completed / failed / cancelled. (Slice 10.8)
+- **Full trace persistence with rich schema.** Every tool call, permission decision, task lifecycle event lands in a 21-column `run_events` ledger with `(category, kind, name)` taxonomy + per-run `seq` + payload truncation tracking + tool-call-id correlation. Eight indexes for cheap filtering. `/trace recent` slash command + model-facing `trace_query` tool with scope dispatch (`current_run` / `current_session` / `run_id` / `session_id` / `last_hours` / `all`) + filters (category / kind / name / tool_call_id). (Slices 10.2 / 10.2b / 10.2c / 10.2d)
+- **Scoped permission grants with audit.** `Once` / `Session (this <arg-kind>)` / `Always (this <arg-kind>)` / `Deny` picker labels carry a dynamic qualifier showing what the scope actually covers (path / command / url / code / call). Per-project allowlists at `<cwd>/.aiden/approvals.json` shadow global `~/.aiden/approvals.json` entries. Entries now persist `createdAt` + `lastUsedAt` timestamps; refresh-on-reuse keeps the audit trail accurate. REPL approval decisions now emit to `run_events` symmetric to the daemon path (`category=approval kind=approval.decided`). Smart-mode auto-allow / auto-deny paths now record the actual decided risk tier in `onDecision` callbacks, fixing audit-trail drift. (Slices 10.6 / 10.6c)
+- **Project memory namespace as first-class file.** `PROJECT.md` travels with each project root, separate from global SOUL.md. Project-root detection cached at REPL boot and reused across the session. (Slices 10.1 / 10.1b)
+- **REPL crash survival.** Process-level `unhandledRejection` + `uncaughtException` handlers installed at boot with survive-by-default semantics — log + render one dim line + keep the session alive. Asymmetric with the daemon path's fail-fast handlers (daemon has no user to recover; REPL does). (Slice 10.7)
+- **Eval harness v1.** 20 contract tests under `tests/v4/eval/` protecting v4.10 substrate from regression at the cross-slice level: streaming-end-to-end (mockProvider-backed real adapter contract), streaming-default-audit (pins the wizard default), trace-end-to-end (multi-turn session surface), tasks-end-to-end (full lifecycle + traceIds back-reference), permission-grants-end-to-end (scope semantics + audit symmetry). (Slice 10.9)
+
+### Fixed
+- **Bug D ghost-text cursor (third attempt that actually works).** Ghost suggestion text moved out of the inline input line into the bottomContent tuple slot. Cursor now naturally lands right after the typed value because `@inquirer/core`'s screen-manager owns positioning on `content`, not `bottomContent`. Two prior attempts (v4.9.2 Slice 2 inline cursorBackward; v4.9.6 same shape reframed) shipped INERT because the screen-manager's absolute `cursorTo()` overrode any inline escape. Slice 10.4's node-pty harness is the regression layer those attempts lacked. (Slice 10.5)
+- **`/trace recent` works between turns.** Pre-10.2c the slash command read `replParentRunRef.sessionId` (turn-scoped, nulled post-turn) instead of `chatSessionId` (long-lived). Worked only mid-turn; reported "no active REPL session" between turns even though the chat was clearly alive. (Slice 10.2c)
+- **Channel isolation hardening.** `/channel telegram remove` now prints a shell-cleanup hint disclosing that Aiden can't reach `setx` / `~/.bashrc`-persisted env vars; also scans `config.yaml` for `${TELEGRAM_BOT_TOKEN}` references and warns when found. SIGINT/SIGTERM handlers now call `channelManager.stopAll()` with a 1s hard cap before `process.exit`, closing the Telegram polling-lock stale window. (Slice 10.7)
+- **Approval-prompt picker label accuracy.** Pre-10.6c the labels read "Session" / "Always" — temporal-scope vocabulary — but the engine treats them as signature scopes (this tool + this primary arg). Users granted "Session" for `file_write test3.txt` and were surprised when `file_write test4.txt` re-prompted. Labels now carry a dynamic arg-kind qualifier: "Session (this path)" / "Always (this command)" etc. (Slice 10.6c)
+
+### Internal
+- **Status footer enhancements** (Slice 10.3). REPL ergonomics polish.
+- **PTY test harness** (Slice 10.4). `tests/v4/harness/aidenTerm.ts` + `mockProvider.ts` for terminal regression coverage — load-bearing for Slice 10.5 + Slice 10.9.
+- **REPL StderrSink drop** (Slice 10.7a). Sub-slice ahead of full Slice 10.7 channel work.
+- **Symmetric-coverage source-contract guards.** A new test pattern asserts that paired emit sites (REPL + daemon paths) both fire their categorized events. Catches the "missing emit at a site that should emit" regression class that grep-based audits silently pass.
+
+### Known limitations (deferred to v4.11)
+- Mid-turn task abort. `/adjust <id> cancel` records intent but doesn't abort the in-flight agent loop; requires abort-signal-from-outside-the-turn plumbing.
+- Live status-bar refresh during streaming. Needs the renderer-ownership refactor.
+- Inline ghost text. Moved to footer for v4.10 — the inline form would require Aiden to own the final cursor position rather than `@inquirer/core`.
+- Full task-kernel ledger (claim_lock, worker_pid, heartbeat). Slice 10.8 ships the lighter REPL-scoped Task object; the multi-worker daemon path picks up the heavier kernel.
+- Cross-channel rendering coordination. Tasks are REPL-scoped this slice; Telegram / Discord task surfacing is v4.11+.
+
+---
+
 ## v4.9.4 — 2026-05-24
 
 Hotfix for tool-call protocol orphans.

@@ -94,7 +94,7 @@ Windows · Linux · WSL · macOS (API Mode)
 ![Built solo](https://img.shields.io/badge/Built-solo-B8A893?style=flat-square)
 ![By Taracod](https://img.shields.io/badge/By-Taracod-FF6B35?style=flat-square)
 ![White Lotus](https://img.shields.io/badge/Brand-White_Lotus-FFB088?style=flat-square)
-![v4.9.1](https://img.shields.io/badge/Latest-v4.9.1-4ADE80?style=flat-square)
+![v4.10.0](https://img.shields.io/badge/Latest-v4.10.0-4ADE80?style=flat-square)
 
 </div>
 
@@ -146,6 +146,17 @@ https://github.com/user-attachments/assets/7a66bc19-8b17-4b01-be85-3aa5945a1b3b
 
 
 <br>
+
+## What's new in v4.10
+
+Aiden becomes inspectable, durable, and finally streams properly.
+
+- **Streaming default restored at the wizard layer.** `display.streaming` now defaults to `true` for fresh installs — restoring what v4.1.4 attempted but couldn't operationally land because the wizard wrote the older default into your `config.yaml`. Existing users with explicit `streaming: false` keep their setting AND see a one-time per-session disclosure suggesting the flip.
+- **Durable Task object.** Every user prompt creates a persistent task row with status / goal / event back-references. `/tasks [active|completed|cancelled|<N>]` lists; `/adjust <task_id> cancel` or `/adjust <task_id> goal <new text>` controls.
+- **`/trace recent` event inspection.** Every tool call, permission decision, and task lifecycle event lands in a queryable `run_events` ledger. Filter by category / kind / name / tool_call_id; scope to the current run, this session, the last N hours, or all.
+- **Bug D ghost-text cursor fix.** Ghost suggestions now render on a footer line below the prompt; cursor lands right after your typed input. Third attempt that actually works — prior two (v4.9.2, v4.9.6) shipped inert because they tried to fight `@inquirer/core`'s cursor manager from inside the rendered string.
+- **Permission picker scope clarity.** `Session (this path)` / `Always (this command)` labels carry a dynamic qualifier showing what the scope actually covers. No more "I picked Session, why am I being asked again?" surprises when the same tool fires with a different primary arg.
+- **Eval harness v1.** 20 contract tests under `tests/v4/eval/` protect the v4.10 substrate from regression — PTY-driven where possible, mockProvider-backed for streaming guarantees.
 
 ## What's new in v4.9.0
 
