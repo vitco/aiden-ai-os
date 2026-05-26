@@ -2020,6 +2020,21 @@ export async function buildAgentRuntime(
     mode:    'cli-interactive',
     logsDir: paths.logsDir,
   });
+  // v4.10 Slice 10.7 — survive-by-default process-level guards. The
+  // REPL has a human watching; an unhandled adapter rejection or
+  // uncaught error from any subsystem (channel poller, MCP transport,
+  // background task, etc.) should NOT silently kill the chat. The
+  // handlers log a single dim line + keep the REPL alive. Daemon
+  // path uses different (fail-fast, reclaim-then-exit) handlers in
+  // `core/v4/daemon/bootstrap.ts:530-531`; that asymmetry is
+  // intentional — daemon has no user to recover.
+  const { installReplCrashHandlers } = await import('../../core/v4/replCrashHandlers');
+  installReplCrashHandlers({
+    log: (level, msg, meta) => bootLogger.child('crash')[level](msg, meta),
+    notify: (line) => {
+      try { process.stderr.write(`\n${line}\n`); } catch { /* stderr torn down */ }
+    },
+  });
   // Wire the gateway singleton's logger BEFORE registering its processor
   // so register / unregister channel events are scoped correctly.
   gateway.attachLogger(bootLogger.child('gateway'));

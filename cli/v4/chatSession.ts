@@ -621,6 +621,19 @@ export class ChatSession implements ChatSessionLike {
       const makeHandler = (sig: SessionExitPath) => async () => {
         this.opts.display.write('\n');
         this.opts.display.dim(`Got ${sig.toUpperCase()} — saving session before exit…`);
+        // v4.10 Slice 10.7 — stop channel adapters BEFORE the
+        // summary-write so their pollers don't keep the event loop
+        // alive past process.exit and leave their local locks stale.
+        // The /quit path already invokes channelManager.stopAll()
+        // (aidenCLI.ts buildAgentRuntime teardown); this is the
+        // symmetric SIGINT/SIGTERM cleanup. Hard 1s cap so a hung
+        // adapter doesn't delay the user's Ctrl+C exit (YAGNI on a
+        // configurable timeout per Phase B Q3).
+        if (this.opts.channelManager) {
+          const stopPromise = this.opts.channelManager.stopAll().catch(() => undefined);
+          const timeout = new Promise<void>((res) => setTimeout(res, 1000).unref?.());
+          await Promise.race([stopPromise, timeout]);
+        }
         try {
           await this.maybeAutoSummarizeWithTimeout(sig);
         } catch (err) {
