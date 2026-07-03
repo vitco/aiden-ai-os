@@ -40,11 +40,12 @@
  */
 
 import { promises as fsp } from 'node:fs';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync, copyFileSync, cpSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
 import { writeJsonAtomic } from './atomicWrite';
+import { resolveUserPath, resolveAidenRoot } from '../paths';
 import {
   CRON_SCHEMA_VERSION,
   type CronFireRecord,
@@ -106,18 +107,36 @@ export interface CronPaths {
   logsDir:   string;
 }
 
-export function defaultCronPaths(homeOverride?: string): CronPaths {
+export function defaultCronPaths(
+  homeOverride?: string,
+  /** Test seams — production callers omit both. */
+  opts?: { platformRoot?: string; legacyRoot?: string },
+): CronPaths {
   // Honor AIDEN_HOME (used by tests + multi-profile workflows). When
-  // set, paths root IS AIDEN_HOME directly (no `.aiden` suffix —
-  // mirrors `core/v4/paths.ts::resolveAidenRoot`). Otherwise default
-  // to ~/.aiden.
+  // set, paths root IS AIDEN_HOME directly (no `.aiden` suffix). Routed
+  // through resolveUserPath so a quoted / ~-prefixed value can't glue
+  // onto the cwd (v4.12.1 class fix).
+  //
+  // v4.12.1 cron-root unification — the fallback previously hardcoded
+  // `~/.aiden`, which had DRIFTED from the product-wide platform root
+  // (`resolveAidenRoot()`: %LOCALAPPDATA%\aiden on Windows, Application
+  // Support on macOS, XDG on Linux) — so cron jobs lived in a different
+  // directory than every other Aiden artifact. Now unified onto the one
+  // resolver, with a one-time COPY migration from the legacy location so
+  // existing installs' jobs + logs follow (see
+  // maybeMigrateLegacyCronState below). AIDEN_HOME / homeOverride users
+  // are untouched — migration runs only on the platform-root branch.
   let root: string;
   if (homeOverride && homeOverride.length > 0) {
     root = homeOverride;
-  } else if (process.env.AIDEN_HOME && process.env.AIDEN_HOME.trim().length > 0) {
-    root = process.env.AIDEN_HOME.trim();
   } else {
-    root = path.join(os.homedir(), '.aiden');
+    const envRoot = resolveUserPath(process.env.AIDEN_HOME);
+    if (envRoot) {
+      root = envRoot;
+    } else {
+      root = opts?.platformRoot ?? resolveAidenRoot();
+      maybeMigrateLegacyCronState(root, opts?.legacyRoot);
+    }
   }
   const stateFile = path.join(root, 'cron_jobs.json');
   return {
@@ -125,6 +144,46 @@ export function defaultCronPaths(homeOverride?: string): CronPaths {
     lockFile: `${stateFile}.lock`,
     logsDir:  path.join(root, 'cron-logs'),
   };
+}
+
+/**
+ * v4.12.1 — one-time migration of cron state from the legacy `~/.aiden`
+ * location into the unified platform root. COPY semantics (the legacy
+ * files are left in place — no destructive move), naturally idempotent:
+ *
+ *   - legacy cron_jobs.json absent            → fresh install, no-op.
+ *   - platform cron_jobs.json already present → platform wins, never
+ *     overwritten (also makes re-runs after a successful copy no-ops).
+ *   - legacy root IS the platform root        → no-op (Linux installs
+ *     where resolveAidenRoot itself prefers the legacy dir).
+ *
+ * Copies the state file + the cron-logs dir, then logs ONE stderr line.
+ * Best-effort: any I/O failure is swallowed — migration must never
+ * break boot; the worst case is cron booting with an empty registry at
+ * the new location while the legacy file stays intact on disk.
+ */
+export function maybeMigrateLegacyCronState(
+  destRoot: string,
+  legacyRoot: string = path.join(os.homedir(), '.aiden'),
+): void {
+  try {
+    if (path.resolve(legacyRoot) === path.resolve(destRoot)) return;
+    const legacyState = path.join(legacyRoot, 'cron_jobs.json');
+    const destState   = path.join(destRoot, 'cron_jobs.json');
+    if (!existsSync(legacyState) || existsSync(destState)) return;
+    mkdirSync(destRoot, { recursive: true });
+    copyFileSync(legacyState, destState);
+    const legacyLogs = path.join(legacyRoot, 'cron-logs');
+    const destLogs   = path.join(destRoot, 'cron-logs');
+    if (existsSync(legacyLogs) && !existsSync(destLogs)) {
+      cpSync(legacyLogs, destLogs, { recursive: true });
+    }
+    process.stderr.write(
+      `v4.12.1-cron: migrated cron state ${legacyState} -> ${destState}\n`,
+    );
+  } catch {
+    /* best-effort — never break boot on a migration failure */
+  }
 }
 
 // ── Migration ────────────────────────────────────────────────────────────

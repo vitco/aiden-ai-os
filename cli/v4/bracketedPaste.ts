@@ -66,6 +66,21 @@ export function stripPasteMarkers(raw: string): string {
 }
 
 /**
+ * Regex form: remove EVERY bracketed-paste marker (`\x1b[200~` / `\x1b[201~`)
+ * anywhere in the string — not just at the boundaries. This is the robust
+ * strip for STREAMED / char-by-char input (the during-turn raw-mode listener),
+ * where markers can arrive as a lone keypress sequence or embedded in a paste
+ * burst. `stripPasteMarkers` above stays the boundary-aware form used by the
+ * whole-line prompt path. One shared module — both paths strip here.
+ */
+// eslint-disable-next-line no-control-regex
+const PASTE_MARKER_RE = /\x1b\[20[01]~/g;
+export function stripAllPasteMarkers(raw: string): string {
+  if (typeof raw !== 'string' || raw.length === 0) return raw;
+  return raw.replace(PASTE_MARKER_RE, '');
+}
+
+/**
  * Detect bracketed paste markers anywhere inside `raw` (not just at the
  * boundaries). Useful for diagnosing partial / interleaved sequences.
  */
@@ -100,4 +115,31 @@ export function disableBracketedPaste(stream: NodeJS.WriteStream | undefined): b
   } catch {
     return false;
   }
+}
+
+/** What to do with terminal bracketed-paste mode at REPL boot. */
+export type PasteBootAction = 'enable' | 'disable' | 'none';
+
+/**
+ * v4.12.1 ROOT FIX — decide whether to turn terminal bracketed-paste mode ON,
+ * OFF, or leave it alone at REPL boot.
+ *
+ * Bracketed paste exists ONLY to feed the legacy/inquirer stdin interceptor
+ * (`[paste #N]` labels + anti-auto-submit), which taps `stdin.emit('data')`.
+ * The frame renderer reads stdin via Ink's `stdin.read()` on the `'readable'`
+ * event — which BYPASSES that tap — and Ink hands a paste to the composer
+ * atomically (no auto-submit risk), so the frame path neither uses nor can be
+ * cleaned by the interceptor. Worse, Ink strips the leading ESC and delivers a
+ * bare `[200~` that no ESC-keyed strip can catch. So:
+ *
+ *   - legacy interactive TTY  → `enable`  (the interceptor needs the signal)
+ *   - frame-mode interactive TTY → `disable` (never wrap a paste; markers are
+ *     never generated → nothing to strip anywhere)
+ *   - non-TTY / caller-supplied promptApi → `none`
+ */
+export function decidePasteBootAction(
+  o: { isTty: boolean; hasPromptApi: boolean; frameMode: boolean },
+): PasteBootAction {
+  if (!o.isTty || o.hasPromptApi) return 'none';
+  return o.frameMode ? 'disable' : 'enable';
 }

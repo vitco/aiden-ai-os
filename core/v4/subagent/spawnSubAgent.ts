@@ -28,6 +28,14 @@
 import { randomUUID } from 'node:crypto';
 import { buildChildAgent, ProviderNotFoundError } from './childBuilder';
 import type { ChildBuilderDeps } from './childBuilder';
+// v4.12.1 Pillar 3 — evidence-required subagent reports. The child's own
+// tool trace is run through the SAME verify-before-done gate the REPL/daemon
+// use, and its concrete handles are re-checked against reality on the parent
+// side ("no handle, no trust"). Reuses the evidence envelope; no parallel
+// verdict system.
+import type { TaskEvidence } from '../taskVerification';
+import { deriveSubagentEvidence, type ProofHandle } from './evidenceRecheck';
+import { emitPillarEvent } from '../pillarEvents';
 // v4.9.0 Slice 7 — fork ExecutionContext into the child agent.
 import { currentContext, runWithContext, childSpan } from '../identity';
 import type { RunStore } from '../daemon/runStore';
@@ -67,6 +75,11 @@ export interface SubAgentSpec {
 
 /** Result envelope per design doc §3, §8. */
 export interface SubAgentResult {
+  /**
+   * v4.12.1 Pillar 3 — `ok` now means VERIFIED completion (`verdict ===
+   * 'completed'`), NOT merely a clean loop exit. A child that cleanly
+   * finishes but whose claimed side-effect fails verification is `ok: false`.
+   */
   ok: boolean;
   status: 'completed' | 'failed' | 'timeout' | 'interrupted';
   summary: string | null;
@@ -88,6 +101,35 @@ export interface SubAgentResult {
   childRunId: string;
   /** Child sessionId (flat UUID, fresh per spawn). */
   childSessionId: string;
+  // ── v4.12.1 Pillar 3 — evidence-required reporting ─────────────────────
+  /**
+   * The verify-before-done verdict over the child's own tool trace, after
+   * the parent-side handle re-check. `null` for non-completed runs
+   * (timeout/interrupted/failed), which never carried a verifiable claim.
+   */
+  verdict: 'completed' | 'completed_unverified' | 'verification_failed' | null;
+  /** The child's evidence envelope (handles/failures), reusing TaskEvidence. */
+  evidence: TaskEvidence | null;
+  /**
+   * True only when the child produced concrete proof handles that BACK its
+   * claim AND those handles re-checked clean on the parent side. A prose-only
+   * or handle-failing child is NOT verified.
+   */
+  verified: boolean;
+  /**
+   * True when the child performed no mutating work — a pure-reasoning answer.
+   * Honest degrade: the parent treats it as ADVISORY, not verified-fact. Never
+   * fake evidence for these.
+   */
+  reasoningOnly: boolean;
+  /** The concrete proof handles that survived the parent-side re-check. */
+  handles: ProofHandle[];
+  /**
+   * v4.12.1 Pillar 2 — mutating ops the child ESCALATED to the parent
+   * (destructive / external / out-of-scope) instead of running them. Empty
+   * for a child that only did in-scope work. The parent decides on these.
+   */
+  escalations: Array<{ tool: string; reason?: string }>;
 }
 
 /** Dependencies the spawn primitive needs to do its job. */
@@ -192,6 +234,9 @@ export async function spawnSubAgent(
 
   // ── 3. Build child agent ────────────────────────────────────────────────
   const logger = deps.logger ?? noopLogger();
+  // v4.12.1 Pillar 2 — collect escalations the child raised to the parent
+  // (destructive / external / out-of-scope ops it refused to run itself).
+  const escalations: Array<{ tool: string; reason?: string }> = [];
   let agentBundle: ReturnType<typeof buildChildAgent>;
   try {
     agentBundle = buildChildAgent(
@@ -205,6 +250,18 @@ export async function spawnSubAgent(
         runStore:    deps.runStore,
         childRunId,
         logger,
+        // Pillar 2 — record every escalation, then forward to any caller sink.
+        // Pillar 4 — also emit it as a live `subagent_escalation` event so the
+        // glass dashboard sees the escalate-to-parent moment on the one stream.
+        onEscalate: (e) => {
+          escalations.push({ tool: e.tool, reason: e.reason });
+          emitPillarEvent(
+            { runStore: deps.runStore as unknown as { emitEventRich(o: Record<string, unknown>): number }, runId: Number(childRunId) },
+            'subagent_escalation',
+            { tool: e.tool, reason: e.reason ?? null, childRunId: String(childRunId) },
+          );
+          deps.onEscalate?.(e);
+        },
       },
       {
         sessionId:         childSessionId,
@@ -234,6 +291,12 @@ export async function spawnSubAgent(
         metrics:        { apiCalls: 0, durationMs: Date.now() - startedAt, tokensIn: 0, tokensOut: 0 },
         childRunId:     String(childRunId),
         childSessionId,
+        verdict:        null,
+        evidence:       null,
+        verified:       false,
+        reasoningOnly:  false,
+        handles:        [],
+        escalations:    [],
       };
     }
     deps.runStore.setStatus(childRunId, 'failed', { finishReason: 'error' });
@@ -301,6 +364,9 @@ export async function spawnSubAgent(
   let apiCalls = 0;
   let tokensIn = 0;
   let tokensOut = 0;
+  // v4.12.1 Pillar 3 — the child's own tool trace, captured so its evidence
+  // is scored + re-checked below instead of discarded.
+  let childTrace: import('../../../moat/honestyEnforcement').HonestyTraceEntry[] = [];
 
   // v4.9.0 Slice 7 — fork an ExecutionContext for the child so its
   // tool/LLM spans chain off the parent's spanId. AsyncLocalStorage
@@ -329,6 +395,7 @@ export async function spawnSubAgent(
     apiCalls = result.turnCount;       // one provider call per turn
     tokensIn = result.totalUsage.inputTokens;
     tokensOut = result.totalUsage.outputTokens;
+    childTrace = result.toolCallTrace ?? [];   // capture for evidence scoring
 
     // Classify the result per design doc §8.
     if (result.finishReason === 'interrupted') {
@@ -391,7 +458,30 @@ export async function spawnSubAgent(
   deps.runStore.setStatus(childRunId, dbStatus, { finishReason: exitReason });
 
   const durationMs = Date.now() - startedAt;
-  const ok = status === 'completed' && exitReason !== 'error';
+
+  // ── v4.12.1 Pillar 3 — score the child's evidence, re-check its handles ──
+  // For a completed run, run the child's OWN tool trace through the same
+  // verify-before-done gate the REPL/daemon use (computeTaskFinalization),
+  // then re-check each concrete handle against reality on the parent side.
+  // A failed re-check downgrades the verdict to verification_failed — a
+  // claimed artifact that isn't there is not a success.
+  let verdict: SubAgentResult['verdict'] = null;
+  let evidence: TaskEvidence | null = null;
+  let verified = false;
+  let reasoningOnly = false;
+  let handles: ProofHandle[] = [];
+
+  if (status === 'completed') {
+    const ev = deriveSubagentEvidence(childTrace);
+    verdict       = ev.verdict;
+    evidence      = ev.evidence;
+    verified      = ev.verified;
+    reasoningOnly = ev.reasoningOnly;
+    handles       = ev.handles;
+  }
+
+  // Pillar 3: `ok` now means VERIFIED completion, not a clean loop exit.
+  const ok = verdict === 'completed';
 
   return {
     ok,
@@ -407,6 +497,12 @@ export async function spawnSubAgent(
     },
     childRunId:     String(childRunId),
     childSessionId,
+    verdict,
+    evidence,
+    verified,
+    reasoningOnly,
+    handles,
+    escalations,
   };
 }
 
@@ -446,5 +542,11 @@ function failureEnvelope(opts: {
     },
     childRunId:     opts.childRunId,
     childSessionId: opts.childSessionId,
+    verdict:        null,
+    evidence:       null,
+    verified:       false,
+    reasoningOnly:  false,
+    handles:        [],
+    escalations:    [],
   };
 }

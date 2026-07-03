@@ -205,10 +205,27 @@ export interface TurnStateOptions {
   enabled?:                  boolean;
   /** Signature-streak threshold for HINT stage. Default 5. */
   hintConsecThreshold?:      number;
-  /** Name-streak threshold for COOLDOWN stage. Default 8. */
+  /**
+   * LOOP-LIKE threshold for COOLDOWN stage. Default 8.
+   *
+   * v4.13 — "loop-like" replaced raw name-streak counting: the count is
+   * max(identical-signature streak, consecutive-failure streak). A
+   * same-tool streak with MATERIALLY DIFFERENT args that keeps
+   * SUCCEEDING (bulk file moves, skill exploration) no longer trips
+   * cooldown/surface — the live-demo false positive where 11 legitimate
+   * varied file_move calls got the "stuck" banner. Identical repeats
+   * and varied-args FAILURE streaks still count fully.
+   */
   cooldownConsecThreshold?:  number;
-  /** Name-streak threshold for SURFACE stage. Default 11. */
+  /** Loop-like threshold for SURFACE stage. Default 11. See cooldown note. */
   surfaceConsecThreshold?:   number;
+  /**
+   * v4.13 — soft ceiling for a varied-args SUCCESSFUL name streak: at N
+   * consecutive same-tool calls (any args, all verifying ok) emit ONE
+   * informational hint (never cooldown/surface — bulk work is legal).
+   * Default 25; env-tunable via AIDEN_TCE_VARIED_HINT.
+   */
+  variedNameHintThreshold?:  number;
   /** Iterations a cooled-down tool stays excluded. Default 3. */
   cooldownIterations?:       number;
   /**
@@ -241,6 +258,7 @@ export class TurnState {
   private readonly cooldownIters:     number;
   private readonly failedConsec:      number;
   private readonly checkpointDepth:   number;
+  private readonly variedHintConsec:  number;
 
   private stage:                      RecoveryStage = 'none';
   private toolCalls:                  CapturedCall[] = [];
@@ -289,6 +307,21 @@ export class TurnState {
    */
   private checkpoints:                Checkpoint[] = [];
 
+  // ── v4.13 Gap 2 — per-turn retry-policy attempt state ──────────────
+  //
+  // Owned here (not in the policy module) so the repeat ladder above
+  // and the retry policy share ONE per-turn state object and can't
+  // fight: policy retries are recorded into the ladder's signature
+  // counters by the agent loop, and the policy consults these budgets.
+  /** Runtime retries spent per failure class this turn. */
+  private policyRetriesByClass:       Map<string, number> = new Map();
+  /** Runtime retries spent across all classes this turn. */
+  private policyRetriesTotal          = 0;
+  /** One-shot repair flags (`<tool>:<category>`) — protocol repair-once. */
+  private repairAttempted:            Set<string> = new Set();
+  /** One-shot clarify directive issued this turn. */
+  private clarifyAdvisedFlag          = false;
+
   constructor(opts: TurnStateOptions = {}) {
     // v4.2 Phase 6 — TCE is ON by default. Strict `'0'` opt-out
     // semantic: env var must be literally the string `'0'` to
@@ -317,6 +350,10 @@ export class TurnState {
     this.surfaceConsec   = opts.surfaceConsecThreshold  ?? 11;
     this.cooldownIters   = opts.cooldownIterations      ?? 3;
     this.failedConsec    = opts.failedConsecThreshold   ?? 3;
+    // v4.13 — env-tunable like the retry knobs (AIDEN_RETRY_*).
+    const variedEnv = Number(process.env.AIDEN_TCE_VARIED_HINT);
+    this.variedHintConsec = opts.variedNameHintThreshold
+      ?? (Number.isFinite(variedEnv) && variedEnv > 0 ? Math.floor(variedEnv) : 25);
     // checkpointDepth = 0 disables the buffer entirely (useful for
     // tests that want Phase 1-3 behavior with TCE enabled). Otherwise
     // default 3 per Q-CP2 approval.
@@ -325,6 +362,38 @@ export class TurnState {
 
   isEnabled(): boolean {
     return this.enabled;
+  }
+
+  // ── v4.13 Gap 2 — retry-policy attempt-state surface ────────────────
+
+  /** Record one spent runtime retry for a failure class. */
+  recordPolicyRetry(category: string): void {
+    this.policyRetriesByClass.set(
+      category,
+      (this.policyRetriesByClass.get(category) ?? 0) + 1,
+    );
+    this.policyRetriesTotal += 1;
+  }
+
+  markRepairAttempted(key: string): void { this.repairAttempted.add(key); }
+  markClarifyAdvised(): void { this.clarifyAdvisedFlag = true; }
+
+  /**
+   * Read-only view the retry policy consults (RetryAttemptView shape,
+   * declared structurally in retryPolicy.ts to avoid an import cycle).
+   */
+  retryView(): {
+    attemptsForClass(category: string): number;
+    totalRetries(): number;
+    hasRepairAttempted(key: string): boolean;
+    clarifyAdvised(): boolean;
+  } {
+    return {
+      attemptsForClass: (category) => this.policyRetriesByClass.get(category) ?? 0,
+      totalRetries:     () => this.policyRetriesTotal,
+      hasRepairAttempted: (key) => this.repairAttempted.has(key),
+      clarifyAdvised:   () => this.clarifyAdvisedFlag,
+    };
   }
 
   /**
@@ -412,25 +481,40 @@ export class TurnState {
     }
 
     // ── Stage transition gate (monotonic) ────────────────────────────
-    // Surface (highest priority): name-streak crosses the surface
+    //
+    // v4.13 — the DETECTOR reports two streak flavours; the POLICY here
+    // gates cooldown/surface on the LOOP-LIKE count only:
+    //
+    //   loopLike = max(identical-signature streak, consecutive-failure
+    //              streak for this tool)
+    //
+    // A varied-args streak that keeps verifying OK (bulk file moves,
+    // wide skill exploration) is legitimate work, not a loop — it gets
+    // at most one informational hint at the (much higher) varied
+    // ceiling below. Identical repeats ARE loops even when succeeding;
+    // varied-args FAILURE streaks are still a problem worth surfacing.
+    const failedForName = this.consecFailed.name === name ? this.consecFailed.count : 0;
+    const loopLike = Math.max(this.consecSignature.count, failedForName);
+
+    // Surface (highest priority): loop-like crosses the surface
     // threshold AND we haven't already surfaced.
-    if (this.stage !== 'surfaced' && this.consecName.count >= this.surfaceConsec) {
+    if (this.stage !== 'surfaced' && loopLike >= this.surfaceConsec) {
       this.stage = 'surfaced';
       const decision: RecoveryDecision = {
         kind:        'surface',
         toolName:    name,
-        consecutive: this.consecName.count,
-        surfaceCard: this.buildSurfaceCard(name, this.consecName.count),
+        consecutive: loopLike,
+        surfaceCard: this.buildSurfaceCard(name, loopLike),
       };
-      this.recoveryEvents.push({ stage: 'surfaced', toolName: name, count: this.consecName.count, ts });
+      this.recoveryEvents.push({ stage: 'surfaced', toolName: name, count: loopLike, ts });
       return decision;
     }
 
-    // Cooldown: name-streak crosses cooldown threshold AND tool not
+    // Cooldown: loop-like crosses cooldown threshold AND tool not
     // already cooled-down AND we haven't escalated past cooldown.
     if (
       this.stage !== 'surfaced' &&
-      this.consecName.count >= this.cooldownConsec &&
+      loopLike >= this.cooldownConsec &&
       !this.cooledDownTools.has(name)
     ) {
       this.stage = 'cooldown';
@@ -446,10 +530,10 @@ export class TurnState {
       const baseDecision: RecoveryDecision = {
         kind:        'cooldown',
         toolName:    name,
-        consecutive: this.consecName.count,
+        consecutive: loopLike,
         cooldownMessage: buildCooldownMessage(name, this.cooldownIters),
       };
-      this.recoveryEvents.push({ stage: 'cooldown', toolName: name, count: this.consecName.count, ts });
+      this.recoveryEvents.push({ stage: 'cooldown', toolName: name, count: loopLike, ts });
       if (restorable) {
         return {
           ...baseDecision,
@@ -496,6 +580,23 @@ export class TurnState {
         hintMessage: buildHintMessage(name, this.consecSignature.count),
       };
       this.recoveryEvents.push({ stage: 'hinted', toolName: name, count: this.consecSignature.count, ts });
+      return decision;
+    }
+
+    // v4.13 — varied-args SUCCESSFUL streak soft ceiling: ONE
+    // informational hint at the (high) varied threshold. Bulk work is
+    // legal; this only nudges the model to sanity-check its progress.
+    if (this.stage === 'none' && this.consecName.count >= this.variedHintConsec) {
+      this.stage = 'hinted';
+      const decision: RecoveryDecision = {
+        kind:        'hint',
+        toolName:    name,
+        consecutive: this.consecName.count,
+        hintMessage:
+          `[note] You have called ${name} ${this.consecName.count} times in a row with varying arguments. ` +
+          `If this is intentional bulk work, continue — otherwise pause and verify progress against the goal.`,
+      };
+      this.recoveryEvents.push({ stage: 'hinted', toolName: name, count: this.consecName.count, ts });
       return decision;
     }
 

@@ -21,6 +21,7 @@
 
 import type { AidenAgent } from '../../core/v4/aidenAgent';
 import { buildTurnRuntimeContext } from '../../core/v4/turnRuntimeContext';
+import { computeTaskFinalization } from '../../core/v4/taskVerification';
 // v4.1.5+ Path A: env-var-gated loop trace logger. Captures tool-call
 // sequence + system prompt + memory hashes when a turn shows loop
 // symptoms (10+ calls OR 5+ consecutive same-name). Default off via
@@ -94,7 +95,9 @@ import path from 'node:path';
 import {
   enableBracketedPaste,
   disableBracketedPaste,
+  decidePasteBootAction,
   stripPasteMarkers,
+  stripAllPasteMarkers,
   isCompletePaste,
   hasPasteMarkers,
 } from './bracketedPaste';
@@ -107,6 +110,10 @@ import { installResizeGuard } from './resizeGuard';
 // v4.10 Slice 10.2b — shared event taxonomy. UI tool name → (category, kind).
 import { categorizeEvent } from '../../core/v4/daemon/eventCategories';
 import { captureArtifactFromTrace } from '../../core/v4/daemon/artifactStore';
+// v4.12.1 Pillar 4 Slice 2a — type-next-while-busy.
+import { DuringTurnInput, type BusyEnterMode } from './duringTurnInput';
+import { attachTurnInputListener } from './turnInputListener';
+import { requestTurnCancel } from './frame/interruptControls';
 
 /**
  * v4.10 Slice 10.2 / 10.2b — extracted onUiEvent factory. Builds the
@@ -146,11 +153,23 @@ export interface OnUiEventDeps {
    *  back to runs on every call. */
   sessionId?:         string | null;
   stopIndicatorOnce:  () => void;
+  /**
+   * v4.13 Gap 1 — collector for the model's own ui_task_done declaration
+   * (its `status` payload). The verify-before-done gate reads the LAST
+   * declaration at turn end: a model-declared failure finalizes the task
+   * row as `failed` honestly instead of letting a clean finishReason
+   * upgrade it to completed. Optional — render + persistence unchanged
+   * when absent.
+   */
+  onTaskDone?:        (args: Record<string, unknown>) => void;
 }
 export function createOnUiEventHandler(
   deps: OnUiEventDeps,
 ): (name: string, args: Record<string, unknown>) => void {
   return (name, args) => {
+    if (name === 'ui_task_done' && deps.onTaskDone) {
+      try { deps.onTaskDone(args); } catch { /* collector must never break dispatch */ }
+    }
     deps.stopIndicatorOnce();
     deps.display.renderUiEvent(name, args);
     if (deps.runStore && deps.runId !== null) {
@@ -606,6 +625,20 @@ export class ChatSession implements ChatSessionLike {
   private nextTurnId      = 0;
 
   /**
+   * v4.12.1 Pillar 4 Slice 2a — the during-turn input controller: owns the
+   * type-next queue + the busy-Enter mode. Fed by the raw-mode keypress
+   * listener attached for the duration of each turn.
+   */
+  private readonly duringTurnInput = new DuringTurnInput();
+
+  // ── Slice 2a public surface for /busy + /queue commands ──────────────────
+  setBusyMode(mode: BusyEnterMode): void { this.duringTurnInput.setMode(mode); }
+  getBusyMode(): BusyEnterMode { return this.duringTurnInput.getMode(); }
+  listQueue(): string[] { return this.duringTurnInput.peek(); }
+  clearQueue(): number { return this.duringTurnInput.clear(); }
+  queueCount(): number { return this.duringTurnInput.count(); }
+
+  /**
    * v4.11 Slice B — bounded per-turn history snapshot stack for /undo.
    * A copy of `history` is pushed at the start of each turn (capped at
    * UNDO_MAX_SNAPSHOTS, oldest dropped). In-memory only.
@@ -754,6 +787,9 @@ export class ChatSession implements ChatSessionLike {
       // (SIGTERM still routes here directly — no two-press semantics
       // for SIGTERM, which has no human-typing context to disambiguate).
       const gracefulShutdown = async (sig: SessionExitPath): Promise<void> => {
+        // v4.12.1 Slice 2a — a force-exit discards any type-next queue; the
+        // user is bailing out, so don't run queued messages after they leave.
+        try { this.duringTurnInput.clear(); } catch { /* best-effort */ }
         this.opts.display.write('\n');
         this.opts.display.dim(`Got ${sig.toUpperCase()} — saving session before exit…`);
         // v4.10 Slice 10.7 — stop channel adapters BEFORE the
@@ -841,6 +877,9 @@ export class ChatSession implements ChatSessionLike {
         this.lastInterruptAt = now;
         try {
           ctrl?.abort();
+          // v4.12.1 Slice 2b — a hard interrupt supersedes any pending steer,
+          // so a stale nudge never lands on the next unrelated turn.
+          this.duringTurnInput.clearSteer();
         } catch { /* defensive — abort() can't throw, but cheap insurance */ }
         try {
           this.opts.display.dim(
@@ -886,11 +925,41 @@ export class ChatSession implements ChatSessionLike {
     // Phase 16: enable bracketed paste for the duration of the REPL when
     // a real TTY is attached. Disabled in `finally` below so the user's
     // shell doesn't inherit the mode after we exit.
+    //
+    // v4.12.1 — ROOT FIX for the frame-renderer paste-marker leak. Bracketed
+    // paste exists ONLY to feed the stdin interceptor (`[paste #N]` labels +
+    // anti-auto-submit) on the legacy/inquirer path — the interceptor taps
+    // `stdin.emit('data')`. The frame renderer reads stdin via Ink's
+    // `stdin.read()` on the `'readable'` event, which BYPASSES that tap, so it
+    // can neither use bracketed paste nor be cleaned by the interceptor — and
+    // Ink strips the leading ESC, delivering a bare `[200~` that no ESC-keyed
+    // strip can catch. Ink already hands a paste to useInput atomically, so the
+    // frame path never needed bracketed paste. Therefore: enable it ONLY in
+    // legacy mode; in frame mode actively DISABLE it (`\x1b[?2004l`) at boot so
+    // the terminal never wraps a paste → Ink gets plain text → nothing to strip.
     const stdout = process.stdout;
-    const pasteEnabled =
-      stdout?.isTTY && !this.opts.promptApi
-        ? enableBracketedPaste(stdout)
-        : false;
+    // Frame module is best-effort (matches the pauseFrame/resumeFrame requires
+    // below): if it can't load, fall back to legacy behaviour (bracketed paste
+    // enabled). Never throw out of REPL boot over a renderer probe.
+    let frameModeOn = false;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      frameModeOn = (require('./frame') as typeof import('./frame')).isFrameModeRequested();
+    } catch { /* frame module unavailable → treat as legacy */ }
+    const pasteBootAction = decidePasteBootAction({
+      isTty:        !!stdout?.isTTY,
+      hasPromptApi: !!this.opts.promptApi,
+      frameMode:    frameModeOn,
+    });
+    // legacy TTY → enable (feeds the interceptor); frame TTY → actively disable
+    // so the terminal never wraps a paste (markers never generated → Ink gets
+    // plain text → nothing to strip); non-TTY / promptApi → leave it alone.
+    let pasteEnabled = false;
+    if (pasteBootAction === 'enable') {
+      pasteEnabled = enableBracketedPaste(stdout);
+    } else if (pasteBootAction === 'disable') {
+      disableBracketedPaste(stdout);
+    }
     // Tier-3.1a: install stdin pre-tap so bracketed paste payloads are
     // captured and replaced with `[paste #N: …]` labels BEFORE inquirer
     // sees them. Without this, modern @inquirer/prompts treats internal
@@ -946,6 +1015,15 @@ export class ChatSession implements ChatSessionLike {
         // with a rule + blank, so suppress on the very first iteration.
         if (iter > 1) this.opts.display.printTurnSeparator();
         let input: string;
+        // v4.12.1 Slice 2a — idle boundary: run a message the user queued
+        // WHILE the previous turn was busy before blocking on fresh input.
+        // Echo it so a queued message never fires invisibly.
+        const queuedNext = this.duringTurnInput.dequeue();
+        if (queuedNext !== null) {
+          try { this.opts.display.dim(`▸ running queued: ${queuedNext}`); } catch { /* defensive */ }
+          input = queuedNext;
+          // Fall through to the slash/agent dispatch below with this input.
+        } else
         try {
           input = await this.readUserInput(promptApi);
         } catch (err) {
@@ -1543,6 +1621,39 @@ export class ChatSession implements ChatSessionLike {
     const turnAbort = new AbortController();
     this.currentAbortController = turnAbort;
     this.activeTurnId           = turnId;
+
+    // v4.12.1 Pillar 4 Slice 2a — attach the during-turn keypress listener for
+    // the life of this turn. Enter → queue (or cancel, per mode); esc → cancel
+    // this turn but KEEP the queue; Ctrl+C → the existing two-press SIGINT
+    // logic (raw mode suppresses the kernel signal, so we re-emit it). No-op on
+    // a non-TTY. Detached in the finally below (all paths) so raw mode is
+    // always restored.
+    const detachTurnInput = attachTurnInputListener({
+      cb: {
+        onLine: (text) => {
+          const act = this.duringTurnInput.onBusyEnter(text);
+          if (act.action === 'queued') {
+            try { this.opts.display.dim(`  ✓ queued (${act.count} pending) — runs after this turn`); } catch { /* defensive */ }
+          } else if (act.action === 'steered') {
+            // Slice 2b — buffered; lands after the current tool, next iteration.
+            try { this.opts.display.dim(`  ◆ redirecting: ${act.text} — applies from the next step`); } catch { /* defensive */ }
+          } else if (act.action === 'interrupt') {
+            requestTurnCancel(this.currentAbortController);
+          }
+        },
+        // esc cancels the turn AND drops any pending steer (a hard interrupt
+        // supersedes a nudge — no stale steer leaks onto the next turn). The
+        // queue is kept (Slice-2a decision).
+        onEscape: () => { this.duringTurnInput.clearSteer(); requestTurnCancel(this.currentAbortController); },
+        onCtrlC:  () => { try { (process as NodeJS.Process).emit('SIGINT'); } catch { /* defensive */ } },
+        // Slice 2c — paint the live during-turn buffer so the user sees their
+        // keystrokes (not blind), labelled with what Enter will do. Empty
+        // buffer (initial, or the reset after submit/cancel) clears the row.
+        onBufferChange: (buffer) => {
+          try { this.opts.display.setComposer(buffer, this.duringTurnInput.getMode()); } catch { /* defensive */ }
+        },
+      },
+    });
     // Helper: wrap a callback so it only fires for the live turn.
     // R1 guard — late events from a cancelled turn early-return.
     // `wrapTurnId` accepts (callback, undefined) and returns
@@ -1666,6 +1777,10 @@ export class ChatSession implements ChatSessionLike {
     // original intent without parsing UI display rows. Best-effort —
     // any write failure logs once and the turn proceeds.
     let replTaskId: string | null = null;
+    // v4.13 Gap 1 — last ui_task_done payload the model emitted this
+    // turn (collected via the onUiEvent handler). Read by the verify-
+    // before-done gate: a declared failure finalizes honestly as failed.
+    let declaredTaskDone: Record<string, unknown> | null = null;
     const replTaskStore = this.opts.replTaskStore;
     if (replTaskStore && this.sessionId) {
       try {
@@ -1916,6 +2031,10 @@ export class ChatSession implements ChatSessionLike {
         // already wired in v4.6 prep; this single line is the
         // upstream-side trigger.
         signal: turnAbort.signal,
+        // v4.12.1 Slice 2b — mid-turn steer pull. The loop drains this at its
+        // safe boundary and injects the nudge as tool-stream context. The
+        // controller owns the buffer; an interrupt clears it (below).
+        drainSteer: () => this.duringTurnInput.drainSteer(),
         // v4.11 Slice 4 — expose the per-turn runtime context to
         // tools via `agent.getCurrentTurnContext()`. The spawn /
         // fanout facades read it to thread parent signal + cost
@@ -2014,6 +2133,9 @@ export class ChatSession implements ChatSessionLike {
           // emit row gets session_id without the writer JOIN-ing to runs.
           sessionId:         this.sessionId ?? null,
           stopIndicatorOnce,
+          // v4.13 Gap 1 — capture the model's own done-declaration for
+          // the verify-before-done gate below (last one wins).
+          onTaskDone:        (args) => { declaredTaskDone = args; },
         })),
         onProgress: streamingEnabled
           ? wrapTurnId((outputTokens: number, maxTokens?: number) => {
@@ -2081,16 +2203,57 @@ export class ChatSession implements ChatSessionLike {
             err instanceof Error ? err.message : String(err));
         }
       }
-      // v4.10 Slice 10.8 — task-lite terminal transition (success
-      // path). `stop` is the canonical clean finish; everything else
-      // routes to 'failed' so /tasks listing distinguishes user-
-      // visible failures from clean turns. 'cancelled' stays
-      // reserved for explicit /adjust <id> cancel and is never set
-      // by the terminal hook.
+      // v4.13 Gap 1 — verify-before-done gate. The model narrates; the
+      // runtime keeps score: a clean `stop` no longer completes the task
+      // on prose. The row enters `pending_verification` (crash-honest:
+      // a death mid-decision leaves "not yet verified", never a lying
+      // `completed`), then the verdict policy decides over this turn's
+      // verifier evidence:
+      //   evidence-backed side effects   → completed (+ handles stored)
+      //   claimed side effect, no proof  → verification_failed (surfaced)
+      //   only weak/unverifiable claims  → completed_unverified (honest
+      //                                    downgrade, surfaced)
+      // A model-declared ui_task_done failure finalizes as `failed`
+      // regardless of finishReason — a declared failure is never
+      // upgraded. Non-`stop` finishes route to 'failed' as before.
       if (replTaskStore && replTaskId !== null) {
         try {
-          const taskStatus = result.finishReason === 'stop' ? 'completed' : 'failed';
-          replTaskStore.setStatus(replTaskId, taskStatus);
+          // v4.13 Gap 4 — the REPL and the daemon runner share ONE
+          // finalization policy (computeTaskFinalization): status +
+          // evidence envelope + job-card, all landing in a single
+          // finalize UPDATE. The REPL keeps its user-facing surfaces.
+          const declaredStatus =
+            declaredTaskDone && typeof (declaredTaskDone as Record<string, unknown>).status === 'string'
+              ? String((declaredTaskDone as Record<string, unknown>).status)
+              : null;
+          const fin = computeTaskFinalization(
+            {
+              finishReason:   result.finishReason,
+              toolCallTrace:  result.toolCallTrace,
+              declaredStatus,
+            },
+            { approvalMode: this.opts.approvalEngine.getMode() },
+          );
+          if (result.finishReason === 'stop') {
+            // Crash-honesty intermediate state (see Gap 1).
+            replTaskStore.setStatus(replTaskId, 'pending_verification');
+          }
+          replTaskStore.finalizeVerification(replTaskId, fin.status, fin.evidence, fin.jobCard);
+          if (result.finishReason === 'stop' && !(declaredStatus && declaredStatus !== 'success')) {
+            if (fin.status === 'verification_failed') {
+              const what = fin.evidence.failures
+                .map((f) => `${f.tool} (${f.reason})`)
+                .join(', ');
+              this.opts.display.warn(
+                `Task verification failed — side effect claimed without evidence: ${what}. ` +
+                `See /tasks ${replTaskId}.`,
+              );
+            } else if (fin.status === 'completed_unverified') {
+              this.opts.display.dim(
+                `(task completed unverified — side effects lacked hard evidence; /tasks ${replTaskId})`,
+              );
+            }
+          }
         } catch (err) {
           // eslint-disable-next-line no-console
           console.warn('[tasks] failed to finalize REPL task row:',
@@ -2436,6 +2599,12 @@ export class ChatSession implements ChatSessionLike {
         this.currentAbortController = null;
       }
       this.lastInterruptAt = 0;
+      // v4.12.1 Slice 2a — detach the during-turn listener + restore raw mode
+      // on EVERY exit path (success / error / abort / throw).
+      try { detachTurnInput(); } catch { /* defensive — never break turn teardown */ }
+      // Slice 2c — clear the live composer so the row hands cleanly back to the
+      // normal prompt (no stale typed text lingering on the owned row).
+      try { this.opts.display.clearComposer(); } catch { /* defensive */ }
 
       // v4.11 Slice 1 — explicit streaming-handoff boundary, exit
       // side. Mirrors the pauseFrame at the top of runAgentTurn so
@@ -2852,6 +3021,9 @@ export class ChatSession implements ChatSessionLike {
       raw = stripped;
     }
 
+    // v4.12.1 — belt-and-braces: remove ANY residual bracketed-paste marker
+    // (embedded / partial), so no path ever surfaces a literal [200~/[201~.
+    raw = stripAllPasteMarkers(raw);
     raw = raw.replace(/\r/g, '');
 
     // Multi-line via leading """.

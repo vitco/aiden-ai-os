@@ -264,8 +264,24 @@ describe('v14 migration — Slice 10.8 tasks table', () => {
     const cols = db.prepare(`PRAGMA table_info(tasks)`).all() as Array<{ name: string }>;
     const colNames = cols.map((c) => c.name).sort();
     expect(colNames).toEqual([
-      'artifact_ids', 'channel_id', 'created_at', 'goal', 'id',
-      'parent_task_id', 'session_id', 'status', 'title', 'trace_ids', 'updated_at',
+      'artifact_ids', 'channel_id',
+      // v4.13 Gap 3 (v17 migration) — job-card columns.
+      'constraints',
+      'created_at',
+      // v4.13 Gap 1 (v16 migration) — verify-before-done evidence envelope.
+      'evidence',
+      // v4.13 Gap 3 (v17 migration) — job-card columns.
+      'failure_state', 'files_touched',
+      'goal', 'id',
+      'parent_task_id',
+      // v4.13 Gap 3 (v17 migration) — job-card columns.
+      'permissions',
+      // v4.13 Gap 4 (v18 migration) — wake-loop cap.
+      'resume_count',
+      'session_id',
+      // v4.13 Gap 3 (v17 migration) — job-card columns.
+      'side_effects',
+      'status', 'title', 'trace_ids', 'updated_at',
     ]);
     const idx = db.prepare(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='tasks' AND name NOT LIKE 'sqlite_%'`).all() as Array<{ name: string }>;
     expect(idx.map((i) => i.name).sort()).toEqual([

@@ -45,8 +45,32 @@
  */
 
 import type { Db } from './db/connection';
+import type {
+  TaskEvidence,
+  SideEffectRecord,
+  TaskFailureState,
+} from '../taskVerification';
 
-export type TaskStatus = 'pending' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+/**
+ * v4.13 Gap 1 adds the verify-before-done states:
+ *
+ *   active → pending_verification → completed             (evidence-backed)
+ *                                 → completed_unverified  (honest downgrade)
+ *                                 → verification_failed   (claimed, no evidence)
+ *
+ * `pending_verification` is transitional — entered when the turn finishes
+ * with a clean `stop`, exited microseconds later by the verdict policy.
+ * Its value is crash-honesty: a process death mid-verification leaves the
+ * row saying "not yet verified" instead of a lying `completed`, and the
+ * boot orphan sweep retires it like a stranded `active`.
+ */
+export type TaskStatus =
+  | 'pending' | 'active' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+  | 'pending_verification' | 'completed_unverified' | 'verification_failed'
+  // v4.13 Gap 4 — resume verdict terminals: the sweep parked the task on a
+  // specific user question (blocked_needs_user) or gave up honestly after
+  // the wake-loop cap / an unrecoverable world (abandoned).
+  | 'blocked_needs_user' | 'abandoned';
 
 export interface Task {
   id:           string;
@@ -60,6 +84,21 @@ export interface Task {
   parentTaskId: string | null;
   traceIds:     number[];
   artifactIds:  string[];
+  /** v4.13 Gap 1 — verification envelope (null pre-gate / non-stop finishes). */
+  evidence:     TaskEvidence | null;
+  // ── v4.13 Gap 3 — the job-card ─────────────────────────────────────
+  /** User-stated limits at creation. No producer today — the seam. */
+  constraints:  Record<string, unknown> | null;
+  /** Deduped paths from mutating, verifier-evidenced executions. */
+  filesTouched: string[];
+  /** Mutating executions beyond files ({tool, target, verified, evidence?}). */
+  sideEffects:  SideEffectRecord[];
+  /** Last structured give-up / verification failure. */
+  failureState: TaskFailureState | null;
+  /** Approval mode in force when the task ran (Pillar-2 seam). */
+  permissions:  Record<string, unknown> | null;
+  /** v4.13 Gap 4 — resume attempts spent (per-task wake-loop cap). */
+  resumeCount:  number;
 }
 
 /** Raw column shape from sqlite. JSON arrays come back as strings. */
@@ -75,6 +114,31 @@ interface TaskRowSql {
   parent_task_id:  string | null;
   trace_ids:       string;
   artifact_ids:    string;
+  evidence:        string | null;
+  constraints:     string | null;
+  files_touched:   string;
+  side_effects:    string;
+  failure_state:   string | null;
+  permissions:     string | null;
+  resume_count:    number;
+}
+
+/** Defensive JSON parse — null on corruption, never a crash. */
+function parseJsonOrNull<T>(raw: string | null | undefined): T | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed as T : null;
+  } catch { return null; }
+}
+
+/** Defensive JSON-array parse — empty array on corruption/absence. */
+function parseJsonArray<T>(raw: string | null | undefined): T[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed as T[] : [];
+  } catch { return []; }
 }
 
 function rowToTask(r: TaskRowSql): Task {
@@ -90,6 +154,13 @@ function rowToTask(r: TaskRowSql): Task {
     const parsed = JSON.parse(r.artifact_ids);
     if (Array.isArray(parsed)) artifactIds = parsed.filter((s): s is string => typeof s === 'string');
   } catch { /* same */ }
+  let evidence: TaskEvidence | null = null;
+  try {
+    if (r.evidence) {
+      const parsed = JSON.parse(r.evidence);
+      if (parsed && typeof parsed === 'object') evidence = parsed as TaskEvidence;
+    }
+  } catch { /* malformed envelope — surface as null, never crash a listing */ }
   return {
     id:           r.id,
     title:        r.title,
@@ -102,6 +173,13 @@ function rowToTask(r: TaskRowSql): Task {
     parentTaskId: r.parent_task_id,
     traceIds,
     artifactIds,
+    evidence,
+    constraints:  parseJsonOrNull<Record<string, unknown>>(r.constraints),
+    filesTouched: parseJsonArray<string>(r.files_touched).filter((s): s is string => typeof s === 'string'),
+    sideEffects:  parseJsonArray<SideEffectRecord>(r.side_effects),
+    failureState: parseJsonOrNull<TaskFailureState>(r.failure_state),
+    permissions:  parseJsonOrNull<Record<string, unknown>>(r.permissions),
+    resumeCount:  typeof r.resume_count === 'number' ? r.resume_count : 0,
   };
 }
 
@@ -155,6 +233,38 @@ export interface TaskStore {
    * (core/v4/daemon/artifactStore.ts).
    */
   appendArtifactId(id: string, artifactId: string): void;
+  /**
+   * v4.13 Gap 1 — terminal transition decided by the verify-before-done
+   * gate. Writes status + the evidence envelope in ONE statement so a
+   * crash can't leave a verdict without its justification (or vice
+   * versa). Best-effort like setStatus.
+   *
+   * v4.13 Gap 3 — the same single UPDATE also carries the job-card:
+   * `filesTouched` MERGES (deduped) and `sideEffects` APPENDS (deduped
+   * by value) into the row's existing arrays so a multi-turn task
+   * accumulates its footprint; `failureState` / `permissions` /
+   * `constraints` overwrite only when provided. Single-write
+   * discipline: status, evidence, and job-card can never diverge —
+   * one statement, no scattered writers.
+   */
+  finalizeVerification(
+    id: string,
+    status: TaskStatus,
+    evidence: TaskEvidence,
+    jobCard?: {
+      filesTouched?: string[];
+      sideEffects?:  SideEffectRecord[];
+      failureState?: TaskFailureState | null;
+      permissions?:  Record<string, unknown> | null;
+      constraints?:  Record<string, unknown> | null;
+    },
+  ): void;
+  /**
+   * v4.13 Gap 4 — spend one resume attempt (atomic increment). Returns
+   * the NEW count so the sweep can compare against the wake-loop cap
+   * without a second read.
+   */
+  incrementResumeCount(id: string): number;
   /**
    * Listing surface for /tasks. Newest-first by created_at. Optional
    * session + status filters compose with AND.
@@ -234,6 +344,52 @@ export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
         `UPDATE tasks SET goal = ?, updated_at = ? WHERE id = ?`,
       ).run(goal, Date.now(), id);
     },
+    finalizeVerification(id, status, evidence, jobCard) {
+      // Read-merge for the accumulating arrays (same discipline as
+      // appendTraceId), then ONE UPDATE carrying every field — status,
+      // evidence, and job-card land atomically or not at all.
+      const row = db.prepare(
+        'SELECT files_touched, side_effects, constraints, failure_state, permissions FROM tasks WHERE id = ?',
+      ).get(id) as {
+        files_touched: string; side_effects: string;
+        constraints: string | null; failure_state: string | null; permissions: string | null;
+      } | undefined;
+      if (!row) return;   // missing task — same silent no-op as setStatus
+
+      const files = parseJsonArray<string>(row.files_touched)
+        .filter((s): s is string => typeof s === 'string');
+      for (const f of jobCard?.filesTouched ?? []) {
+        if (!files.includes(f)) files.push(f);
+      }
+      const effects = parseJsonArray<SideEffectRecord>(row.side_effects);
+      const seen = new Set(effects.map((e) => JSON.stringify(e)));
+      for (const e of jobCard?.sideEffects ?? []) {
+        const key = JSON.stringify(e);
+        if (!seen.has(key)) { effects.push(e); seen.add(key); }
+      }
+      const pick = (provided: unknown | undefined, existing: string | null): string | null => {
+        if (provided === undefined) return existing;
+        return provided === null ? null : JSON.stringify(provided);
+      };
+      db.prepare(
+        `UPDATE tasks SET
+           status = ?, evidence = ?,
+           files_touched = ?, side_effects = ?,
+           failure_state = ?, permissions = ?, constraints = ?,
+           updated_at = ?
+         WHERE id = ?`,
+      ).run(
+        status,
+        JSON.stringify(evidence),
+        JSON.stringify(files),
+        JSON.stringify(effects),
+        pick(jobCard?.failureState, row.failure_state),
+        pick(jobCard?.permissions,  row.permissions),
+        pick(jobCard?.constraints,  row.constraints),
+        Date.now(),
+        id,
+      );
+    },
     appendTraceId(id, eventId) {
       // Read-modify-write. SQLite's WAL serialises writers so the
       // race window is small but theoretically present; we de-dupe
@@ -267,6 +423,13 @@ export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
         `UPDATE tasks SET artifact_ids = ?, updated_at = ? WHERE id = ?`,
       ).run(JSON.stringify(arr), Date.now(), id);
     },
+    incrementResumeCount(id) {
+      db.prepare(
+        `UPDATE tasks SET resume_count = resume_count + 1, updated_at = ? WHERE id = ?`,
+      ).run(Date.now(), id);
+      const row = db.prepare('SELECT resume_count FROM tasks WHERE id = ?').get(id) as { resume_count: number } | undefined;
+      return row?.resume_count ?? 0;
+    },
     listRecent(qOpts = {}) {
       const limit = Math.max(1, Math.min(qOpts.limit ?? 50, 5000));
       const where: string[]                 = [];
@@ -287,14 +450,17 @@ export function createTaskStore(opts: CreateTaskStoreOptions): TaskStore {
       return rows.map(rowToTask);
     },
     sweepOrphaned(beforeMs) {
-      // Single atomic UPDATE — only pre-boot `active` rows transition.
+      // Single atomic UPDATE — only pre-boot in-flight rows transition.
       // `created_at < beforeMs` excludes anything this process creates
       // (current-session tasks are all stamped after boot), so a live
       // session is never disturbed. Returns the swept count for logging.
+      // v4.13 Gap 1 — `pending_verification` is in-flight too: a crash
+      // between the gate's two writes must retire the row honestly
+      // rather than leaving it pending forever.
       const info = db.prepare(
         `UPDATE tasks
             SET status = 'interrupted', updated_at = ?
-          WHERE status = 'active' AND created_at < ?`,
+          WHERE status IN ('active', 'pending_verification') AND created_at < ?`,
       ).run(Date.now(), beforeMs);
       return info.changes;
     },

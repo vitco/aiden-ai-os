@@ -623,6 +623,89 @@ CREATE INDEX IF NOT EXISTS idx_artifacts_task
   ON artifacts(task_id, created_at DESC);
 `;
 
+// v4.13 Pillar 1 Gap 1 — verify-before-done. `evidence` holds the
+// versioned JSON envelope written when the turn-end gate decides the
+// task's terminal status (core/v4/taskVerification.ts: verdict + per-claim
+// evidence handles + failures). Nullable: rows predating the gate, and
+// rows finalized on non-`stop` finishes, simply have no envelope. The
+// envelope is the seed of the full job-card — Gap 3 extends it (and adds
+// sibling columns) rather than reshaping. New status values
+// (pending_verification / completed_unverified / verification_failed)
+// need no schema change — `status` is unconstrained TEXT by design.
+const V16_SQL = `
+ALTER TABLE tasks ADD COLUMN evidence TEXT;
+`;
+
+// v4.13 Pillar 1 Gap 3 — complete the job-card. Additive columns making
+// the task row the durable, evidence-backed record of what a task is and
+// what it did — everything a future resume (Gap 4) needs, reconstructable
+// without trusting prose:
+//   constraints   (nullable JSON) — user-stated limits at creation. No
+//                 producer exists today (free-text constraints are not
+//                 captured anywhere); the column is the seam.
+//   files_touched (JSON array)    — deduped paths from mutating, verifier-
+//                 evidenced tool executions; append-per-turn.
+//   side_effects  (JSON array)    — mutating executions beyond files
+//                 ({tool, target, verified, evidence?}).
+//   failure_state (nullable JSON) — last structured give-up/verification
+//                 failure ({class, whatWasTried: retry ledger, whenAt}).
+//   permissions   (nullable JSON) — approval mode in force when the task
+//                 ran (the Pillar-2 seam: record now, enforce later).
+const V17_SQL = `
+ALTER TABLE tasks ADD COLUMN constraints   TEXT;
+ALTER TABLE tasks ADD COLUMN files_touched TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE tasks ADD COLUMN side_effects  TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE tasks ADD COLUMN failure_state TEXT;
+ALTER TABLE tasks ADD COLUMN permissions   TEXT;
+`;
+
+// v4.13 Pillar 1 Gap 4 — durable resume that re-drives.
+//   runs.task_id       — links a daemon run to its durable task row (the
+//                        job-card), so the resume sweep can revalidate the
+//                        world from evidence instead of prose. NULL for
+//                        rows predating the link (those are honestly
+//                        unresumable — no card, no revalidation).
+//   tasks.resume_count — per-TASK resume attempts spent; the wake-loop
+//                        cap (default 2) reads this. Turn-level budgets
+//                        (Gap 2) reset per attempt; this one never does.
+const V18_SQL = `
+ALTER TABLE runs  ADD COLUMN task_id      TEXT;
+ALTER TABLE tasks ADD COLUMN resume_count INTEGER NOT NULL DEFAULT 0;
+`;
+
+// v4.12.1 Pillar 1 — side-effect idempotency ledger. Durable, per-task
+// record of EXTERNAL-irreversible sends (channel deliveries, outbound
+// webhook/email) so a crash-then-resume never re-fires a send that already
+// left the machine. One row per logical send, keyed deterministically from
+// (task_id + step-ordinal + args_hash) — the same logical send always maps
+// to the same `key`, even though a channel DeliveryReceipt carries no
+// provider id. Lifecycle: an `attempting` row is written BEFORE the send;
+// promoted to `confirmed` with the receipt AFTER it returns. On resume:
+//   confirmed  → skip (idempotent replay) — the send already happened.
+//   attempting → crash mid-send; NEVER blind re-fire — verify a receipt if
+//                one exists, else surface to the user (needs-confirmation).
+// The (task_id, step) index backs the ambiguity guard: a confirmed row at
+// the same ordinal but a DIFFERENT args_hash (the re-driven model phrased
+// the send differently) is treated as needs-confirmation, not a fresh send.
+// Local file mutations do NOT land here — they are covered by verify +
+// the batch-staleness guard and are safe to re-drive.
+const V19_SQL = `
+CREATE TABLE IF NOT EXISTS side_effect_ledger (
+  key           TEXT    PRIMARY KEY,
+  task_id       TEXT,
+  step          INTEGER NOT NULL,
+  tool          TEXT    NOT NULL,
+  args_hash     TEXT    NOT NULL,
+  target        TEXT,
+  status        TEXT    NOT NULL,
+  receipt       TEXT,
+  attempted_at  INTEGER NOT NULL,
+  confirmed_at  INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_side_effect_ledger_task
+  ON side_effect_ledger(task_id, step);
+`;
+
 const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 1, name: 'phase 1 — daemon foundation',                  sql: V1_SQL },
   { version: 2, name: 'phase 2 — file watcher observations',          sql: V2_SQL },
@@ -639,6 +722,10 @@ const MIGRATIONS: ReadonlyArray<Migration> = [
   { version: 13, name: 'v4.10 slice 10.2b — run_events richer schema',  sql: V13_SQL },
   { version: 14, name: 'v4.10 slice 10.8 — durable Task-lite kernel',   sql: V14_SQL },
   { version: 15, name: 'v4.11 — artifact registry with provenance',     sql: V15_SQL },
+  { version: 16, name: 'v4.13 gap 1 — task verification evidence',      sql: V16_SQL },
+  { version: 17, name: 'v4.13 gap 3 — job-card columns',                sql: V17_SQL },
+  { version: 18, name: 'v4.13 gap 4 — resume linkage + wake-loop cap',   sql: V18_SQL },
+  { version: 19, name: 'v4.12.1 — side-effect idempotency ledger',        sql: V19_SQL },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS[MIGRATIONS.length - 1].version;
