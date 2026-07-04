@@ -39,6 +39,12 @@ export interface WelcomeLineContext {
    * the recall tier.
    */
   recallSummary:  string | null;
+  /**
+   * v4.14 Personality L1 — the user's stored call-name (from USER.md), or null.
+   * When set, the welcome addresses them by name ("Welcome back, Shiva"). This
+   * is the USE half of onboarding's ask→store→use loop.
+   */
+  userName?:      string | null;
   paintMuted:     (s: string) => string;
   paintAccent:    (s: string) => string;
   /**
@@ -99,18 +105,22 @@ export function humanGap(lastSessionAt: string | null, now: Date): string | null
  * greeter chooses to show it (vs stay silent) is the orchestrator's call.
  */
 export function buildWelcomeLine(ctx: WelcomeLineContext): string {
+  // Personality L1 — greet by name when we know it: "Welcome back, Shiva".
+  const name = ctx.userName && ctx.userName.trim().length > 0 ? ctx.userName.trim() : null;
+  const back = name ? `Welcome back, ${name}` : 'Welcome back';
+
   // ── Tier 1: recall-aware ────────────────────────────────────────────
   const summary = ctx.recallSummary && ctx.recallSummary.trim().length > 0
     ? oneLine(ctx.recallSummary)
     : null;
   if (summary) {
-    return `Welcome back! Last time: ${ctx.paintMuted(summary)}. Continue, or something new?`;
+    return `${back}! Last time: ${ctx.paintMuted(summary)}. Continue, or something new?`;
   }
 
   // ── Tier 2: human time-gap ──────────────────────────────────────────
   const gap = humanGap(ctx.lastSessionAt, ctx.now);
   if (gap) {
-    return `Welcome back — ${gapSentence(gap)}`;
+    return `${back} — ${gapSentence(gap)}`;
   }
 
   // ── Tier 3: rotate a friendly fallback ──────────────────────────────

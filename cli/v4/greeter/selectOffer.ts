@@ -61,6 +61,9 @@ export interface SelectOfferInput {
   lastSessionAt?: string | null;
   /** v4.14 Bug 1 — deterministic rotation seed for the no-history fallback. */
   rotateSeed?:    number;
+  /** v4.14 Personality L1 — the user's stored call-name, so the welcome
+   *  greets them by name. Read from USER.md by the orchestrator. */
+  userName?:      string | null;
 }
 
 export function selectOffer(input: SelectOfferInput): Offer | null {
@@ -88,6 +91,7 @@ export function selectOffer(input: SelectOfferInput): Offer | null {
       now:           input.now,
       lastSessionAt: input.lastSessionAt ?? null,
       recallSummary,
+      userName:      input.userName ?? null,
       paintMuted:    input.paintMuted,
       paintAccent:   input.paintAccent,
       rotateSeed:    input.rotateSeed,

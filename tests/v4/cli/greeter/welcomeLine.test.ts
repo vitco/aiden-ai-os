@@ -95,6 +95,26 @@ describe('buildWelcomeLine — time-gap tier (human words only)', () => {
   });
 });
 
+// ── Personality L1: greet by name (the USE half of the loop) ───────────────
+describe('buildWelcomeLine — greets by name when known', () => {
+  it('recall tier addresses the user by name', () => {
+    const line = buildWelcomeLine({ ...base, lastSessionAt: hoursAgoIso(50), recallSummary: 'the parser', userName: 'Shiva' });
+    expect(line).toBe('Welcome back, Shiva! Last time: <m>the parser</m>. Continue, or something new?');
+  });
+  it('time-gap tier addresses the user by name', () => {
+    const line = buildWelcomeLine({ ...base, lastSessionAt: daysAgoIso(2), recallSummary: null, userName: 'Ada' });
+    expect(line).toContain('Welcome back, Ada —');
+  });
+  it('no name → the plain "Welcome back" (unchanged)', () => {
+    expect(buildWelcomeLine({ ...base, lastSessionAt: hoursAgoIso(30), recallSummary: null })).toContain('Welcome back —');
+    expect(buildWelcomeLine({ ...base, lastSessionAt: hoursAgoIso(30), recallSummary: null })).not.toContain(',');
+  });
+  it('blank / whitespace name is ignored (no dangling comma)', () => {
+    expect(buildWelcomeLine({ ...base, lastSessionAt: hoursAgoIso(30), recallSummary: null, userName: '  ' }))
+      .not.toContain('Welcome back,');
+  });
+});
+
 // ── Tier 3: rotated fallback ───────────────────────────────────────────────
 describe('buildWelcomeLine — no-history fallback', () => {
   it('rotates a friendly line by seed (deterministic, not random)', () => {

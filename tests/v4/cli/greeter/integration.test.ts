@@ -211,6 +211,27 @@ describe('renderGreeter — durable last-session marker (v4.14 Bug 1)', () => {
   });
 });
 
+describe('renderGreeter — greets by stored name (v4.14 Personality L1)', () => {
+  it('reads USER.md and addresses the user by name on a returning boot', async () => {
+    // Returning user: a stale gap so the time-gap welcome fires, plus a name
+    // stored by onboarding in the exact durable format.
+    await writeHistory(paths, mkHistory({ lastSessionAt: '2026-05-20T00:00:00.000Z', lastCwd: process.cwd() }));
+    await fs.mkdir(path.join(root, 'memories'), { recursive: true });
+    await fs.writeFile(path.join(root, 'memories', 'USER.md'), "User's name is Shiva. (source: onboarding)", 'utf8');
+
+    await renderGreeter({ paths, version: VERSION, display, now: NOW });
+    expect(writes).toHaveLength(1);
+    expect(writes[0]).toContain('Welcome back, Shiva');
+  });
+
+  it('no stored name → the plain welcome (no dangling comma)', async () => {
+    await writeHistory(paths, mkHistory({ lastSessionAt: '2026-05-20T00:00:00.000Z', lastCwd: process.cwd() }));
+    await renderGreeter({ paths, version: VERSION, display, now: NOW });
+    expect(writes[0]).toContain('Welcome back —');
+    expect(writes[0]).not.toContain('Welcome back,');
+  });
+});
+
 describe('renderGreeter — never throws', () => {
   it('returns cleanly when the paths root is read-only / inaccessible (does not crash REPL)', async () => {
     // Construct a paths object pointing at a definitely-nonexistent root

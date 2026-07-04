@@ -31,6 +31,7 @@ import { readHistory, writeHistory, reconcilePending } from './history';
 import { runScans } from './scan';
 import { selectOffer } from './selectOffer';
 import type { GreeterHistory, Offer } from './types';
+import { readUserName } from '../onboarding/speakFirst';
 
 /**
  * Minimal Display surface the greeter needs. We accept this narrow
@@ -114,6 +115,11 @@ async function renderGreeterUnsafe(opts: RenderGreeterOptions): Promise<void> {
   // still shows a real gap instead of the old frozen distillation-mtime value.
   const lastSessionAt = existing.lastSessionAt ?? existing.lastGreetingAt ?? null;
   const distillation = await loadLatestDistillation(opts.paths, fsImpl);
+  // v4.14 Personality L1 — read the stored call-name so the welcome greets by
+  // name (the USE half of onboarding's ask→store→use loop). Derive USER.md from
+  // the paths, tolerating the narrow test-paths shape that only carries `root`.
+  const userMdPath = opts.paths.userMd ?? path.join(opts.paths.root, 'memories', 'USER.md');
+  const userName = await readUserName(userMdPath, fsImpl);
   const offer: Offer | null = selectOffer({
     scan:          scanForReconcile,
     history:       reconciled,
@@ -123,6 +129,7 @@ async function renderGreeterUnsafe(opts: RenderGreeterOptions): Promise<void> {
     openItem:      distillation?.openItem,
     lastDecision:  distillation?.lastDecision,
     lastSessionAt,
+    userName,
     // Deterministic per-day rotation for the no-history fallback line.
     rotateSeed:    now.getDate(),
   });

@@ -2887,7 +2887,14 @@ export class ChatSession implements ChatSessionLike {
         // suppression path was untested. `import()` resolves in both the runner
         // and the compiled CJS build.
         const { renderOnboardingIntro } = await import('./onboarding/speakFirst');
-        onboarded = await renderOnboardingIntro({ paths: this.opts.paths, out: process.stdout });
+        // v4.14 Personality L1 — pass the real memory manager so the captured
+        // name is stored via the existing write path (memory.add('user', …)),
+        // which fires the mutation listener → the name reaches the prompt.
+        onboarded = await renderOnboardingIntro({
+          paths:  this.opts.paths,
+          out:    process.stdout,
+          memory: this.opts.memoryManager,
+        });
         if (!onboarded) {
           // eslint-disable-next-line @typescript-eslint/no-var-requires
           const { renderFirstRunHint } = require('./repl/firstRunHint') as typeof import('./repl/firstRunHint');
