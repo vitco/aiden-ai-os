@@ -33,6 +33,12 @@ export interface DiscoveredOAuth {
   authorizationEndpoint: string;
   tokenEndpoint: string;
   registrationEndpoint?: string;
+  /**
+   * v4.14 — RFC 8628 device-authorization endpoint. Rarely published in AS
+   * metadata (GitHub, for one, does not), so it's usually supplied by the
+   * static per-provider config rather than discovered.
+   */
+  deviceAuthorizationEndpoint?: string;
   scopesSupported?: string[];
   codeChallengeMethods?: string[];
 }
@@ -51,6 +57,23 @@ export interface McpOAuthConfig {
   clientId: string;
   clientSecret?: string;
   redirectUris: string[];
+  /**
+   * v4.14 — requested scopes (space-joined by the flow). Carried for the
+   * device-flow path, which asks for scopes at device-authorization time.
+   */
+  scopes?: string[];
+}
+
+/**
+ * v4.14 — a pre-registered (static) client config for providers with NO
+ * Dynamic Client Registration. When present + the AS has no
+ * `registration_endpoint`, Aiden uses the RFC 8628 device flow (secret-free)
+ * instead of throwing. Provider-agnostic: GitHub is just the first to fill it.
+ */
+export interface StaticOAuthClient {
+  clientId: string;
+  deviceAuthorizationEndpoint: string;
+  scopes?: string[];
 }
 
 /** tokenStore id for an MCP server's OAuth record. Isolated from provider ids. */
@@ -249,7 +272,7 @@ export async function ensureMcpOAuthConfig(
   paths: AidenPaths,
   server: string,
   serverUrl: string,
-  deps: { fetchFn: FetchLike; redirectUris: string[]; clientName?: string },
+  deps: { fetchFn: FetchLike; redirectUris: string[]; clientName?: string; staticClient?: StaticOAuthClient },
 ): Promise<McpOAuthConfig> {
   const existing = await loadMcpOAuthConfig(paths, server);
   if (existing?.clientId) return existing; // idempotent — reuse the registered client
@@ -259,9 +282,26 @@ export async function ensureMcpOAuthConfig(
     throw new Error(`No OAuth metadata found for MCP server "${server}" (${serverUrl}) — it may not require OAuth.`);
   }
   if (!discovered.endpoints.registrationEndpoint) {
+    // v4.14 — no Dynamic Client Registration. If a static device-flow client is
+    // configured (RFC 8628), use it (secret-free) instead of failing. Otherwise
+    // keep the honest throw — we can't self-register and have nothing to fall
+    // back to.
+    const sc = deps.staticClient;
+    if (sc?.clientId && sc.deviceAuthorizationEndpoint) {
+      const deviceConfig: McpOAuthConfig = {
+        resource: discovered.resource,
+        endpoints: { ...discovered.endpoints, deviceAuthorizationEndpoint: sc.deviceAuthorizationEndpoint },
+        clientId: sc.clientId,
+        redirectUris: [], // device flow has no redirect
+        scopes: sc.scopes,
+      };
+      await saveMcpOAuthConfig(paths, server, deviceConfig);
+      return deviceConfig;
+    }
     throw new Error(
       `MCP server "${server}" authorization server has no registration_endpoint ` +
-        '(no Dynamic Client Registration) — manual client pre-registration is not yet supported.',
+        '(no Dynamic Client Registration), and no device-flow client is configured — ' +
+        'this connector needs a pre-registered client id to authorize.',
     );
   }
   const client = await registerClient(discovered.endpoints.registrationEndpoint, {

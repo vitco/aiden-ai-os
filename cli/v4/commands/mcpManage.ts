@@ -28,12 +28,13 @@ import type { SlashCommand, SlashCommandContext } from '../commandRegistry';
 import type { McpServer, McpServerConfig } from '../../../core/v4/mcpClient';
 import { promises as fs } from 'node:fs';
 import { mapStandardMcpServers } from '../../../tools/v4/mcpImport';
-import { ensureMcpOAuthConfig } from '../../../core/v4/mcp/oauthDiscovery';
+import { ensureMcpOAuthConfig, type StaticOAuthClient } from '../../../core/v4/mcp/oauthDiscovery';
 import {
   runLoopbackAuthFlow,
   loopbackRedirectUris,
   persistMcpTokens,
 } from '../../../core/v4/mcp/oauthLoginFlow';
+import { runMcpDeviceFlow } from '../../../core/v4/mcp/deviceFlow';
 import type { OAuthUserAgent } from '../../../core/v4/auth/oauthFlow';
 import { openOAuthBrowserUrl } from '../auth/loadProvider';
 import {
@@ -41,6 +42,7 @@ import {
   findCatalogEntry,
   catalogEntryToRawConfig,
   type CatalogAuth,
+  type McpServerOAuth,
 } from './mcpCatalog';
 
 const STATUS_GLYPH: Record<McpServer['status'], string> = {
@@ -149,7 +151,7 @@ function toolCountLabel(n: number): string {
 /** Raw config union written under `mcp.servers.<name>`. */
 type RawServerEntry =
   | RawStdioEntry
-  | { type: 'http'; http: { baseUrl: string; transport: 'streamable' | 'sse' } };
+  | { type: 'http'; http: { baseUrl: string; transport: 'streamable' | 'sse'; oauth?: McpServerOAuth } };
 
 /**
  * Shared add core (Slice 1b + Slice 4): collision check → security gate
@@ -259,7 +261,11 @@ function handleCatalog(ctx: SlashCommandContext): void {
   const { display } = ctx;
   display.info(`MCP catalog — ${MCP_CATALOG.length} curated servers`);
   for (const e of MCP_CATALOG) {
-    const auth = e.auth === 'oauth' ? ' · 🔑 oauth' : '';
+    // Surface OAuth honestly: an unverified entry (no proven end-to-end connect
+    // yet) is labelled so, never advertised as working.
+    const auth = e.auth === 'oauth'
+      ? (e.oauthVerified ? ' · 🔑 oauth' : ' · 🔑 oauth (unverified)')
+      : '';
     display.write(`  ${e.slug}  —  ${e.name}  (${e.transport}${auth})\n`);
     display.dim(`      ${e.description}`);
   }
@@ -440,7 +446,7 @@ async function handleAuth(ctx: SlashCommandContext): Promise<void> {
   if (!ctx.config) { display.printError('Cannot read server config — config is not available.');   return; }
 
   const mcpCfg = ctx.config.getValue<{
-    servers?: Record<string, { type?: string; http?: { baseUrl?: string } }>;
+    servers?: Record<string, { type?: string; http?: { baseUrl?: string; oauth?: McpServerOAuth } }>;
   }>('mcp');
   const entry = mcpCfg?.servers?.[name];
   if (!entry) {
@@ -453,12 +459,45 @@ async function handleAuth(ctx: SlashCommandContext): Promise<void> {
   }
 
   const serverUrl = entry.http.baseUrl;
+  // v4.14 — resolve a static device-flow client for providers without DCR. The
+  // client id is PUBLIC (device flow, no secret); it comes from the server
+  // config, overridable at runtime via AIDEN_MCP_<NAME>_CLIENT_ID so a user can
+  // supply their own registered app without editing the shipped catalog.
+  const oauthCfg = entry.http.oauth;
+  let staticClient: StaticOAuthClient | undefined;
+  if (oauthCfg?.deviceAuthorizationEndpoint) {
+    const clientId = (process.env[`AIDEN_MCP_${name.toUpperCase()}_CLIENT_ID`] ?? oauthCfg.clientId ?? '').trim();
+    if (!clientId) {
+      display.printError(
+        `'${name}' needs a registered OAuth client id to authorize.`,
+        `Set AIDEN_MCP_${name.toUpperCase()}_CLIENT_ID to your registered app's client id, then retry.`,
+      );
+      return;
+    }
+    staticClient = { clientId, deviceAuthorizationEndpoint: oauthCfg.deviceAuthorizationEndpoint, scopes: oauthCfg.scopes };
+  }
+
   try {
     const config = await ensureMcpOAuthConfig(ctx.paths, name, serverUrl, {
       fetchFn: fetch,
       redirectUris: loopbackRedirectUris(),
+      staticClient,
     });
-    const result = await runLoopbackAuthFlow({ config, server: name, ua: buildMcpUserAgent(ctx) });
+    // Route by what the resolved config carries: a device-authorization endpoint
+    // ⇒ RFC 8628 device flow; otherwise the DCR + loopback flow. Both hand the
+    // same OAuthFlowResult to the same token store.
+    const result = config.endpoints.deviceAuthorizationEndpoint
+      ? await runMcpDeviceFlow({
+          config: {
+            deviceAuthorizationEndpoint: config.endpoints.deviceAuthorizationEndpoint,
+            tokenEndpoint: config.endpoints.tokenEndpoint,
+            clientId: config.clientId,
+            scope: config.scopes?.join(' '),
+          },
+          server: name,
+          ua: buildMcpUserAgent(ctx),
+        })
+      : await runLoopbackAuthFlow({ config, server: name, ua: buildMcpUserAgent(ctx) });
     await persistMcpTokens(ctx.paths, name, result);
 
     // Handoff: token persisted → (re)connect so the tools register immediately.

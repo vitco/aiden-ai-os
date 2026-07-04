@@ -33,6 +33,25 @@ export interface CatalogEntry {
   args?: string[];
   /** http (streamable/sse): the single endpoint URL. */
   baseUrl?: string;
+  /**
+   * v4.14 — static OAuth client config for providers with NO Dynamic Client
+   * Registration (e.g. GitHub). Carries the pre-registered PUBLIC client id
+   * (device flow uses no secret) + the RFC 8628 device-authorization endpoint
+   * (rarely published in AS metadata) + requested scopes. `clientId` may be
+   * empty in the shipped catalog when Aiden hasn't registered an app yet —
+   * it's then supplied at runtime via `AIDEN_MCP_<SLUG>_CLIENT_ID`.
+   */
+  oauth?: {
+    clientId: string;
+    deviceAuthorizationEndpoint: string;
+    scopes?: string[];
+  };
+  /**
+   * v4.14 — true ONLY once a real end-to-end OAuth connect has been proven for
+   * this entry. Unverified OAuth entries are surfaced honestly (never
+   * advertised as working). Defaults to false/absent.
+   */
+  oauthVerified?: boolean;
   /** Where the server comes from — shown so the user can vet it. */
   sourceUrl: string;
   /** Trust / footgun notes shown before the confirm gate. */
@@ -140,8 +159,19 @@ export const MCP_CATALOG: readonly CatalogEntry[] = [
     transport: 'streamable',
     auth: 'oauth',
     baseUrl: 'https://api.githubcopilot.com/mcp/',
+    // GitHub's authorization server has NO Dynamic Client Registration, so we
+    // use the RFC 8628 device flow with a pre-registered public client id. The
+    // device endpoint isn't in GitHub's metadata, so it's carried here. The
+    // client id ships empty until Aiden registers an official OAuth App; supply
+    // your own registered app via AIDEN_MCP_GITHUB_CLIENT_ID to try it now.
+    oauth: {
+      clientId: '',
+      deviceAuthorizationEndpoint: 'https://github.com/login/device/code',
+      scopes: ['repo', 'read:org', 'read:user'],
+    },
+    oauthVerified: false, // not proven end-to-end yet — never advertised as working
     sourceUrl: 'https://github.com/github/github-mcp-server',
-    securityNotes: 'Browser OAuth (no PAT). Grants access to your GitHub per the scopes you approve. After adding, run `/mcp auth github`.',
+    securityNotes: 'Browser device-code OAuth (no PAT, no secret). Grants access to your GitHub per the scopes you approve. After adding, run `/mcp auth github`.',
   },
 ] as const;
 
@@ -151,17 +181,33 @@ export function findCatalogEntry(slug: string): CatalogEntry | undefined {
   return MCP_CATALOG.find((e) => e.slug === s);
 }
 
+/** Static OAuth client config persisted under `mcp.servers.<name>.http.oauth`. */
+export interface McpServerOAuth {
+  clientId: string;
+  deviceAuthorizationEndpoint: string;
+  scopes?: string[];
+}
+
 /** Raw `mcp.servers.<name>` config from a catalog entry (+ user trailing args for stdio). */
 export function catalogEntryToRawConfig(
   entry: CatalogEntry,
   extraArgs: string[] = [],
 ):
   | { type: 'stdio'; stdio: { command: string; args: string[] } }
-  | { type: 'http'; http: { baseUrl: string; transport: 'streamable' | 'sse' } } {
+  | { type: 'http'; http: { baseUrl: string; transport: 'streamable' | 'sse'; oauth?: McpServerOAuth } } {
   if (entry.transport === 'stdio') {
     if (!entry.command) throw new Error(`Catalog entry '${entry.slug}' is stdio but has no command`);
     return { type: 'stdio', stdio: { command: entry.command, args: [...(entry.args ?? []), ...extraArgs] } };
   }
   if (!entry.baseUrl) throw new Error(`Catalog entry '${entry.slug}' is ${entry.transport} but has no baseUrl`);
-  return { type: 'http', http: { baseUrl: entry.baseUrl, transport: entry.transport === 'sse' ? 'sse' : 'streamable' } };
+  return {
+    type: 'http',
+    http: {
+      baseUrl: entry.baseUrl,
+      transport: entry.transport === 'sse' ? 'sse' : 'streamable',
+      // Carry the static OAuth client through to the server config so /mcp auth
+      // can drive the device flow without re-reading the catalog.
+      ...(entry.oauth ? { oauth: { ...entry.oauth } } : {}),
+    },
+  };
 }

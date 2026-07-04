@@ -83,7 +83,10 @@ describe('MCP catalog — data integrity', () => {
     const fs = catalogEntryToRawConfig(findCatalogEntry('filesystem')!, ['/some/dir']);
     expect(fs).toEqual({ type: 'stdio', stdio: { command: 'npx', args: ['-y', '@modelcontextprotocol/server-filesystem', '/some/dir'] } });
     const gh = catalogEntryToRawConfig(findCatalogEntry('github')!);
-    expect(gh).toEqual({ type: 'http', http: { baseUrl: 'https://api.githubcopilot.com/mcp/', transport: 'streamable' } });
+    expect(gh).toEqual({ type: 'http', http: {
+      baseUrl: 'https://api.githubcopilot.com/mcp/', transport: 'streamable',
+      oauth: { clientId: '', deviceAuthorizationEndpoint: 'https://github.com/login/device/code', scopes: ['repo', 'read:org', 'read:user'] },
+    } });
   });
 });
 
@@ -142,7 +145,10 @@ describe('/mcp catalog add — funnels the gate', () => {
     const { ctx, display } = buildCtx(['install', 'github'], client, { config: cfg as never, confirm });
     await mcp.handler(ctx);
     const out = text(display);
-    expect(cfg.getValue('mcp.servers').github).toEqual({ type: 'http', http: { baseUrl: 'https://api.githubcopilot.com/mcp/', transport: 'streamable' } });
+    expect(cfg.getValue('mcp.servers').github).toEqual({ type: 'http', http: {
+      baseUrl: 'https://api.githubcopilot.com/mcp/', transport: 'streamable',
+      oauth: { clientId: '', deviceAuthorizationEndpoint: 'https://github.com/login/device/code', scopes: ['repo', 'read:org', 'read:user'] },
+    } });
     expect(out).toContain('https://api.githubcopilot.com/mcp/');
     expect(out).toContain("Saved 'github'"); // written, not connected
     expect(out).toContain('/mcp auth github'); // hint to authorize
