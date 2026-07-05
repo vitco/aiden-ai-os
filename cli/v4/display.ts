@@ -46,6 +46,7 @@ import { getReplyRenderer } from './replyRenderer';
 import { renderCitationFooter } from './citationFooter';
 import { buildToolPreview } from './toolPreview';
 import { renderComposerBuffer } from './composerRow';
+import { ComposerLane, composerLaneEnabled, type LaneSink } from './composerLane';
 // v4.1.4 reply-quality polish: shared frame math for width + indent.
 // `cols()`, `rule()`, `agentTurn`, and `tryRerenderInPlace` all route
 // through frame helpers so the visible left edge / right margin / wrap
@@ -380,6 +381,11 @@ export class Display {
   // refresh it immediately instead of waiting for the owner's next tick. The
   // indicator + tool-row each set/restore this around their lifetime.
   private composerRepaint: (() => void) | null = null;
+  // v4.14 — the OPT-IN single-owner fixed bottom lane (scroll-region). When
+  // AIDEN_COMPOSER_LANE=1, the composer is pinned to a reserved bottom row and
+  // all turn output scrolls above it; otherwise the suffix path below is used
+  // unchanged. Lazily created on first use.
+  private composerLane: ComposerLane | null = null;
 
   constructor(opts: { skin?: SkinEngine; stdout?: NodeJS.WriteStream; stderr?: NodeJS.WriteStream } = {}) {
     this.skin = opts.skin ?? getSkinEngine();
@@ -1811,7 +1817,7 @@ export class Display {
     const next = renderComposerBuffer(buffer, mode, Math.max(20, ((this.out.columns ?? 80) >> 1)));
     if (next === this.composerText) return;
     this.composerText = next;
-    this.composerRepaint?.();
+    this.paintComposerSurface();
   }
 
   /**
@@ -1823,7 +1829,7 @@ export class Display {
   setBusyHint(hint: string): void {
     if (hint === this.busyComposerHint) return;
     this.busyComposerHint = hint;
-    this.composerRepaint?.();
+    this.paintComposerSurface();
   }
 
   /** Clear the composer (turn end / handoff back to the normal prompt). Drops
@@ -1832,16 +1838,54 @@ export class Display {
     if (this.composerText === '' && this.busyComposerHint === '') return;
     this.composerText = '';
     this.busyComposerHint = '';
-    this.composerRepaint?.();
+    this.paintComposerSurface();
+  }
+
+  /** The raw composer content: the typed text if any, else the persistent hint,
+   *  else '' (no turn running). Shared by the lane and the suffix path. */
+  private composerContent(): string {
+    return this.composerText || this.busyComposerHint;
   }
 
   /**
-   * The suffix woven into the live owned bottom row. While the user is typing,
-   * show the typed text; otherwise, during a turn, show the persistent
-   * plain-language hint so the input lane is ALWAYS visible; '' only when no
-   * turn is running.
+   * Paint the composer to whichever surface owns it. With AIDEN_COMPOSER_LANE=1
+   * the single-owner fixed lane reserves a bottom row (activate reserves the
+   * scroll region once, then repaints; empty content tears it down at turn
+   * end). Otherwise the legacy suffix path — repaint the live owned bottom row
+   * — is used exactly as before (default, unchanged).
+   */
+  private paintComposerSurface(): void {
+    if (composerLaneEnabled()) {
+      if (!this.composerLane) this.composerLane = new ComposerLane(this.laneSink());
+      const content = this.composerContent();
+      if (content) this.composerLane.activate(content); else this.composerLane.deactivate();
+      return;
+    }
+    this.composerRepaint?.();
+  }
+
+  /** Wire the lane to this display's real terminal stream + resize events. */
+  private laneSink(): LaneSink {
+    const stream = this.out as NodeJS.WriteStream & {
+      on?: (e: string, fn: () => void) => unknown;
+      off?: (e: string, fn: () => void) => unknown;
+    };
+    return {
+      write: (s) => { this.out.write(s); },
+      rows: () => (typeof this.out.rows === 'number' && this.out.rows >= 1 ? this.out.rows : 24),
+      cols: () => (typeof this.out.columns === 'number' && this.out.columns >= 1 ? this.out.columns : 80),
+      onResize: (fn) => { stream.on?.('resize', fn); return () => { stream.off?.('resize', fn); }; },
+    };
+  }
+
+  /**
+   * The suffix woven into the live owned bottom row (legacy path). While the
+   * user is typing, show the typed text; otherwise the persistent hint so the
+   * input line is ALWAYS visible; '' when no turn is running OR when the fixed
+   * lane owns the composer (then the lane paints it, not the suffix).
    */
   private composerSuffix(): string {
+    if (this.composerLane?.isActive()) return '';
     if (this.composerText) return `   ${this.skin.applyColors(this.composerText, 'muted')}`;
     if (this.busyComposerHint) return `   ${this.skin.applyColors(this.busyComposerHint, 'muted')}`;
     return '';

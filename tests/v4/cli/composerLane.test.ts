@@ -1,0 +1,148 @@
+/**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
+/**
+ * v4.14 — the single-owner FIXED bottom composer lane (scroll-region). Proves
+ * the pure escape-sequence builders and the owner's lifecycle: reserving the
+ * region protects the bottom row, painting is cursor-safe + de-duplicated (no
+ * flicker), resize re-anchors, teardown restores full-screen scrolling. The
+ * live cursor behaviour on a real terminal is the Shiva smoke.
+ */
+import { describe, it, expect, vi } from 'vitest';
+import {
+  reserveSeq, paintSeq, teardownSeq, fitLane, ComposerLane, composerLaneEnabled,
+  type LaneSink,
+} from '../../../cli/v4/composerLane';
+
+const ESC = '\x1b';
+
+describe('escape-sequence builders (pure)', () => {
+  it('reserveSeq confines the scroll region to the rows ABOVE the lane, cursor-safe', () => {
+    // 24-row terminal, 1-row lane → region rows 1..23; save/restore around it.
+    expect(reserveSeq(24)).toBe(`${ESC}7${ESC}[1;23r${ESC}8`);
+  });
+  it('reserveSeq clamps a tiny terminal to a valid region', () => {
+    expect(reserveSeq(1)).toBe(`${ESC}7${ESC}[1;1r${ESC}8`);  // never a 0/negative bottom
+  });
+  it('paintSeq jumps to the bottom row, clears it, writes, and restores the cursor', () => {
+    expect(paintSeq(24, 'Enter → steer')).toBe(`${ESC}7${ESC}[24;1H${ESC}[2KEnter → steer${ESC}8`);
+  });
+  it('teardownSeq restores full-screen scrolling and clears the lane row', () => {
+    expect(teardownSeq(24)).toBe(`${ESC}[r${ESC}7${ESC}[24;1H${ESC}[2K${ESC}8`);
+  });
+  it('fitLane tail-fits with a FRONT ellipsis (keeps the cursor end visible)', () => {
+    expect(fitLane('short', 80)).toBe('short');
+    const fit = fitLane('abcdefghijklmnopqrstuvwxyz', 10);
+    expect(fit.length).toBe(10);
+    expect(fit.startsWith('…')).toBe(true);
+    expect(fit.endsWith('z')).toBe(true);   // most-recent chars kept
+  });
+});
+
+// ── a capturing sink ─────────────────────────────────────────────────────────
+function mockSink(rows = 24, cols = 80) {
+  const writes: string[] = [];
+  let resizeCb: (() => void) | null = null;
+  const sink: LaneSink & { fireResize: (r: number) => void; text: () => string; setRows: (r: number) => void } = {
+    write: (s) => writes.push(s),
+    rows: () => rows,
+    cols: () => cols,
+    onResize: (fn) => { resizeCb = fn; return () => { resizeCb = null; }; },
+    setRows: (r) => { rows = r; },
+    fireResize: (r) => { rows = r; resizeCb?.(); },
+    text: () => writes.join(''),
+  };
+  return sink;
+}
+
+describe('ComposerLane — lifecycle', () => {
+  it('activate reserves the region THEN paints the composer on the bottom row', () => {
+    const s = mockSink(24);
+    const lane = new ComposerLane(s);
+    lane.activate('Enter → steer · /queue · Ctrl+C stop');
+    expect(lane.isActive()).toBe(true);
+    const out = s.text();
+    expect(out).toContain(`${ESC}[1;23r`);                 // region reserved (protects row 24)
+    expect(out).toContain(`${ESC}[24;1H${ESC}[2KEnter → steer`); // composer painted on the lane
+    // reserve happens before the first paint
+    expect(out.indexOf('[1;23r')).toBeLessThan(out.indexOf('[24;1H'));
+  });
+
+  it('paint with the SAME text is a no-op — no flicker on redundant repaints', () => {
+    const s = mockSink();
+    const lane = new ComposerLane(s);
+    lane.activate('steer ▸ hi');
+    const before = s.text().length;
+    lane.paint('steer ▸ hi');   // identical
+    expect(s.text().length).toBe(before);   // nothing written
+  });
+
+  it('paint with NEW text repaints the lane (typed input updates in place)', () => {
+    const s = mockSink();
+    const lane = new ComposerLane(s);
+    lane.activate('Enter → steer');
+    lane.paint('steer ▸ deploy');
+    expect(s.text()).toContain('steer ▸ deploy');
+  });
+
+  it('output written between paints never targets the lane row (region protects it)', () => {
+    // The owner only ever writes to the bottom row via paintSeq; assert every
+    // lane write is cursor-save-wrapped (so the flowing output cursor is intact).
+    const s = mockSink();
+    const lane = new ComposerLane(s);
+    lane.activate('Enter → steer');
+    lane.paint('steer ▸ x');
+    // Every paint is bracketed by save/restore → the output cursor is never lost.
+    const paints = s.text().split(`${ESC}7`).filter((p) => p.includes(';1H'));
+    for (const p of paints) expect(p).toContain(ESC + '8');
+  });
+
+  it('resize re-reserves the region for the new height and repaints in place', () => {
+    const s = mockSink(24);
+    const lane = new ComposerLane(s);
+    lane.activate('Enter → steer');
+    (s as any).fireResize(30);   // terminal grew to 30 rows
+    const out = s.text();
+    expect(out).toContain(`${ESC}[1;29r`);                 // region re-reserved for 30 rows
+    expect(out).toContain(`${ESC}[30;1H`);                 // composer re-anchored to new bottom
+  });
+
+  it('deactivate restores full-screen scrolling + clears the lane (idempotent)', () => {
+    const s = mockSink(24);
+    const lane = new ComposerLane(s);
+    lane.activate('Enter → steer');
+    lane.deactivate();
+    expect(lane.isActive()).toBe(false);
+    expect(s.text()).toContain(`${ESC}[r`);                // region reset
+    lane.deactivate();                                     // idempotent, no throw
+  });
+
+  it('activate is idempotent — a second activate repaints without re-reserving', () => {
+    const s = mockSink();
+    const lane = new ComposerLane(s);
+    lane.activate('a');
+    const reserves1 = s.text().split('[1;23r').length - 1;
+    lane.activate('b');
+    const reserves2 = s.text().split('[1;23r').length - 1;
+    expect(reserves1).toBe(1);
+    expect(reserves2).toBe(1);          // still one reserve
+    expect(s.text()).toContain('b');    // repainted
+  });
+});
+
+describe('composerLaneEnabled — opt-in (default OFF)', () => {
+  it('reads AIDEN_COMPOSER_LANE', () => {
+    const prev = process.env.AIDEN_COMPOSER_LANE;
+    try {
+      delete process.env.AIDEN_COMPOSER_LANE;
+      expect(composerLaneEnabled()).toBe(false);   // safe default: unchanged render path
+      process.env.AIDEN_COMPOSER_LANE = '1';
+      expect(composerLaneEnabled()).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.AIDEN_COMPOSER_LANE; else process.env.AIDEN_COMPOSER_LANE = prev;
+    }
+  });
+});

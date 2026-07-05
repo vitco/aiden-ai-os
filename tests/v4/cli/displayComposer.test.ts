@@ -183,3 +183,25 @@ describe('Display composer — persistent busy hint (input lane always visible)'
     ind.stop();
   });
 });
+
+// ── v4.14 — the FIXED bottom lane routing (opt-in AIDEN_COMPOSER_LANE=1) ──────
+describe('Display composer — fixed bottom lane (opt-in) reserves + pins the row', () => {
+  it('setBusyHint reserves the scroll region and pins the composer to the bottom row', () => {
+    const prev = process.env.AIDEN_COMPOSER_LANE;
+    process.env.AIDEN_COMPOSER_LANE = '1';
+    try {
+      const { d, chunks } = makeDisplay();   // 80 cols; rows falls back to 24
+      chunks.length = 0;
+      d.setBusyHint('Enter → steer · /queue · Ctrl+C stop');
+      const raw = chunks.join('');
+      expect(raw).toContain('\x1b[1;23r');                 // scroll region reserved (row 24 protected)
+      expect(raw).toContain('\x1b[24;1H');                 // composer pinned to the bottom row
+      expect(raw).toContain('Enter → steer');              // …with the plain-language hint
+      // turn end tears the region back down.
+      d.clearComposer();
+      expect(chunks.join('')).toContain('\x1b[r');          // full-screen scrolling restored
+    } finally {
+      if (prev === undefined) delete process.env.AIDEN_COMPOSER_LANE; else process.env.AIDEN_COMPOSER_LANE = prev;
+    }
+  });
+});
