@@ -6,10 +6,11 @@ import os from 'node:os';
 import { RuntimeResolver, type ConfigProvider } from '../../providers/v4/runtimeResolver';
 import { CredentialResolver } from '../../providers/v4/credentialResolver';
 import { ProviderError } from '../../providers/v4/errors';
-import { ChatCompletionsAdapter } from '../../providers/v4/chatCompletionsAdapter';
-import { AnthropicAdapter } from '../../providers/v4/anthropicAdapter';
-import { CodexResponsesAdapter } from '../../providers/v4/codexResponsesAdapter';
-import { OllamaPromptToolsAdapter } from '../../providers/v4/ollamaPromptToolsAdapter';
+// Phase 5 — resolve() now returns a preflight-WRAPPED adapter (the single
+// provider seam), so it is no longer `instanceof` the concrete adapter class.
+// `apiMode` uniquely identifies which adapter was resolved; `__preflightWrapped`
+// proves resolve() cannot hand back an unwrapped (preflight-skippable) adapter.
+const wrapped = (a: { __preflightWrapped?: boolean }) => a.__preflightWrapped === true;
 
 let tmpDir: string;
 let authPath: string;
@@ -53,7 +54,7 @@ describe('RuntimeResolver.resolve', () => {
       providerId: 'groq',
       modelId: 'llama-3.3-70b-versatile',
     });
-    expect(adapter).toBeInstanceOf(ChatCompletionsAdapter);
+    expect(wrapped(adapter)).toBe(true);
     expect(adapter.apiMode).toBe('chat_completions');
   });
 
@@ -63,7 +64,7 @@ describe('RuntimeResolver.resolve', () => {
       providerId: 'anthropic',
       modelId: 'claude-opus-4-7',
     });
-    expect(adapter).toBeInstanceOf(AnthropicAdapter);
+    expect(wrapped(adapter)).toBe(true);
     expect(adapter.apiMode).toBe('anthropic_messages');
   });
 
@@ -73,7 +74,7 @@ describe('RuntimeResolver.resolve', () => {
       providerId: 'openai',
       modelId: 'gpt-5.4',
     });
-    expect(adapter).toBeInstanceOf(CodexResponsesAdapter);
+    expect(wrapped(adapter)).toBe(true);
     expect(adapter.apiMode).toBe('codex_responses');
   });
 
@@ -82,7 +83,7 @@ describe('RuntimeResolver.resolve', () => {
       providerId: 'ollama',
       modelId: 'llama3.2',
     });
-    expect(adapter).toBeInstanceOf(OllamaPromptToolsAdapter);
+    expect(wrapped(adapter)).toBe(true);
     expect(adapter.apiMode).toBe('ollama_prompt_tools');
   });
 

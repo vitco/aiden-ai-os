@@ -132,6 +132,7 @@ import { TirithScanner } from '../../moat/tirithScanner';
 
 import { CredentialResolver } from '../../providers/v4/credentialResolver';
 import { RuntimeResolver } from '../../providers/v4/runtimeResolver';
+import { withMessagePreflight } from '../../providers/v4/preflightAdapter';
 import { ChatCompletionsAdapter } from '../../providers/v4/chatCompletionsAdapter';
 import { findModel } from '../../providers/v4/modelCatalog';
 import {
@@ -1418,7 +1419,9 @@ export async function buildAgentRuntime(
         onRateLimit: (slotId) =>
           display.dim(`(slot ${slotId} rate-limited — falling through)`),
       });
-      adapter = fallbackAdapter;
+      // Wrap the FallbackAdapter (not the individual slots) so preflight runs
+      // ONCE at entry, before the fallback loop reshapes/retries per slot.
+      adapter = withMessagePreflight(fallbackAdapter);
     }
   }
 

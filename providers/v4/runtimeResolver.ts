@@ -48,6 +48,9 @@ import { AnthropicAdapter } from './anthropicAdapter';
 import { CodexResponsesAdapter } from './codexResponsesAdapter';
 import { OllamaPromptToolsAdapter } from './ollamaPromptToolsAdapter';
 import { getModelDefaults } from './modelDefaults';
+// v4.14.x — every adapter the factory hands out is wrapped so a shared message
+// preflight runs before ANY provider call. The single seam; no caller can skip it.
+import { withMessagePreflight } from './preflightAdapter';
 import {
   loadTokens,
   isExpired,
@@ -108,7 +111,7 @@ export class RuntimeResolver {
         if (!credentials.apiKey) {
           throw missingKeyError(entry);
         }
-        return new ChatCompletionsAdapter({
+        return withMessagePreflight(new ChatCompletionsAdapter({
           baseUrl,
           apiKey: credentials.apiKey,
           model: model.id,
@@ -119,39 +122,39 @@ export class RuntimeResolver {
           // Undefined for models without registered defaults — adapter
           // skips the merge in that case.
           defaultExtraBody: getModelDefaults(entry.id, model.id)?.extraBody,
-        });
+        }));
 
       case 'anthropic_messages':
         if (!credentials.apiKey) {
           throw missingKeyError(entry);
         }
-        return new AnthropicAdapter({
+        return withMessagePreflight(new AnthropicAdapter({
           baseUrl,
           apiKey: credentials.apiKey,
           authMode: credentials.source === 'auth.json' ? 'oauth' : 'api_key',
           model: model.id,
           providerName: entry.id,
           extraHeaders: entry.extraHeaders,
-        });
+        }));
 
       case 'codex_responses':
         if (!credentials.apiKey) {
           throw missingKeyError(entry);
         }
-        return new CodexResponsesAdapter({
+        return withMessagePreflight(new CodexResponsesAdapter({
           baseUrl,
           apiKey: credentials.apiKey,
           model: model.id,
           providerName: entry.id,
           extraHeaders: entry.extraHeaders,
-        });
+        }));
 
       case 'ollama_prompt_tools':
-        return new OllamaPromptToolsAdapter({
+        return withMessagePreflight(new OllamaPromptToolsAdapter({
           baseUrl,
           model: model.id,
           providerName: entry.id,
-        });
+        }));
 
       default:
         // Exhaustiveness guard — switch covers every member of ApiMode.

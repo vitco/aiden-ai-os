@@ -1,9 +1,18 @@
-// ============================================================
-// DevOS — Autonomous AI Execution System
-// Copyright (c) 2026 Shiva Deore. All rights reserved.
-// ============================================================
+/**
+ * Copyright (c) 2026 Shiva Deore (Taracod).
+ * Licensed under AGPL-3.0. See LICENSE for details.
+ *
+ * Aiden — local-first agent.
+ */
 
 // core/messageValidator.ts — Message sequence validation for LLM providers.
+//
+// ⚠ v3-LEGACY ONLY. This validator serves the v3 stack (core/agentLoop.ts →
+// api/server.ts, cli/aiden.ts) on the LLMMessage shape. The v4 stack does NOT
+// use it: v4 provider preflight lives in core/v4/toolCallInvariant.ts
+// (`preflightMessages`), wired at the single adapter seam via
+// providers/v4/preflightAdapter.ts. Do NOT add new callers here — extend the
+// v4 preflight instead. Kept (not deleted) only because v3 is still live.
 //
 // Enforces strict user/assistant alternation required by some OpenAI-compat providers.
 // Called before every LLM API call to prevent 400 "invalid message sequence" errors.

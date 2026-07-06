@@ -51,6 +51,7 @@ import {
   type ProviderSlot,
 } from '../../../core/v4/providerFallback';
 import { ChatCompletionsAdapter } from '../../../providers/v4/chatCompletionsAdapter';
+import { withMessagePreflight } from '../../../providers/v4/preflightAdapter';
 import { createBootLogger } from '../../../core/v4/logger/factory';
 import { registerAllTools, makeSubagentFanoutTool } from '../../../tools/v4/index';
 import {
@@ -216,12 +217,12 @@ function buildMcpFallbackSlots(
 ): ProviderSlot[] {
   const defaults = buildDefaultSlots({
     adapterFactory: (cfg) =>
-      new ChatCompletionsAdapter({
+      withMessagePreflight(new ChatCompletionsAdapter({
         baseUrl:      cfg.baseUrl,
         apiKey:       cfg.apiKey,
         model:        cfg.model,
         providerName: cfg.providerName,
-      }),
+      })),
   });
   const primarySlot: ProviderSlot = {
     id:         'primary',

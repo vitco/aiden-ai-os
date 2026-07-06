@@ -187,3 +187,194 @@ export function fillRemainingAsBlocked(
     buf.push(synthesizeBlockedToolResult(toolCalls[i], reason, { variant }));
   }
 }
+
+// ── Unified message preflight ─────────────────────────────────────────
+//
+// ONE comprehensive repair pass, run at the single ProviderAdapter.call /
+// callStream boundary (see providers/v4/preflightAdapter.ts) so EVERY provider
+// call — main turn, fallback slots, vision, distiller, merger, sub-agent,
+// compression, auxiliary — is validated exactly once, before any provider-
+// specific reshaping.
+//
+// The golden rule: REPAIR STRUCTURE, NEVER FABRICATE A FACT. A missing tool
+// result becomes an honest "result unavailable" stub — never a fake success.
+// Structural junk is repaired with a warning in production; strict mode (tests
+// / dev) throws instead, so bugs are loud where they should be.
+
+/** Sentinel name for a tool call that arrived with no name — kept (not dropped)
+ *  so its result isn't orphaned. */
+export const INVALID_TOOL_CALL_NAME = 'invalid_tool_call';
+
+export interface PreflightOptions {
+  /** Throw `PreflightRepairError` on ANY repair (tests / dev) instead of
+   *  repairing silently. Default false — repair + warn (production). */
+  strict?: boolean;
+  /** Warning sink (production). Default: console.warn with a `[preflight]` tag. */
+  onWarn?: (message: string) => void;
+}
+
+/** Thrown by `preflightMessages` in `strict` mode when any repair was needed. */
+export class PreflightRepairError extends Error {
+  readonly repairs: ReadonlyArray<string>;
+  constructor(repairs: ReadonlyArray<string>) {
+    super(`Message preflight found ${repairs.length} structural problem(s):\n  - ${repairs.join('\n  - ')}`);
+    this.name = 'PreflightRepairError';
+    this.repairs = repairs;
+  }
+}
+
+const VALID_ROLES = new Set(['system', 'user', 'assistant', 'tool']);
+
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** Coerce tool-call arguments to a plain object. A malformed JSON string is
+ *  parsed; anything unrecoverable falls back to `{}` (never a guessed value). */
+function repairArgs(args: unknown): Record<string, unknown> {
+  if (isPlainObject(args)) return args;
+  if (typeof args === 'string') {
+    try {
+      const parsed = JSON.parse(args);
+      if (isPlainObject(parsed)) return parsed;
+    } catch { /* fall through to {} */ }
+  }
+  return {};
+}
+
+/** An HONEST "result unavailable" stub for a tool call that never produced a
+ *  result — explicitly NOT a success, so the model can't be misled. */
+function unavailableStub(call: ToolCallRequest): Message {
+  return {
+    role:       'tool',
+    toolCallId: call.id,
+    content:    JSON.stringify({
+      ok:      false,
+      blocked: false,
+      reason:  'result_unavailable',
+      message: `No result was recorded for this call (${call.name}). It may have been interrupted; treat it as unavailable, not as success.`,
+    }),
+  };
+}
+
+/**
+ * Repair a message array into a provider-valid `Message[]`. Pure (aside from the
+ * optional warning sink). Runs, in order:
+ *
+ *   1. valid roles only                         — drop junk roles
+ *   2. empty `toolCalls: []`                     — drop the key
+ *   5. duplicate tool_call_id                    — dedupe (keep first)
+ *   6. empty tool name                           — rename to invalid_tool_call
+ *   7. malformed tool args                       — repair, fallback to {}
+ *   4. orphan tool result (no matching call)     — drop
+ *   3. unanswered assistant tool-call            — inject "unavailable" stub …
+ *   (a) …EXCEPT a dangling tail (killed mid-tool)— strip it (no reissue loop)
+ *   8. direct tool→user transition               — insert an assistant placeholder
+ */
+export function preflightMessages(
+  input: ReadonlyArray<Message>,
+  opts:  PreflightOptions = {},
+): Message[] {
+  const repairs: string[] = [];
+  const warn = (m: string) => repairs.push(m);
+  let synth = 0;
+
+  // 1. Valid roles only.
+  let msgs: Message[] = [];
+  for (const m of input) {
+    if (!m || typeof m !== 'object' || !VALID_ROLES.has((m as { role?: string }).role ?? '')) {
+      warn(`dropped message with invalid role: ${JSON.stringify((m as { role?: unknown })?.role)}`);
+      continue;
+    }
+    msgs.push({ ...(m as Message) });
+  }
+
+  // 2/5/6/7. Normalise assistant tool-calls + collect the set of declared ids.
+  const declaredIds = new Set<string>();
+  for (const m of msgs) {
+    if (m.role !== 'assistant' || !m.toolCalls) continue;
+    if (m.toolCalls.length === 0) {
+      delete (m as { toolCalls?: unknown }).toolCalls;   // 2. empty [] → drop key
+      warn('dropped empty toolCalls: []');
+      continue;
+    }
+    const cleaned: ToolCallRequest[] = [];
+    for (const tc of m.toolCalls) {
+      let id = typeof tc?.id === 'string' && tc.id ? tc.id : `synthetic_tool_call_${synth++}`;
+      if (id !== tc?.id) warn(`assigned a synthetic id to a tool call missing one (${id})`);
+      if (declaredIds.has(id)) { warn(`deduped duplicate tool_call_id ${id}`); continue; }  // 5
+      declaredIds.add(id);
+      let name = typeof tc?.name === 'string' && tc.name.trim() ? tc.name : INVALID_TOOL_CALL_NAME;  // 6
+      if (name === INVALID_TOOL_CALL_NAME && tc?.name !== INVALID_TOOL_CALL_NAME) {
+        warn(`renamed empty tool name → ${INVALID_TOOL_CALL_NAME}`);
+      }
+      const args = repairArgs(tc?.arguments);   // 7
+      if (!isPlainObject(tc?.arguments)) warn(`repaired malformed tool arguments for ${name}#${id} → {}`);
+      cleaned.push({ id, name, arguments: args });
+    }
+    if (cleaned.length === 0) delete (m as { toolCalls?: unknown }).toolCalls;
+    else m.toolCalls = cleaned;
+  }
+
+  // 4. Drop orphan tool results (no matching declared call).
+  msgs = msgs.filter((m) => {
+    if (m.role === 'tool' && !declaredIds.has(m.toolCallId)) {
+      warn(`dropped orphan tool result (no matching call): ${m.toolCallId}`);
+      return false;
+    }
+    return true;
+  });
+
+  // 3 + (a). Answer unanswered assistant tool-calls: stub mid-history, strip at the tail.
+  const answered = new Set<string>();
+  for (const m of msgs) if (m.role === 'tool') answered.add(m.toolCallId);
+  const withResults: Message[] = [];
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (m.role === 'assistant' && m.toolCalls) {
+      const unanswered = m.toolCalls.filter((tc) => !answered.has(tc.id));
+      if (unanswered.length > 0) {
+        if (i === msgs.length - 1) {
+          // (a) Suicide-loop guard: a dangling assistant tool-call at the very
+          // tail means the process died mid-tool. Strip the unanswered calls so
+          // Aiden re-plans instead of reissuing a (possibly destructive) command.
+          const kept = m.toolCalls.filter((tc) => answered.has(tc.id));
+          warn(`stripped ${unanswered.length} dangling unanswered tool-call(s) at the tail (killed-mid-tool resume)`);
+          if (kept.length === 0 && !(m.content && m.content.trim())) continue;   // drop now-empty msg
+          if (kept.length === 0) { const { toolCalls: _drop, ...rest } = m; withResults.push(rest as Message); continue; }
+          withResults.push({ ...m, toolCalls: kept });
+          continue;
+        }
+        // 3. Mid-history: inject an honest "unavailable" stub for each — NEVER a success.
+        withResults.push(m);
+        for (const tc of unanswered) {
+          warn(`injected 'result unavailable' stub for unanswered tool-call ${tc.name}#${tc.id}`);
+          withResults.push(unavailableStub(tc));
+        }
+        continue;
+      }
+    }
+    withResults.push(m);
+  }
+  msgs = withResults;
+
+  // 8. No direct tool→user transition — insert an (empty) assistant placeholder
+  //    so the wire alternation is valid without inventing an assistant claim.
+  const alternated: Message[] = [];
+  for (let i = 0; i < msgs.length; i++) {
+    alternated.push(msgs[i]);
+    const next = msgs[i + 1];
+    if (msgs[i].role === 'tool' && next && next.role === 'user') {
+      warn('inserted an assistant placeholder between a tool result and a user message');
+      alternated.push({ role: 'assistant', content: '' });
+    }
+  }
+  msgs = alternated;
+
+  if (repairs.length > 0) {
+    if (opts.strict) throw new PreflightRepairError(repairs);
+    const sink = opts.onWarn ?? ((m: string) => { try { console.warn(`[preflight] ${m}`); } catch { /* no console */ } });
+    for (const r of repairs) sink(r);
+  }
+  return msgs;
+}

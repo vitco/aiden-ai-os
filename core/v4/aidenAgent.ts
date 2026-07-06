@@ -83,7 +83,7 @@ import {
 // v4.9.4 Slice 1 — tool-call/result protocol invariant + synthetic
 // blocked-result helpers used at the surface + abort fill sites.
 import {
-  assertNoUnansweredToolCalls,
+  preflightMessages,
   fillRemainingAsBlocked,
   synthesizeBlockedToolResult,
 } from './toolCallInvariant';
@@ -2124,15 +2124,17 @@ export class AidenAgent {
     tools:       ToolSchema[],
     runOptions:  RunConversationOptions,
   ): Promise<ProviderCallOutput> {
-    // v4.9.4 Slice 1 — tool-call protocol preflight. Every assistant
-    // toolCalls[] entry must have a matching {role:'tool', toolCallId}
-    // BEFORE shipping to any provider. If this throws, a guard in
-    // runTurnLoop is leaking orphan tool_call_ids — find the culprit,
-    // don't catch this. The surface + abort fill sites above already
-    // satisfy the invariant; preflight is the audit-loud safety net
-    // for new guards added later (v4.10 rate-limit / cost-budget /
-    // hook-deny). See core/v4/toolCallInvariant.ts.
-    assertNoUnansweredToolCalls(messages);
+    // Phase 5 — unified provider preflight. Every assistant toolCalls[]
+    // entry must have a matching {role:'tool', toolCallId} BEFORE shipping
+    // to any provider. This used to be an audit-loud throw
+    // (assertNoUnansweredToolCalls); it now REPAIRS structural junk in
+    // place — inject an honest "result unavailable" stub, strip a dangling
+    // suicide-loop tail, drop orphans/dupes — never fabricating a success.
+    // `this.provider` is already wrapped with withMessagePreflight at the
+    // adapter seam, so this second pass is idempotent (a no-op on clean
+    // input); it stays here as defense-in-depth for any unwrapped provider
+    // (test doubles, NullAdapter). See core/v4/toolCallInvariant.ts.
+    messages = preflightMessages(messages);
 
     const wantStream = runOptions.stream === true && typeof this.provider.callStream === 'function';
     // v4.1.5 Issue K — fire just before the HTTP request opens, so the
