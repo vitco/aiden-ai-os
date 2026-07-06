@@ -1568,7 +1568,16 @@ export class Display {
       // Tool dispatch in aidenAgent is sequential (one tool at a time
       // per turn) so the assumption "running row is the last written
       // line" holds for the whole tick lifetime; `eraseLast()` is safe.
-      const repaintRunning = (): void => { if (printed) { eraseLast(); out.write(runningRow()); } };
+      // Single-owner discipline (mirrors the indicator's guard at ~1405):
+      // only repaint while THIS ticker still owns the bottom row. A fast
+      // multi-tool burst can leave an earlier tool's setInterval live after a
+      // newer row took the bottom; an unguarded stale tick would eraseLast()
+      // the WRONG line and repaint its runningRow() — hint suffix included —
+      // into another tool's activity region. Gating on ownership keeps the
+      // busy hint in its lane: composer content never bleeds into tool rows.
+      const repaintRunning = (): void => {
+        if (printed && this.composerRepaintIs(repaintRunning)) { eraseLast(); out.write(runningRow()); }
+      };
       tickTimer = setInterval(repaintRunning, 1000);
       // v4.12.1 Slice 2c — while the tool row owns the bottom, a keystroke
       // repaints IT (so the composer stays live during a long tool call, when

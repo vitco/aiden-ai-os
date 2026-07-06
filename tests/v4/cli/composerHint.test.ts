@@ -12,7 +12,7 @@
  *   Issue 2 — the persistent IDLE hint shows only when idle and nothing else
  *   owns the footer (no ghost/dropdown).
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { Writable } from 'node:stream';
 import { Display } from '../../../cli/v4/display';
 import { SkinEngine } from '../../../cli/v4/skinEngine';
@@ -59,6 +59,39 @@ describe('busy hint — width-safe (Issue 1)', () => {
     expect(painted).toContain('…');              // ellipsis at the FRONT (tail-fit for typed text)
     expect(painted).toContain('right now');      // most-recent chars (cursor end) kept
     ind.stop();
+  });
+});
+
+// ── Bug 1 (Phase 5 sibling-fix) — hint stays in ONE lane during a burst ──────
+//
+// The busy hint is composed into a tool row's live repaint (composerSuffix).
+// A fast multi-tool burst can leave an earlier tool's 1s ticker alive after a
+// newer row took the bottom. Without a single-owner guard that stale ticker
+// would eraseLast() the WRONG line and repaint its own row — hint included —
+// bleeding the composer lane into tool-activity rows. The fix gates the ticker
+// on `composerRepaintIs(repaintRunning)`, so only the current bottom owner
+// ever repaints. This mirrors the indicator's existing release-guard.
+describe('busy hint — single-owner ticker (Bug 1: burst bleed)', () => {
+  const HINT = 'Enter → steer · /busy to change · Ctrl+C stop';
+
+  it('a stale (non-owner) tool ticker does not repaint the hint into activity rows', () => {
+    vi.useFakeTimers();
+    try {
+      const { d, chunks } = makeDisplay(100);
+      d.setBusyHint(HINT);
+      const a = d.toolRow('file_read', { path: 'alpha' });   // A claims the bottom
+      const b = d.toolRow('file_read', { path: 'bravo' });   // B takes over; A now stale
+      chunks.length = 0;
+      vi.advanceTimersByTime(1000);                          // fire BOTH 1s tickers
+      const painted = stripAnsi(chunks.join(''));
+      // Exactly one repaint carries the hint — the current owner (B). The stale
+      // ticker (A) must no-op (2 = the pre-fix bleed; 0 = owner wrongly gated).
+      const hintCount = painted.split('Enter →').length - 1;
+      expect(hintCount).toBe(1);
+      a.ok(1); b.ok(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

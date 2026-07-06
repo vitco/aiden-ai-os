@@ -315,3 +315,33 @@ describe('replyRenderer v4.8.0 Slice 9 — code block chrome', () => {
     expect(out).toContain('plain');
   });
 });
+
+// ── Bug 2 (Phase 5 sibling-fix) — inline-code colon must not leak the token ──
+//
+// marked-terminal escapes ':' inside inline code to its private COLON_REPLACER
+// ('*#COLON|*') and auto-decodes it for headings/paragraphs/lists but NOT for
+// codespan — it trusts opts.codespan to decode. Our callback now does. Guards
+// against a Windows path in backticks rendering `C*#COLON|*\Users\…`.
+describe('replyRenderer — Bug 2 (inline-code colon token decode)', () => {
+  _resetForTests();
+
+  it('a Windows path in inline code shows a real colon, not the escape token', () => {
+    const out = stripAnsi(getReplyRenderer().render('Look at `C:\\Users\\shiva\\DevOS`.'));
+    expect(out).toContain('C:\\Users\\shiva\\DevOS');
+    expect(out).not.toContain('*#COLON|*');
+    expect(out).not.toContain('COLON');
+  });
+
+  it('multiple colons in one inline-code span all decode (e.g. a URL/time)', () => {
+    const out = stripAnsi(getReplyRenderer().render('Try `http://host:8080/a:b` now.'));
+    expect(out).toContain('http://host:8080/a:b');
+    expect(out).not.toContain('*#COLON|*');
+  });
+
+  it('colons OUTSIDE inline code are unaffected (no token to decode)', () => {
+    const out = stripAnsi(getReplyRenderer().render('Ratio 3:2 and path C:\\x in prose.'));
+    expect(out).toContain('3:2');
+    expect(out).toContain('C:\\x');
+    expect(out).not.toContain('*#COLON|*');
+  });
+});

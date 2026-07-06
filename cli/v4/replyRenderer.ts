@@ -138,6 +138,20 @@ function paintBold(
 const CODE_BG_ON  = '\x1b[48;2;50;50;60m';
 const CODE_BG_OFF = '\x1b[49m';
 
+// marked-terminal escapes every ':' inside inline code to a private token
+// (its `COLON_REPLACER`, index.js:15) so a colon can't be misread as a URL
+// scheme downstream. It auto-decodes that token for headings/paragraphs/lists
+// via `transform`, but NOT for codespan — it trusts the `opts.codespan`
+// callback to decode. Our callback below is that seam, so it must undo the
+// token here; otherwise a colon in inline code (e.g. a Windows path
+// `C:\Users\…`) leaks the raw token to screen. Mirror the constant exactly.
+const COLON_REPLACER = '*#COLON|*';
+const COLON_REPLACER_RE = /\*#COLON\|\*/g;
+/** Decode marked-terminal's inline-code colon token back to ':' (idempotent —
+ *  a no-op when the token is absent, safe even if an outer transform also runs). */
+const decodeColonToken = (text: string): string =>
+  text.includes(COLON_REPLACER) ? text.replace(COLON_REPLACER_RE, ':') : text;
+
 function renderCodeBlock(code: string, lang: string | undefined): string {
   // v4.8.0 Slice 9 hotfix — top-divider asymmetric chrome.
   //
@@ -407,7 +421,7 @@ export function getReplyRenderer(): { render: (text: string) => string } {
     // line wrap, the bg painting may show a visual seam at the wrap
     // point. Acceptable for v4.1.3 — revertable to Path A (no bg) if
     // visual smoke surfaces a real problem.
-    codespan:     (text: string) => `${CODE_BG_ON} ${paint('accent')(text)} ${CODE_BG_OFF}`,
+    codespan:     (text: string) => `${CODE_BG_ON} ${paint('accent')(decodeColonToken(text))} ${CODE_BG_OFF}`,
     del:          paint('muted'),
     // marked-terminal calls opts.link with the ASSEMBLED visual
     // (already OSC8-wrapped when the host terminal supports it),
