@@ -69,6 +69,7 @@
     "typecheck": "tsc --noEmit",
     "publish:beta": "npm publish --tag beta",
     "publish:stable": "npm publish --tag latest",
+    "release": "node scripts/release.mjs",
     "postinstall": "node scripts/postinstall.js",
     "start": "node dist-bundle/index.js serve",
     "electron": "electron electron/main.js",
