@@ -63,7 +63,9 @@ describe('aiden memory CLI — Slice 9', () => {
     await runMemorySubcommand('add', ['memory', 'first entry'], { rootDir: root, ...capture() });
     const cap = capture();
     await runMemorySubcommand('show', ['memory'], { rootDir: root, ...cap });
-    expect(cap.out.join('')).toMatch(/   1 \| first entry/);
+    // v4.14.x — CLI `add` tags the entry `[said]` (a human stated it); the tag
+    // renders in `show` too so the human sees provenance at a glance.
+    expect(cap.out.join('')).toMatch(/   1 \| \[said\] first entry/);
   });
 
   it('remove --match deletes the unique entry', async () => {

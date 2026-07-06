@@ -45,7 +45,8 @@ function markerPath(paths: AidenPaths): string {
 
 /** The minimal memory writer onboarding needs — satisfied by MemoryManager. */
 export interface OnboardingMemory {
-  add(file: string, content: string): Promise<{ ok: boolean }>;
+  // v4.14.x — optional provenance source; onboarding passes 'said'.
+  add(file: string, content: string, source?: 'said' | 'saw' | 'guess'): Promise<{ ok: boolean }>;
 }
 
 export interface OnboardingOptions {
@@ -215,7 +216,8 @@ export async function renderOnboardingIntro(opts: OnboardingOptions): Promise<bo
   if (name && opts.memory) {
     let stored = false;
     try {
-      stored = (await opts.memory.add('user', onboardingNameEntry(name))).ok === true;
+      // The user gave their name → highest-trust provenance.
+      stored = (await opts.memory.add('user', onboardingNameEntry(name), 'said')).ok === true;
     } catch {
       stored = false;   // store best-effort; never crash boot
     }

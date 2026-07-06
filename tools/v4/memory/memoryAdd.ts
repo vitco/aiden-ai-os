@@ -27,6 +27,13 @@
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { truncatePreview } from '../../../core/v4/dryRun';
 import { normalizeMemoryFile, fileLabel } from './namespaceNormalize';
+import { isMemorySource, type MemorySource } from '../../../core/v4/memory/provenance';
+
+/** Model-supplied source, defaulting to the honest lower-trust `guess` — never
+ *  `said` for a model-initiated write unless the model explicitly says so. */
+function pickSource(raw: unknown): MemorySource {
+  return isMemorySource(raw) ? raw : 'guess';
+}
 
 export const memoryAddTool: ToolHandler = {
   schema: {
@@ -42,6 +49,12 @@ export const memoryAddTool: ToolHandler = {
           description: 'Which file to append to. `project` writes to <projectRoot>/.aiden/PROJECT.md and only works when Aiden detects a project root.',
         },
         content: { type: 'string', description: 'New entry to add.' },
+        source: {
+          type: 'string',
+          enum: ['said', 'saw', 'guess'],
+          description:
+            "Where this fact came from: 'said' = the user stated it; 'saw' = you derived it from tool output/evidence; 'guess' = you inferred it. Defaults to 'guess'. Only use 'said' when the user actually said it — a lower-trust source can never overwrite a higher-trust memory.",
+        },
       },
       required: ['file', 'content'],
     },
@@ -68,8 +81,9 @@ export const memoryAddTool: ToolHandler = {
     }
     const file = normalizeMemoryFile(args.file);
     const content = String(args.content ?? '');
+    const source = pickSource(args.source);
     try {
-      const r = await ctx.memoryGuard.guardedAdd(file, content);
+      const r = await ctx.memoryGuard.guardedAdd(file, content, source);
       return {
         success: r.ok,
         verified: r.verified,

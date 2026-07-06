@@ -50,6 +50,11 @@ import type { AidenPaths } from './paths';
 import type { MemoryProvider, MemorySnapshot } from './memoryProvider';
 // v4.9.0 Slice 11 — namespace registry generalizes 'memory'|'user' to N.
 import { getNamespace, hasNamespace, listNamespaces } from './memory/namespaceRegistry';
+// v4.14.x — provenance source tags (Option A: model-visible). Matching always
+// compares on the bare text; tagging is opt-in per call via `source`.
+import {
+  type MemorySource, entryText, formatEntry, parseEntry, canOverwrite,
+} from './memory/provenance';
 
 /**
  * Legacy two-namespace alias kept for backward compatibility with the
@@ -184,7 +189,12 @@ export class MemoryManager implements MemoryProvider {
     return { memoryMd, userMd, loadedAt: Date.now(), isEmpty: !anyContent, files };
   }
 
-  add(file: string, content: string): Promise<MutationResult> {
+  // v4.14.x — `source` is optional provenance (Option A). When provided the
+  // new entry is tagged `[source]`; when omitted it's written bare (unchanged
+  // legacy path, used by structural `replaceSection`). Matching below always
+  // compares `entryText(e)` (tag stripped), so tagged + legacy entries dedup
+  // and match identically.
+  add(file: string, content: string, source?: MemorySource): Promise<MutationResult> {
     return this.serialised(async () => {
       const trimmed = content.trim();
       if (!trimmed) {
@@ -194,21 +204,23 @@ export class MemoryManager implements MemoryProvider {
       const limit = limitFor(file);
       const entries = await readEntries(targetPath);
 
-      // Substring-duplicate detection: if the new note is already a
-      // sub-string of any existing entry (or vice-versa for trivial cases),
-      // skip the disk write but treat as success — the post-write state
-      // (content present in file) matches the caller's intent. Phase 21
-      // #2: this used to return ok=false, which surfaced as a spurious
-      // "attempted but not verified" warning when the model re-issued
-      // the same memory_add inside one turn.
-      const isDuplicate = entries.some(
-        (e) => e === trimmed || e.includes(trimmed),
-      );
+      // Substring-duplicate detection on the bare TEXT (never the tag): if the
+      // new note is already present, skip the disk write but treat as success —
+      // the post-write state matches the caller's intent. Phase 21 #2: this
+      // used to return ok=false, which surfaced a spurious "attempted but not
+      // verified" warning when the model re-issued the same memory_add.
+      const isDuplicate = entries.some((e) => {
+        const t = entryText(e);
+        return t === trimmed || t.includes(trimmed);
+      });
       if (isDuplicate) {
         return { ok: true, deduped: true };
       }
 
-      const next = [...entries, trimmed];
+      // Lazy migration: existing entries are preserved verbatim; only the NEW
+      // entry is tagged (when a source is given). No mass-rewrite of the file.
+      const newEntry = source ? formatEntry(source, trimmed) : trimmed;
+      const next = [...entries, newEntry];
       const projected = next.join(ENTRY_SEPARATOR);
       if (projected.length > limit) {
         return {
@@ -227,6 +239,7 @@ export class MemoryManager implements MemoryProvider {
     file: string,
     oldText: string,
     newText: string,
+    source?: MemorySource,
   ): Promise<MutationResult> {
     return this.serialised(async () => {
       const oldTrim = oldText.trim();
@@ -246,14 +259,14 @@ export class MemoryManager implements MemoryProvider {
 
       const matchIndices: number[] = [];
       for (let i = 0; i < entries.length; i += 1) {
-        if (entries[i].includes(oldTrim)) matchIndices.push(i);
+        if (entryText(entries[i]).includes(oldTrim)) matchIndices.push(i);
       }
 
       if (matchIndices.length === 0) {
         return { ok: false, reason: `Text not found: '${oldTrim}'.` };
       }
       if (matchIndices.length > 1) {
-        const distinct = new Set(matchIndices.map((i) => entries[i]));
+        const distinct = new Set(matchIndices.map((i) => entryText(entries[i])));
         if (distinct.size > 1) {
           return {
             ok: false,
@@ -264,8 +277,26 @@ export class MemoryManager implements MemoryProvider {
       }
 
       const idx = matchIndices[0];
+
+      // v4.14.x — provenance trust gate (only on the tagged path, i.e. when a
+      // `source` is supplied). A lower-trust source may not overwrite a
+      // higher-trust entry. Legacy untagged entries read as `said`, so a fresh
+      // `guess` can never wipe a pre-existing note. `said`/`saw` upgrades and
+      // same-trust updates pass through.
+      if (source) {
+        const current = parseEntry(entries[idx]).source;
+        if (!canOverwrite(source, current)) {
+          return {
+            ok: false,
+            reason:
+              `Refused: a '${source}' memory may not overwrite a higher-trust ` +
+              `'${current}' entry (trust order: said > saw > guess).`,
+          };
+        }
+      }
+
       const projectedEntries = [...entries];
-      projectedEntries[idx] = newTrim;
+      projectedEntries[idx] = source ? formatEntry(source, newTrim) : newTrim;
       const projected = projectedEntries.join(ENTRY_SEPARATOR);
       if (projected.length > limit) {
         return {
@@ -291,14 +322,14 @@ export class MemoryManager implements MemoryProvider {
 
       const matchIndices: number[] = [];
       for (let i = 0; i < entries.length; i += 1) {
-        if (entries[i].includes(trimmed)) matchIndices.push(i);
+        if (entryText(entries[i]).includes(trimmed)) matchIndices.push(i);
       }
 
       if (matchIndices.length === 0) {
         return { ok: false, reason: `Text not found: '${trimmed}'.` };
       }
       if (matchIndices.length > 1) {
-        const distinct = new Set(matchIndices.map((i) => entries[i]));
+        const distinct = new Set(matchIndices.map((i) => entryText(entries[i])));
         if (distinct.size > 1) {
           return {
             ok: false,

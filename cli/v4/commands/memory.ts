@@ -347,7 +347,8 @@ async function cmdAdd(
   try { nsPath = getNamespace(file).resolve(paths, findProjectRoot(process.cwd())); }
   catch (e) { err(`${file}: ${e instanceof Error ? e.message : String(e)}\n`); return 1; }
   await fs.mkdir(path.dirname(nsPath), { recursive: true });
-  const { memoryId, value: result } = await withMemorySpan(ctx, 'add', file, async () => guard.guardedAdd(file, content));
+  // A human running `aiden memory add` is stating this directly → `said`.
+  const { memoryId, value: result } = await withMemorySpan(ctx, 'add', file, async () => guard.guardedAdd(file, content, 'said'));
   if (!result.ok || !result.verified) {
     if (json) { out(JSON.stringify({ ok: false, reason: result.reason, mem_id: memoryId }) + '\n'); }
     else      { err(`add failed: ${result.reason ?? 'unknown'}\n`); }
@@ -607,7 +608,8 @@ async function cmdApprove(
     // the candidate text inside the pending block and short-circuits
     // to `deduped: true` without appending a live entry.
     await dropCandidate(filePath, c.memId);
-    await withMemorySpan(ctx, 'approve', c.file, async () => guard.guardedAdd(c.file, c.text));
+    // A human approved this candidate → promote it as `said`.
+    await withMemorySpan(ctx, 'approve', c.file, async () => guard.guardedAdd(c.file, c.text, 'said'));
     approved += 1;
   }
   if (json) { out(JSON.stringify({ ok: true, approved }) + '\n'); }

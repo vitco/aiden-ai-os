@@ -20,6 +20,7 @@
  */
 
 import type { MemoryFile, MutationResult } from './memoryManager';
+import type { MemorySource } from './memory/provenance';
 
 /**
  * Snapshot of the two memory files at session start. Frozen in the
@@ -67,7 +68,18 @@ export interface MemoryProvider {
    * flow through the provider contract. Legacy callers passing the
    * `'memory' | 'user'` literal still compile (subset of `string`).
    */
-  add(file: string, content: string): Promise<MutationResult>;
-  replace(file: string, oldText: string, newText: string): Promise<MutationResult>;
+  /**
+   * v4.14.x — optional `source` provenance label (Option A: model-visible). When
+   * provided, the new entry is tagged `[said]`/`[saw]`/`[guess]`. When omitted,
+   * the entry is written bare (unchanged legacy behaviour — used by structural
+   * `replaceSection` writes). Plugin providers may ignore it.
+   */
+  add(file: string, content: string, source?: MemorySource): Promise<MutationResult>;
+  /**
+   * v4.14.x — optional `source`. When provided, the trust gate applies (a
+   * lower-trust source may not overwrite a higher-trust entry) and the updated
+   * entry is re-tagged with `source`. When omitted, no gate + bare write.
+   */
+  replace(file: string, oldText: string, newText: string, source?: MemorySource): Promise<MutationResult>;
   remove(file: string, text: string): Promise<MutationResult>;
 }

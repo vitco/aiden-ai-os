@@ -38,6 +38,7 @@ import type {
 // callers passing 'memory' / 'user' continue to compile because the
 // string literals are assignable to the wider type.
 import type { MemoryFile } from '../core/v4/memoryManager';
+import type { MemorySource } from '../core/v4/memory/provenance';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _LegacyAlias = MemoryFile;
 
@@ -56,12 +57,13 @@ export class MemoryGuard {
   async guardedAdd(
     file: string,
     content: string,
+    source?: MemorySource,
   ): Promise<GuardedResult> {
     const trimmed = content.trim();
     if (!trimmed) {
       return { ok: false, verified: false, reason: 'Content cannot be empty.' };
     }
-    const result = await this.memory.add(file, trimmed);
+    const result = await this.memory.add(file, trimmed, source);
     if (!result.ok) {
       return {
         ok: false,
@@ -87,6 +89,7 @@ export class MemoryGuard {
     file: string,
     oldText: string,
     newText: string,
+    source?: MemorySource,
   ): Promise<GuardedResult> {
     const oldTrim = oldText.trim();
     const newTrim = newText.trim();
@@ -107,7 +110,7 @@ export class MemoryGuard {
         reason: 'oldText and newText are identical — nothing to replace.',
       };
     }
-    const result = await this.memory.replace(file, oldTrim, newTrim);
+    const result = await this.memory.replace(file, oldTrim, newTrim, source);
     if (!result.ok) {
       return {
         ok: false,

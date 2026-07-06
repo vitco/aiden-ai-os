@@ -21,12 +21,19 @@
 import type { ToolHandler } from '../../../core/v4/toolRegistry';
 import { truncatePreview } from '../../../core/v4/dryRun';
 import { normalizeMemoryFile, fileLabel } from './namespaceNormalize';
+import { isMemorySource, type MemorySource } from '../../../core/v4/memory/provenance';
+
+/** Model-supplied source, defaulting to the honest lower-trust `guess`. A
+ *  lower-trust source cannot overwrite a higher-trust entry (enforced below). */
+function pickSource(raw: unknown): MemorySource {
+  return isMemorySource(raw) ? raw : 'guess';
+}
 
 export const memoryReplaceTool: ToolHandler = {
   schema: {
     name: 'memory_replace',
     description:
-      'Replace one entry in MEMORY.md, USER.md, or PROJECT.md with new text. Substring match — fails if old_text is ambiguous. Returns verified=true only after the change is confirmed on disk.',
+      'Replace one entry in MEMORY.md, USER.md, or PROJECT.md with new text. Substring match — fails if old_text is ambiguous. Returns verified=true only after the change is confirmed on disk. A lower-trust source cannot overwrite a higher-trust entry (said > saw > guess).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -37,6 +44,12 @@ export const memoryReplaceTool: ToolHandler = {
         },
         old_text: { type: 'string', description: 'Substring of the entry to replace.' },
         new_text: { type: 'string', description: 'Replacement entry.' },
+        source: {
+          type: 'string',
+          enum: ['said', 'saw', 'guess'],
+          description:
+            "Where the new text came from: 'said' = user stated it; 'saw' = tool evidence; 'guess' = inferred. Defaults to 'guess'. A lower-trust source is refused when the existing entry is higher-trust.",
+        },
       },
       required: ['file', 'old_text', 'new_text'],
     },
@@ -65,8 +78,9 @@ export const memoryReplaceTool: ToolHandler = {
     const file = normalizeMemoryFile(args.file);
     const oldText = String(args.old_text ?? args.oldText ?? '');
     const newText = String(args.new_text ?? args.newText ?? '');
+    const source = pickSource(args.source);
     try {
-      const r = await ctx.memoryGuard.guardedReplace(file, oldText, newText);
+      const r = await ctx.memoryGuard.guardedReplace(file, oldText, newText, source);
       return {
         success: r.ok,
         verified: r.verified,

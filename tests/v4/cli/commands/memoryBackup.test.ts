@@ -82,8 +82,9 @@ describe('aiden memory backup/restore/diff — Slice 9', () => {
     const cap = capture();
     await runMemorySubcommand('diff', [], { rootDir: root, ...cap });
     const out = cap.out.join('');
-    expect(out).toMatch(/\+ add me/);
-    expect(out).toMatch(/- remove me/);
+    // v4.14.x — CLI-added entries carry a `[said]` provenance tag.
+    expect(out).toMatch(/\+ \[said\] add me/);
+    expect(out).toMatch(/- \[said\] remove me/);
   });
 
   it('diff with no backups errors gracefully', async () => {
